@@ -7,6 +7,7 @@
 #include "ARPGGameplayTags.h"
 #include "ARPGOffenseSet.h"
 #include "ARPGResistanceSet.h"
+#include "ARPGStatusEffectComponent.h"
 #include "ARPGVitalSet.h"
 
 namespace
@@ -107,13 +108,38 @@ void UARPGDamageExecution::Execute_Implementation(
 	const FARPGGameplayEffectContext* Context =
 		FARPGGameplayEffectContext::ExtractFrom(Spec.GetContext());
 
-	const UARPGDamageTypeAsset* DamageType =
-		Context ? Context->DamageType.Get() : nullptr;
+	// A periodic status effect declares its own damage type and per-stack
+	// amount, which take precedence over whatever the hit that applied it
+	// carried. Burning burns for fire damage regardless of what lit it.
+	const UARPGStatusEffectComponent* StatusInfo =
+		Spec.Def ? Spec.Def->FindComponent<UARPGStatusEffectComponent>() : nullptr;
+
+	const UARPGDamageTypeAsset* DamageType = nullptr;
+	if (StatusInfo && !StatusInfo->TickDamageType.IsNull())
+	{
+		DamageType = StatusInfo->TickDamageType.LoadSynchronous();
+	}
+	if (!DamageType && Context)
+	{
+		DamageType = Context->DamageType.Get();
+	}
 
 	// --- 2. Raw ---------------------------------------------------------------
 	// SetByCaller rather than a fixed magnitude: the number comes from the
 	// weapon/attack/spell at swing time, exactly as base_amount did in Godot.
-	const float BaseDamage = Spec.GetSetByCallerMagnitude(TAG_Data_Damage, /*WarnIfNotFound=*/false, 0.f);
+	//
+	// Scaled by stack count so a periodic status effect deals
+	// tick_damage_per_stack * stacks, matching StatusEffectInstance::tick(). A
+	// stack count cannot be baked into SetByCaller at spec creation because it
+	// changes while the effect is already running. Instant effects have a stack
+	// count of 1, so this is a no-op for ordinary hits.
+	// A status effect's per-stack amount is authored on the effect; everything
+	// else supplies it per-hit through SetByCaller.
+	const float PerApplication = (StatusInfo && StatusInfo->TickDamagePerStack > 0.f)
+		? StatusInfo->TickDamagePerStack
+		: Spec.GetSetByCallerMagnitude(TAG_Data_Damage, /*WarnIfNotFound=*/false, 0.f);
+
+	const float BaseDamage = PerApplication * FMath::Max(1, Spec.GetStackCount());
 
 	float AttackPower = 0.f;
 	ExecutionParams.AttemptCalculateCapturedAttributeMagnitude(S.AttackPowerDef, EvalParams, AttackPower);

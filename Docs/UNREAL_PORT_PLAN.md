@@ -274,9 +274,16 @@ One GameplayEffect asset per status effect. Stacking maps almost cleanly:
 |---|---|
 | `STACK_REFRESH` | `StackLimitCount=1`, `StackDurationRefreshPolicy=RefreshOnSuccessfulApplication` |
 | `STACK_ADDITIVE` | `StackLimitCount=MaxStacks`, refresh on application |
-| `STACK_EXTEND` | **No native equivalent** — custom `UGameplayEffectComponent` that reads remaining duration on application and re-applies at `Remaining + DefaultDuration` |
-| `STACK_REPLACE` | Remove-then-apply inside the `ApplyStatusEffect` helper |
-| `STACK_IGNORE` | Custom application requirement returning false when already present |
+| `STACK_EXTEND` | `StackDurationRefreshPolicy=ExtendDuration` — **native**, adds the new spec's duration onto the remaining time |
+| `STACK_REPLACE` | `StackLimitCount=1` + refresh. Not identical: GAS refreshes in place rather than removing and re-adding, so any on-remove side effect does not fire. Only matters for effects that have one |
+| `STACK_IGNORE` | `ApplicationTagRequirements.IgnoreTags` containing the effect's own granted status tag — **native**, a second application is blocked while the first is active |
+
+> **Corrected 2026-08-07.** This table previously claimed `STACK_EXTEND` had no
+> native equivalent and needed a custom component, and that `STACK_IGNORE` needed
+> a custom application requirement. Both are native in 5.8. Verified against
+> `EGameplayEffectStackingDurationPolicy` in `GameplayEffect.h` and the
+> `CarryOverDuration` path in `FActiveGameplayEffectsContainer`. All five Godot
+> stack behaviours are therefore configuration, not code.
 
 - `application_chance` → chance-to-apply GE component (server-rolled — see §3.5).
 - `tick_interval` / `tick_damage_per_stack` → GE `Period` plus a periodic execution reading
