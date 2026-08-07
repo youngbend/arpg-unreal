@@ -531,6 +531,33 @@ converter — and you'll want to retune during the port anyway.
 
 ## 9. Phase plan
 
+### Status
+
+**Phase 0 — done.** Five modules, GAS wired, tag registry. Verified by a headless
+boot logging `AbilitySystemGlobals init complete (globals class:
+ARPGAbilitySystemGlobals)`, which is the proof the ini registrations actually
+resolved rather than silently falling back to the base classes.
+
+**Phase 1 — done.** Attribute sets, damage execution, hitbox/hurtbox, faction
+filter, seven damage type assets. Verified three ways:
+
+- `ARPG.Combat.DamageMitigation` (11 cases), `ARPG.Combat.FactionHostility`
+  (13 assertions), `ARPG.Combat.HitboxDetection` (9 assertions incl. tunnelling).
+- MCP inspection of a live PIE session: attribute sets registered, faction tags
+  applied, `BeginPlay` initialisation confirmed on both the dummy and the
+  PlayerState-owned player ASC.
+- 2-client listen-server PIE: one swing against two dummies with different
+  mitigation, both replicating to the client:
+
+  | Dummy | Armor / Resist | Damage |
+  |---|---|---|
+  | control | 0 / 0 | 50 |
+  | mitigated | 10 / 0.5 | 20 |
+
+  20 is the number that distinguishes the orderings: resistance-first would give
+  15, armor-only 40. This is the live confirmation that armor applies flat,
+  physical-gated, before resistance.
+
 Each phase ends at something verifiable in-editor. From phase 1 onward, verify in **PIE with 2
 clients** (`Net Mode: Play As Listen Server`, 2 players) — catching authority bugs at the phase
 that introduces them is far cheaper than auditing later.
