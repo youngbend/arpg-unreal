@@ -14,6 +14,7 @@
 #include "ARPGPlayerState.h"
 #include "ARPGAbilitySystemComponent.h"
 #include "ARPGHitboxComponent.h"
+#include "ARPGDamageTypeAsset.h"
 #include "ARPGVitalSet.h"
 #include "TimerManager.h"
 

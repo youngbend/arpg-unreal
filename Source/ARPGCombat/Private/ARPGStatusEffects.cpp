@@ -2,6 +2,7 @@
 
 #include "ARPGStatusEffects.h"
 #include "ARPGDamageExecution.h"
+#include "ARPGDamageTypeAsset.h"
 #include "ARPGGameplayTags.h"
 #include "ARPGOffenseSet.h"
 #include "ARPGResistanceSet.h"
@@ -12,15 +13,6 @@
 
 namespace
 {
-	/** Grants a tag to whoever the effect is applied to, for the effect's lifetime. */
-	void GrantTag(UGameplayEffect& Effect, const FGameplayTag& Tag)
-	{
-		FInheritedTagContainer Granted;
-		Granted.Added.AddTag(Tag);
-		Effect.FindOrAddComponent<UTargetTagsGameplayEffectComponent>()
-			.SetAndApplyTargetTagChanges(Granted);
-	}
-
 	/** Adds a periodic damage tick using the shared damage pipeline. */
 	void AddDamageTick(UGameplayEffect& Effect, float Period)
 	{
@@ -70,7 +62,7 @@ UARPGStatusGameplayEffect::UARPGStatusGameplayEffect()
 	StackPeriodResetPolicy = EGameplayEffectStackingPeriodPolicy::ResetOnSuccessfulApplication;
 
 	// The alive gate and target resistance apply to every status.
-	AddComponent<UARPGStatusApplicationComponent>();
+	AddDefaultComponent<UARPGStatusApplicationComponent>(TEXT("StatusApplication"));
 }
 
 // ---------------------------------------------------------------------------
@@ -80,7 +72,7 @@ UARPGStatusEffect_Burning::UARPGStatusEffect_Burning()
 	DurationMagnitude = FGameplayEffectModifierMagnitude(FScalableFloat(5.f));
 	StackLimitCount = 5;
 
-	UARPGStatusEffectComponent& Status = AddComponent<UARPGStatusEffectComponent>();
+	UARPGStatusEffectComponent& Status = AddDefaultComponent<UARPGStatusEffectComponent>(TEXT("StatusInfo"));
 	Status.StatusTag = TAG_Status_Burning;
 	Status.DisplayName = NSLOCTEXT("ARPGStatus", "Burning", "Burning");
 	Status.bIsDebuff = true;
@@ -91,7 +83,12 @@ UARPGStatusEffect_Burning::UARPGStatusEffect_Burning()
 		FSoftObjectPath(TEXT("/Game/ARPG/DamageTypes/DA_Damage_Fire.DA_Damage_Fire")));
 
 	AddDamageTick(*this, /*Period=*/1.f);
-	GrantTag(*this, TAG_Status_Burning);
+	{
+		FInheritedTagContainer Granted;
+		Granted.Added.AddTag(TAG_Status_Burning);
+		AddDefaultComponent<UTargetTagsGameplayEffectComponent>(TEXT("TargetTags"))
+			.SetAndApplyTargetTagChanges(Granted);
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -101,7 +98,7 @@ UARPGStatusEffect_Shocked::UARPGStatusEffect_Shocked()
 	DurationMagnitude = FGameplayEffectModifierMagnitude(FScalableFloat(3.f));
 	StackLimitCount = 3;
 
-	UARPGStatusEffectComponent& Status = AddComponent<UARPGStatusEffectComponent>();
+	UARPGStatusEffectComponent& Status = AddDefaultComponent<UARPGStatusEffectComponent>(TEXT("StatusInfo"));
 	Status.StatusTag = TAG_Status_Shocked;
 	Status.DisplayName = NSLOCTEXT("ARPGStatus", "Shocked", "Shocked");
 	Status.bIsDebuff = true;
@@ -112,7 +109,12 @@ UARPGStatusEffect_Shocked::UARPGStatusEffect_Shocked()
 		FSoftObjectPath(TEXT("/Game/ARPG/DamageTypes/DA_Damage_Lightning.DA_Damage_Lightning")));
 
 	AddDamageTick(*this, /*Period=*/0.5f);
-	GrantTag(*this, TAG_Status_Shocked);
+	{
+		FInheritedTagContainer Granted;
+		Granted.Added.AddTag(TAG_Status_Shocked);
+		AddDefaultComponent<UTargetTagsGameplayEffectComponent>(TEXT("TargetTags"))
+			.SetAndApplyTargetTagChanges(Granted);
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -122,7 +124,7 @@ UARPGStatusEffect_Wet::UARPGStatusEffect_Wet()
 	DurationMagnitude = FGameplayEffectModifierMagnitude(FScalableFloat(6.f));
 	StackLimitCount = 3;
 
-	UARPGStatusEffectComponent& Status = AddComponent<UARPGStatusEffectComponent>();
+	UARPGStatusEffectComponent& Status = AddDefaultComponent<UARPGStatusEffectComponent>(TEXT("StatusInfo"));
 	Status.StatusTag = TAG_Status_Wet;
 	Status.DisplayName = NSLOCTEXT("ARPGStatus", "Wet", "Wet");
 	Status.bIsDebuff = false; // being soaked is protective here
@@ -138,13 +140,18 @@ UARPGStatusEffect_Wet::UARPGStatusEffect_Wet()
 	// Wet and Burning cannot coexist -- target.remove_status_effect("burning"),
 	// natively.
 	URemoveOtherGameplayEffectComponent& Remove =
-		AddComponent<URemoveOtherGameplayEffectComponent>();
+		AddDefaultComponent<URemoveOtherGameplayEffectComponent>(TEXT("RemoveBurning"));
 	FGameplayEffectQuery Query;
 	Query.OwningTagQuery = FGameplayTagQuery::MakeQuery_MatchAnyTags(
 		FGameplayTagContainer(TAG_Status_Burning));
 	Remove.RemoveGameplayEffectQueries.Add(Query);
 
-	GrantTag(*this, TAG_Status_Wet);
+	{
+		FInheritedTagContainer Granted;
+		Granted.Added.AddTag(TAG_Status_Wet);
+		AddDefaultComponent<UTargetTagsGameplayEffectComponent>(TEXT("TargetTags"))
+			.SetAndApplyTargetTagChanges(Granted);
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -154,7 +161,7 @@ UARPGStatusEffect_Weakened::UARPGStatusEffect_Weakened()
 	DurationMagnitude = FGameplayEffectModifierMagnitude(FScalableFloat(8.f));
 	StackLimitCount = 1;
 
-	UARPGStatusEffectComponent& Status = AddComponent<UARPGStatusEffectComponent>();
+	UARPGStatusEffectComponent& Status = AddDefaultComponent<UARPGStatusEffectComponent>(TEXT("StatusInfo"));
 	Status.StatusTag = TAG_Status_Weakened;
 	Status.DisplayName = NSLOCTEXT("ARPGStatus", "Weakened", "Weakened");
 	Status.bIsDebuff = true;
@@ -167,5 +174,10 @@ UARPGStatusEffect_Weakened::UARPGStatusEffect_Weakened()
 	AddMultiplyModifier(*this, UARPGOffenseSet::GetDamageAmpMultiplierAttribute(),
 		DamageAmpMultiplier);
 
-	GrantTag(*this, TAG_Status_Weakened);
+	{
+		FInheritedTagContainer Granted;
+		Granted.Added.AddTag(TAG_Status_Weakened);
+		AddDefaultComponent<UTargetTagsGameplayEffectComponent>(TEXT("TargetTags"))
+			.SetAndApplyTargetTagChanges(Granted);
+	}
 }

@@ -7,6 +7,9 @@
 #include "GameplayTagContainer.h"
 #include "ARPGStatusEffectComponent.generated.h"
 
+class UARPGDamageTypeAsset;
+class UTexture2D;
+
 /**
  * How a status VFX is placed on whatever is carrying the effect, given bounds
  * measured from that thing's own geometry.
@@ -82,7 +85,7 @@ public:
 	 * Soft, so declaring one costs no hard content reference from C++.
 	 */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Tick")
-	TSoftObjectPtr<class UARPGDamageTypeAsset> TickDamageType;
+	TSoftObjectPtr<UARPGDamageTypeAsset> TickDamageType;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Tick",
 		meta = (ClampMin = "0.0"))

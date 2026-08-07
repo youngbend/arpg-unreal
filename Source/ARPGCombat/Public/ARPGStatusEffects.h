@@ -39,6 +39,25 @@ class ARPGCOMBAT_API UARPGStatusGameplayEffect : public UGameplayEffect
 
 public:
 	UARPGStatusGameplayEffect();
+
+protected:
+	/**
+	 * Adds a GameplayEffectComponent from a constructor.
+	 *
+	 * UGameplayEffect::AddComponent() must NOT be used here: it calls NewObject,
+	 * which is fatal inside a UObject constructor ("NewObject with empty name
+	 * can't be used to create default subobjects"). That API is for effects
+	 * built dynamically at runtime. Constructing a CDO's components requires
+	 * CreateDefaultSubobject, which is what this wraps -- and it is why every
+	 * component here needs a stable unique name.
+	 */
+	template <typename ComponentType>
+	ComponentType& AddDefaultComponent(const TCHAR* SubobjectName)
+	{
+		ComponentType* Component = CreateDefaultSubobject<ComponentType>(SubobjectName);
+		GEComponents.Add(Component);
+		return *Component;
+	}
 };
 
 /**
