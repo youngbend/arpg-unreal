@@ -1,0 +1,33 @@
+# Unreal Engine generated directories
+Binaries/
+Build/
+DerivedDataCache/
+Intermediate/
+Saved/
+
+# Plugin build output (plugin *source* is tracked; only its artefacts are not)
+Plugins/**/Binaries/
+Plugins/**/Intermediate/
+
+# Visual Studio / Rider / IDE
+.vs/
+.idea/
+*.VC.db
+*.VC.opendb
+*.opensdf
+*.opendb
+*.sdf
+*.suo
+*.user
+*.userprefs
+*.xcodeproj
+*.xcworkspace
+
+# Generated solution files — regenerate from the .uproject instead
+*.sln
+*.slnx
+
+# OS noise
+Thumbs.db
+Desktop.ini
+.DS_Store
