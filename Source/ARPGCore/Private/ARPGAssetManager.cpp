@@ -31,4 +31,12 @@ void UARPGAssetManager::StartInitialLoading()
 	// See the header: this is the safe point in startup for it, and skipping it
 	// breaks ability prediction and target-data replication.
 	UAbilitySystemGlobals::Get().InitGlobalData();
+
+	// Deliberately logged rather than silent. A wrong AssetManagerClassName in
+	// DefaultEngine.ini does not error -- the engine just constructs the base
+	// UAssetManager, this override never runs, and GAS breaks much later
+	// somewhere unrelated. Seeing this line is the cheap proof it is wired up.
+	UE_LOG(LogARPGCore, Log,
+		TEXT("UARPGAssetManager::StartInitialLoading -- AbilitySystemGlobals init complete (globals class: %s)"),
+		*GetNameSafe(UAbilitySystemGlobals::Get().GetClass()));
 }
