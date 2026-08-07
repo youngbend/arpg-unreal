@@ -65,6 +65,11 @@ AarpgCharacter::AarpgCharacter()
 	DebugHitbox->BaseDamage = 50.f;
 	DebugHitbox->PoiseDamage = 10.f;
 	DebugHitbox->DeactivateHitbox();
+
+	// Soft path only -- nothing loads here. See the header for why the debug
+	// harness names content at all.
+	DebugDamageType = TSoftObjectPtr<UARPGDamageTypeAsset>(
+		FSoftObjectPath(TEXT("/Game/ARPG/DamageTypes/DA_Damage_Physical.DA_Damage_Physical")));
 }
 
 void AarpgCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
@@ -214,6 +219,20 @@ void AarpgCharacter::ServerDebugSwing_Implementation()
 	if (!DebugHitbox)
 	{
 		return;
+	}
+
+	// Resolved lazily rather than in the constructor, so a missing or moved
+	// asset degrades to the execution's warning instead of a load failure at
+	// class-construction time.
+	if (!DebugHitbox->DamageType && !DebugDamageType.IsNull())
+	{
+		DebugHitbox->DamageType = DebugDamageType.LoadSynchronous();
+		if (!DebugHitbox->DamageType)
+		{
+			UE_LOG(Logarpg, Warning,
+				TEXT("Debug swing could not load damage type '%s'; the hit will be unmitigated."),
+				*DebugDamageType.ToString());
+		}
 	}
 
 	DebugHitbox->ActivateHitbox();

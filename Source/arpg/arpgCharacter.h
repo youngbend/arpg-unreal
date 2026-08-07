@@ -13,6 +13,7 @@ class UCameraComponent;
 class UInputAction;
 class UARPGAbilitySystemComponent;
 class UARPGHitboxComponent;
+class UARPGDamageTypeAsset;
 struct FInputActionValue;
 
 DECLARE_LOG_CATEGORY_EXTERN(LogTemplateCharacter, Log, All);
@@ -148,6 +149,21 @@ protected:
 
 	UPROPERTY(VisibleAnywhere, Category = "ARPG|Debug")
 	TObjectPtr<UARPGHitboxComponent> DebugHitbox;
+
+	/**
+	 *  Damage type stamped onto debug swings.
+	 *
+	 *  Without one, UARPGDamageExecution has no categories, penetration or
+	 *  resistance attribute to work from, so it warns and deals the raw number
+	 *  unmitigated -- which looks correct against a target that happens to have
+	 *  no armor or resistance, and is silently wrong against anything else.
+	 *
+	 *  A soft reference, resolved on first swing: this is the one place the
+	 *  debug harness needs to name content, and a soft path keeps that out of
+	 *  the constructor and non-fatal if the asset is ever moved or deleted.
+	 */
+	UPROPERTY(EditAnywhere, Category = "ARPG|Debug")
+	TSoftObjectPtr<UARPGDamageTypeAsset> DebugDamageType;
 
 	/** How long the debug hitbox stays armed, in seconds. */
 	UPROPERTY(EditAnywhere, Category = "ARPG|Debug", meta = (ClampMin = "0.01"))
