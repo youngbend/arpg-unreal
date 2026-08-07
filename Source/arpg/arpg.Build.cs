@@ -18,34 +18,27 @@ public class arpg : ModuleRules
 			"StateTreeModule",
 			"GameplayStateTreeModule",
 			"UMG",
-			"Slate"
+			"Slate",
+			"SlateCore",
+
+			// Gameplay Ability System.
+			"GameplayAbilities",
+			"GameplayTags",
+			"GameplayTasks",
+
+			// ARPG runtime modules. The game module sits on top of the whole
+			// chain; see Docs/UNREAL_PORT_PLAN.md section 2 for the DAG.
+			"ARPGCore",
+			"ARPGCombat",
+			"ARPGMagic",
+			"ARPGWorld",
+			"ARPGAI"
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[] { });
 
 		PublicIncludePaths.AddRange(new string[] {
-			"arpg",
-			"arpg/Variant_Platforming",
-			"arpg/Variant_Platforming/Animation",
-			"arpg/Variant_Combat",
-			"arpg/Variant_Combat/AI",
-			"arpg/Variant_Combat/Animation",
-			"arpg/Variant_Combat/Gameplay",
-			"arpg/Variant_Combat/Interfaces",
-			"arpg/Variant_Combat/UI",
-			"arpg/Variant_SideScrolling",
-			"arpg/Variant_SideScrolling/AI",
-			"arpg/Variant_SideScrolling/Gameplay",
-			"arpg/Variant_SideScrolling/Interfaces",
-			"arpg/Variant_SideScrolling/UI"
+			"arpg"
 		});
-
-		// Uncomment if you are using Slate UI
-		// PrivateDependencyModuleNames.AddRange(new string[] { "Slate", "SlateCore" });
-
-		// Uncomment if you are using online features
-		// PrivateDependencyModuleNames.Add("OnlineSubsystem");
-
-		// To include OnlineSubsystemSteam, add it to the plugins section in your uproject file with the Enabled attribute set to true
 	}
 }

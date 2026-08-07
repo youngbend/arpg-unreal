@@ -10,6 +10,8 @@ public class arpgEditorTarget : TargetRules
 		Type = TargetType.Editor;
 		DefaultBuildSettings = BuildSettingsVersion.V7;
 		IncludeOrderVersion = EngineIncludeOrderVersion.Unreal5_8;
-		ExtraModuleNames.Add("arpg");
+		ExtraModuleNames.AddRange(new string[] {
+			"ARPGCore", "ARPGCombat", "ARPGMagic", "ARPGWorld", "ARPGAI", "arpg"
+		});
 	}
 }

@@ -11,6 +11,8 @@
 #include "EnhancedInputSubsystems.h"
 #include "InputActionValue.h"
 #include "arpg.h"
+#include "ARPGPlayerState.h"
+#include "ARPGAbilitySystemComponent.h"
 
 AarpgCharacter::AarpgCharacter()
 {
@@ -130,4 +132,47 @@ void AarpgCharacter::DoJumpEnd()
 {
 	// signal the character to stop jumping
 	StopJumping();
+}
+
+UAbilitySystemComponent* AarpgCharacter::GetAbilitySystemComponent() const
+{
+	return CachedAbilitySystemComponent;
+}
+
+void AarpgCharacter::PossessedBy(AController* NewController)
+{
+	Super::PossessedBy(NewController);
+
+	// Server path: the PlayerState exists by the time possession happens.
+	InitAbilityActorInfo();
+}
+
+void AarpgCharacter::OnRep_PlayerState()
+{
+	Super::OnRep_PlayerState();
+
+	// Client path: this is the first moment the PlayerState (and so the ASC)
+	// is actually available locally.
+	InitAbilityActorInfo();
+}
+
+void AarpgCharacter::InitAbilityActorInfo()
+{
+	AARPGPlayerState* ARPGPlayerState = GetPlayerState<AARPGPlayerState>();
+	if (!ARPGPlayerState)
+	{
+		return;
+	}
+
+	CachedAbilitySystemComponent = ARPGPlayerState->GetARPGAbilitySystemComponent();
+	if (!CachedAbilitySystemComponent)
+	{
+		return;
+	}
+
+	// Owner is the PlayerState (which holds the component); Avatar is this pawn
+	// (what abilities animate, trace from, and attach effects to). Getting these
+	// the wrong way round is what makes montages fail to play on a possessed
+	// pawn while attributes still appear to work.
+	CachedAbilitySystemComponent->InitAbilityActorInfo(ARPGPlayerState, this);
 }

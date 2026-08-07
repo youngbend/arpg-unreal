@@ -1,38 +1,67 @@
 {
-  "FileVersion": 3,
-  "EngineAssociation": "5.8",
-  "Category": "",
-  "Description": "",
-  "Modules": [
-    {
-      "Name": "arpg",
-      "Type": "Runtime",
-      "LoadingPhase": "Default"
-    }
-  ],
-  "Plugins": [
-    {
-      "Name": "ModelingToolsEditorMode",
-      "Enabled": true
-    },
-    {
-      "Name": "StateTree",
-      "Enabled": true
-    },
-    {
-      "Name": "GameplayStateTree",
-      "Enabled": true
-    },
-    {
-      "Name": "VisualStudioTools",
-      "Enabled": true,
-      "SupportedTargetPlatforms": [
-        "Win64"
-      ]
-    }
-  ],
-  "TargetPlatforms": [],
-  "AdditionalRootDirectories": [],
-  "AdditionalPluginDirectories": [],
-  "EpicSampleNameHash": ""
+	"FileVersion": 3,
+	"EngineAssociation": "5.8",
+	"Category": "",
+	"Description": "",
+	"Modules": [
+		{
+			"Name": "ARPGCore",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "ARPGCombat",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "ARPGMagic",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "ARPGWorld",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "ARPGAI",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "arpg",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	],
+	"Plugins": [
+		{
+			"Name": "ModelingToolsEditorMode",
+			"Enabled": true
+		},
+		{
+			"Name": "StateTree",
+			"Enabled": true
+		},
+		{
+			"Name": "GameplayStateTree",
+			"Enabled": true
+		},
+		{
+			"Name": "GameplayAbilities",
+			"Enabled": true
+		},
+		{
+			"Name": "VisualStudioTools",
+			"Enabled": true,
+			"SupportedTargetPlatforms": [
+				"Win64"
+			]
+		}
+	],
+	"TargetPlatforms": [],
+	"AdditionalRootDirectories": [],
+	"AdditionalPluginDirectories": [],
+	"EpicSampleNameHash": ""
 }
