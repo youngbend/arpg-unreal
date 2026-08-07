@@ -110,9 +110,9 @@ void UARPGVitalSet::PostGameplayEffectExecute(const FGameplayEffectModCallbackDa
 			SetHealth(FMath::Clamp(GetHealth() + LocalHealing, 0.f, GetMaxHealth()));
 		}
 	}
-	// Poise builds toward MaxPoise. Phase 3 reads the size of this single
-	// contribution here to decide light flinch / heavy flinch / stance break,
-	// which is why the raw amount is kept rather than only the running total.
+	// Poise is NOT accumulated here -- see OnPoiseDamageReceived in the header.
+	// The size of this one contribution is what decides a flinch tier, so it is
+	// handed on intact rather than folded into the running total first.
 	else if (Data.EvaluatedData.Attribute == GetIncomingPoiseDamageAttribute())
 	{
 		const float LocalPoiseDamage = GetIncomingPoiseDamage();
@@ -120,7 +120,7 @@ void UARPGVitalSet::PostGameplayEffectExecute(const FGameplayEffectModCallbackDa
 
 		if (LocalPoiseDamage > 0.f)
 		{
-			SetPoise(FMath::Clamp(GetPoise() + LocalPoiseDamage, 0.f, GetMaxPoise()));
+			OnPoiseDamageReceived.Broadcast(LocalPoiseDamage);
 		}
 	}
 	// Non-meta attributes changed directly by an effect still need clamping --

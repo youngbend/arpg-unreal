@@ -6,6 +6,8 @@
 #include "ARPGGameplayEffectContext.h"
 #include "ARPGGameplayTags.h"
 #include "ARPGOffenseSet.h"
+#include "ARPGParryComponent.h"
+#include "ARPGPoiseComponent.h"
 #include "ARPGResistanceSet.h"
 #include "ARPGStatusEffectComponent.h"
 #include "ARPGVitalSet.h"
@@ -233,16 +235,86 @@ void UARPGDamageExecution::Execute_Implementation(
 			*GetNameSafe(Spec.Def));
 	}
 
-	// --- 6. Final -------------------------------------------------------------
-	float Final = Raw * (1.f - EffectiveResistance);
+	// --- 6. Resisted, then intercepted ----------------------------------------
+	const float ResistedDamage = Raw * (1.f - EffectiveResistance);
 
-	// PHASE 3 INSERTS HERE: parry/block interception multiplies Final, and a
-	// successful intercept redirects poise damage to the ATTACKER's meter
-	// instead of the victim's (see the poise block below).
-	// PHASE 5 INSERTS AFTER THAT: cloak absorption subtracts from Final last,
-	// measured against the already-mitigated number.
+	AActor* TargetActor = nullptr;
+	if (const UAbilitySystemComponent* TargetASCConst = ExecutionParams.GetTargetAbilitySystemComponent())
+	{
+		TargetActor = TargetASCConst->GetAvatarActor();
+	}
 
-	Final = FMath::Max(0.f, Final);
+	// Unblockable bypasses the guard entirely -- it must be dodged. Checked
+	// before the component is even consulted, so an unblockable hit cannot
+	// consume a parry window either.
+	EARPGInterceptResult Intercept = EARPGInterceptResult::None;
+	float InterceptMultiplier = 1.f;
+
+	UARPGParryComponent* Parry = (Context && Context->bUnblockable)
+		? nullptr
+		: (TargetActor ? TargetActor->FindComponentByClass<UARPGParryComponent>() : nullptr);
+
+	if (Parry)
+	{
+		Intercept = Parry->TryIntercept();
+		if (Intercept == EARPGInterceptResult::Parried)
+		{
+			InterceptMultiplier = 1.f - Parry->ParryDamageReduction;
+		}
+		else if (Intercept == EARPGInterceptResult::Blocked)
+		{
+			InterceptMultiplier = 1.f - Parry->BlockDamageReduction;
+		}
+	}
+
+	float Final = FMath::Max(0.f, ResistedDamage * InterceptMultiplier);
+
+	// What the guard actually stopped, measured BEFORE any later absorption.
+	// Stamina must be charged for what the block stopped, not for damage a
+	// magic shield would have eaten anyway.
+	const float Blocked = ResistedDamage - Final;
+
+	// PHASE 5 INSERTS HERE: cloak absorption subtracts from Final last, against
+	// the already-mitigated number.
+
+	// --- Interception costs and feedback --------------------------------------
+	if (Parry && Intercept != EARPGInterceptResult::None)
+	{
+		UAbilitySystemComponent* TargetASC =
+			const_cast<UAbilitySystemComponent*>(ExecutionParams.GetTargetAbilitySystemComponent());
+
+		if (TargetASC)
+		{
+			const float StaminaCost = (Intercept == EARPGInterceptResult::Parried)
+				? Parry->ParryStaminaCost
+				: Blocked * Parry->BlockStaminaMultiplier;
+
+			if (StaminaCost > 0.f)
+			{
+				const float Current = TargetASC->GetNumericAttribute(UARPGVitalSet::GetStaminaAttribute());
+				TargetASC->SetNumericAttributeBase(UARPGVitalSet::GetStaminaAttribute(),
+					FMath::Max(0.f, Current - StaminaCost));
+			}
+		}
+
+		// Defensive poise: a successful guard pushes back on the ATTACKER's
+		// stance instead of the defender's. This is the pressure that makes
+		// blocking an offensive act rather than pure attrition.
+		if (const UAbilitySystemComponent* SourceASC = ExecutionParams.GetSourceAbilitySystemComponent())
+		{
+			if (AActor* AttackerActor = SourceASC->GetAvatarActor())
+			{
+				if (UARPGPoiseComponent* AttackerPoise =
+						AttackerActor->FindComponentByClass<UARPGPoiseComponent>())
+				{
+					AttackerPoise->ApplyPoiseDamage(
+						Intercept == EARPGInterceptResult::Parried
+							? AttackerPoise->ParryPoiseDamage
+							: AttackerPoise->BlockPoiseDamage);
+				}
+			}
+		}
+	}
 
 	if (Final > 0.f)
 	{
@@ -254,7 +326,11 @@ void UARPGDamageExecution::Execute_Implementation(
 	// Rides the same execution so a hit and its stagger contribution land
 	// atomically. In Godot these were sequential statements in receive_damage();
 	// splitting them across two effects would let one apply without the other.
-	if (Context && Context->PoiseDamage > 0.f)
+	//
+	// Only an UNINTERCEPTED hit fills the victim's meter -- a parried or blocked
+	// hit already pushed poise onto the attacker above instead. Applying both
+	// would let a defender be staggered by a blow they successfully guarded.
+	if (Context && Context->PoiseDamage > 0.f && Intercept == EARPGInterceptResult::None)
 	{
 		OutExecutionOutput.AddOutputModifier(FGameplayModifierEvaluatedData(
 			UARPGVitalSet::GetIncomingPoiseDamageAttribute(), EGameplayModOp::Additive, Context->PoiseDamage));

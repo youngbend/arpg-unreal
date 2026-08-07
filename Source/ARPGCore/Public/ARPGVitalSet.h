@@ -7,6 +7,15 @@
 #include "ARPGVitalSet.generated.h"
 
 /**
+ * Broadcast with the size of a SINGLE poise contribution, before anything has
+ * been accumulated.
+ *
+ * The size of one hit is what decides a flinch tier -- not the running total --
+ * so it has to be handed on rather than folded into the attribute first.
+ */
+DECLARE_MULTICAST_DELEGATE_OneParam(FARPGOnPoiseDamageReceived, float /*Amount*/);
+
+/**
  * Health, stamina, mana and poise.
  *
  * Replaces Godot's CombatComponent (health) and ResourceComponent (stamina/mana)
@@ -93,6 +102,22 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Vitals|Meta")
 	FGameplayAttributeData IncomingPoiseDamage;
 	ATTRIBUTE_ACCESSORS(UARPGVitalSet, IncomingPoiseDamage)
+
+	/**
+	 * Fired when poise damage arrives. This set deliberately does NOT accumulate
+	 * it into the Poise attribute.
+	 *
+	 * Resolving poise means owning flinch thresholds, a stance-break immunity
+	 * window and hold-then-drain decay -- all of which live in
+	 * UARPGPoiseComponent over in ARPGCombat, which sits ABOVE this module and
+	 * cannot be reached from here. Handing the raw contribution over keeps the
+	 * dependency pointing one way, and keeps an attribute set doing what an
+	 * attribute set should.
+	 *
+	 * A character with no poise component therefore has no stance, which is the
+	 * correct behaviour rather than a gap.
+	 */
+	FARPGOnPoiseDamageReceived OnPoiseDamageReceived;
 
 protected:
 	UFUNCTION() void OnRep_Health(const FGameplayAttributeData& OldValue);
