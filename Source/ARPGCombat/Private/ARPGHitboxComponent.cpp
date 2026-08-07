@@ -11,6 +11,7 @@
 #include "ARPGOffenseSet.h"
 #include "AbilitySystemComponent.h"
 #include "AbilitySystemGlobals.h"
+#include "DrawDebugHelpers.h"
 #include "Engine/OverlapResult.h"
 #include "Engine/World.h"
 
@@ -132,6 +133,23 @@ void UARPGHitboxComponent::PerformSweep()
 	// still reports overlaps at that point, so a stationary hazard keeps working.
 	GetWorld()->SweepMultiByObjectType(Hits, Start, End, FQuat::Identity, ObjectParams,
 		FCollisionShape::MakeSphere(TraceRadius), QueryParams);
+
+#if ENABLE_DRAW_DEBUG
+	if (bDrawDebugTrace)
+	{
+		const FColor SweepColour = Hits.Num() > 0 ? FColor::Green : FColor::Red;
+		DrawDebugSphere(GetWorld(), Start, TraceRadius, 12, SweepColour, false, 1.f);
+		if (!Start.Equals(End))
+		{
+			DrawDebugSphere(GetWorld(), End, TraceRadius, 12, SweepColour, false, 1.f);
+			DrawDebugLine(GetWorld(), Start, End, SweepColour, false, 1.f);
+		}
+		for (const FHitResult& Hit : Hits)
+		{
+			DrawDebugPoint(GetWorld(), Hit.ImpactPoint, 12.f, FColor::Yellow, false, 1.f);
+		}
+	}
+#endif
 
 	AActor* Source = ResolveSourceActor();
 

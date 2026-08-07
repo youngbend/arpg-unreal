@@ -12,6 +12,7 @@ class USpringArmComponent;
 class UCameraComponent;
 class UInputAction;
 class UARPGAbilitySystemComponent;
+class UARPGHitboxComponent;
 struct FInputActionValue;
 
 DECLARE_LOG_CATEGORY_EXTERN(LogTemplateCharacter, Log, All);
@@ -114,6 +115,45 @@ protected:
 
 	UPROPERTY(Transient)
 	TObjectPtr<UARPGAbilitySystemComponent> CachedAbilitySystemComponent;
+
+	// --- Debug harness --------------------------------------------------------
+	//
+	// A stand-in for the real weapon hitbox, which does not exist until phase 4
+	// wires attacks to montages. Exists so the phase 1 damage pipeline can be
+	// exercised end-to-end in PIE -- hitbox sweep, faction filter, execution,
+	// attribute change, replication -- without waiting three phases for an
+	// animation system.
+	//
+	// Console commands rather than input bindings: a new binding would need an
+	// InputAction asset and an IMC entry, which is content authoring for
+	// something that should disappear by phase 4.
+
+	/** Arms the debug hitbox briefly. Routes through the server so it works from a client. */
+	UFUNCTION(Exec)
+	void ARPGSwing();
+
+	/** Prints this character's vitals, on whichever machine you type it. */
+	UFUNCTION(Exec)
+	void ARPGStats();
+
+	/** Toggles trace visualisation for the debug hitbox. */
+	UFUNCTION(Exec)
+	void ARPGDebugDraw(bool bEnabled);
+
+protected:
+	UFUNCTION(Server, Reliable)
+	void ServerDebugSwing();
+
+	void EndDebugSwing();
+
+	UPROPERTY(VisibleAnywhere, Category = "ARPG|Debug")
+	TObjectPtr<UARPGHitboxComponent> DebugHitbox;
+
+	/** How long the debug hitbox stays armed, in seconds. */
+	UPROPERTY(EditAnywhere, Category = "ARPG|Debug", meta = (ClampMin = "0.01"))
+	float DebugSwingDuration = 0.2f;
+
+	FTimerHandle DebugSwingTimer;
 
 public:
 

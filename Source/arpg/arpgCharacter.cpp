@@ -13,6 +13,9 @@
 #include "arpg.h"
 #include "ARPGPlayerState.h"
 #include "ARPGAbilitySystemComponent.h"
+#include "ARPGHitboxComponent.h"
+#include "ARPGVitalSet.h"
+#include "TimerManager.h"
 
 AarpgCharacter::AarpgCharacter()
 {
@@ -48,8 +51,20 @@ AarpgCharacter::AarpgCharacter()
 	FollowCamera->SetupAttachment(CameraBoom, USpringArmComponent::SocketName);
 	FollowCamera->bUsePawnControlRotation = false;
 
-	// Note: The skeletal mesh and anim blueprint references on the Mesh component (inherited from Character) 
+	// Note: The skeletal mesh and anim blueprint references on the Mesh component (inherited from Character)
 	// are set in the derived blueprint asset named ThirdPersonCharacter (to avoid direct content references in C++)
+
+	// Debug hitbox -- see the header. Parked in front of the character rather
+	// than on a hand socket: a socket ties this to whichever skeleton the
+	// Blueprint happens to assign, and a fixed forward offset is easier to aim
+	// deliberately when the point is to verify damage numbers, not swing arcs.
+	DebugHitbox = CreateDefaultSubobject<UARPGHitboxComponent>(TEXT("DebugHitbox"));
+	DebugHitbox->SetupAttachment(RootComponent);
+	DebugHitbox->SetRelativeLocation(FVector(90.f, 0.f, 0.f));
+	DebugHitbox->TraceRadius = 60.f;
+	DebugHitbox->BaseDamage = 50.f;
+	DebugHitbox->PoiseDamage = 10.f;
+	DebugHitbox->DeactivateHitbox();
 }
 
 void AarpgCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
@@ -175,4 +190,80 @@ void AarpgCharacter::InitAbilityActorInfo()
 	// the wrong way round is what makes montages fail to play on a possessed
 	// pawn while attributes still appear to work.
 	CachedAbilitySystemComponent->InitAbilityActorInfo(ARPGPlayerState, this);
+}
+
+// --- Debug harness ----------------------------------------------------------
+
+void AarpgCharacter::ARPGSwing()
+{
+	// Hit detection is server-authoritative (see UARPGHitboxComponent), so a
+	// client typing this must ask the server to swing rather than arming its own
+	// hitbox and watching nothing happen.
+	if (HasAuthority())
+	{
+		ServerDebugSwing_Implementation();
+	}
+	else
+	{
+		ServerDebugSwing();
+	}
+}
+
+void AarpgCharacter::ServerDebugSwing_Implementation()
+{
+	if (!DebugHitbox)
+	{
+		return;
+	}
+
+	DebugHitbox->ActivateHitbox();
+
+	GetWorldTimerManager().SetTimer(DebugSwingTimer, this,
+		&AarpgCharacter::EndDebugSwing, DebugSwingDuration, /*bLoop=*/false);
+
+	UE_LOG(Logarpg, Log, TEXT("[SERVER] %s debug swing armed for %.2fs (%.0f damage)"),
+		*GetName(), DebugSwingDuration, DebugHitbox->BaseDamage);
+}
+
+void AarpgCharacter::EndDebugSwing()
+{
+	if (DebugHitbox)
+	{
+		DebugHitbox->DeactivateHitbox();
+	}
+}
+
+void AarpgCharacter::ARPGStats()
+{
+	const UAbilitySystemComponent* ASC = GetAbilitySystemComponent();
+	if (!ASC)
+	{
+		UE_LOG(Logarpg, Warning, TEXT("%s has no ability system component."), *GetName());
+		return;
+	}
+
+	// Logged from whichever machine you type it on, deliberately: running this
+	// on both ends of a listen-server session is the cheapest proof that
+	// attributes actually replicated rather than only changing on the server.
+	UE_LOG(Logarpg, Log,
+		TEXT("[%s] %s  HP %.1f/%.1f  Stamina %.1f/%.1f  Mana %.1f/%.1f  Poise %.1f/%.1f"),
+		HasAuthority() ? TEXT("SERVER") : TEXT("CLIENT"), *GetName(),
+		ASC->GetNumericAttribute(UARPGVitalSet::GetHealthAttribute()),
+		ASC->GetNumericAttribute(UARPGVitalSet::GetMaxHealthAttribute()),
+		ASC->GetNumericAttribute(UARPGVitalSet::GetStaminaAttribute()),
+		ASC->GetNumericAttribute(UARPGVitalSet::GetMaxStaminaAttribute()),
+		ASC->GetNumericAttribute(UARPGVitalSet::GetManaAttribute()),
+		ASC->GetNumericAttribute(UARPGVitalSet::GetMaxManaAttribute()),
+		ASC->GetNumericAttribute(UARPGVitalSet::GetPoiseAttribute()),
+		ASC->GetNumericAttribute(UARPGVitalSet::GetMaxPoiseAttribute()));
+}
+
+void AarpgCharacter::ARPGDebugDraw(bool bEnabled)
+{
+	if (DebugHitbox)
+	{
+		DebugHitbox->bDrawDebugTrace = bEnabled;
+		UE_LOG(Logarpg, Log, TEXT("Debug hitbox trace drawing %s"),
+			bEnabled ? TEXT("ON") : TEXT("OFF"));
+	}
 }
