@@ -25,6 +25,57 @@ enum class EARPGHitboxSource : uint8
 };
 
 /**
+ * What the .tres carried that a montage now owns.
+ *
+ * Kept on the asset because it is the montage-authoring checklist: which clip
+ * belongs in which section, and where the combo cancel notify goes. Without it
+ * that information lives only in the Godot repo, and the person building the
+ * montage has to go and find it.
+ *
+ * Editor-only, and never read at runtime. Writable rather than display-only
+ * because the converter sets it through the Python editor API, which cannot
+ * touch VisibleAnywhere properties -- and because hand-correcting a clip name
+ * is a reasonable thing to want to do.
+ */
+USTRUCT()
+struct FARPGAttackImportData
+{
+	GENERATED_BODY()
+
+	/** Source .tres this asset was converted from. */
+	UPROPERTY(EditAnywhere, Category = "Import")
+	FString SourceFile;
+
+	UPROPERTY(EditAnywhere, Category = "Import|Montage Sections")
+	FString WindupClip;
+
+	UPROPERTY(EditAnywhere, Category = "Import|Montage Sections")
+	FString ActiveClip;
+
+	UPROPERTY(EditAnywhere, Category = "Import|Montage Sections")
+	FString GapClip;
+
+	UPROPERTY(EditAnywhere, Category = "Import|Montage Sections")
+	FString Active2Clip;
+
+	UPROPERTY(EditAnywhere, Category = "Import|Montage Sections")
+	FString LandingClip;
+
+	UPROPERTY(EditAnywhere, Category = "Import|Montage Sections")
+	FString RecoveryClip;
+
+	/**
+	 * Seconds into the Recovery section at which the combo cancel window opened.
+	 *
+	 * No longer a runtime field -- it is now the POSITION of the
+	 * Event.Attack.ComboWindow notify within the montage. Carried across so the
+	 * authored timing is not quietly lost and re-guessed.
+	 */
+	UPROPERTY(EditAnywhere, Category = "Import")
+	float RecoveryCancelDelay = 0.f;
+};
+
+/**
  * Static data for one attack in a combo tree. Port of Godot's AttackDefinition.
  *
  * THE SIX ANIMATION NAME FIELDS ARE GONE. Godot stored clip NAMES for windup,
@@ -180,6 +231,13 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Combo")
 	bool bContinuousHold = false;
 
+	/**
+	 * Marks this as a finisher. Purely informational -- the combo system reads
+	 * tree position, not this flag. Use it to trigger kill reactions and VFX.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Combo")
+	bool bIsFinisher = false;
+
 	// --- Charging -------------------------------------------------------------
 
 	/**
@@ -272,6 +330,13 @@ public:
 	{
 		return bPoiseScalesWithMotion ? PoiseDamage * InMotionValue : PoiseDamage;
 	}
+
+	// --- Import provenance ----------------------------------------------------
+
+#if WITH_EDITORONLY_DATA
+	UPROPERTY(EditAnywhere, Category = "Import")
+	FARPGAttackImportData ImportData;
+#endif
 
 	virtual FPrimaryAssetId GetPrimaryAssetId() const override
 	{
