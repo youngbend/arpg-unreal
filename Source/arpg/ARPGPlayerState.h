@@ -8,6 +8,9 @@
 #include "ARPGPlayerState.generated.h"
 
 class UARPGAbilitySystemComponent;
+class UARPGVitalSet;
+class UARPGOffenseSet;
+class UARPGResistanceSet;
 
 /**
  * Owns the player's ability system component.
@@ -36,7 +39,26 @@ public:
 		return AbilitySystemComponent;
 	}
 
+	UARPGVitalSet*      GetVitalSet() const      { return VitalSet; }
+	UARPGOffenseSet*    GetOffenseSet() const    { return OffenseSet; }
+	UARPGResistanceSet* GetResistanceSet() const { return ResistanceSet; }
+
+protected:
+	virtual void BeginPlay() override;
+
 private:
 	UPROPERTY(VisibleAnywhere, Category = "ARPG|Abilities")
 	TObjectPtr<UARPGAbilitySystemComponent> AbilitySystemComponent;
+
+	// Attribute sets are subobjects of the ASC's OWNING ACTOR, which is how GAS
+	// discovers and registers them. Creating them anywhere else (on the pawn, at
+	// runtime) means they never get registered and every attribute reads as 0.
+	UPROPERTY()
+	TObjectPtr<UARPGVitalSet> VitalSet;
+
+	UPROPERTY()
+	TObjectPtr<UARPGOffenseSet> OffenseSet;
+
+	UPROPERTY()
+	TObjectPtr<UARPGResistanceSet> ResistanceSet;
 };

@@ -7,6 +7,8 @@
 #include "GameplayTagContainer.h"
 #include "ARPGGameplayEffectContext.generated.h"
 
+class UARPGDamageTypeAsset;
+
 /**
  * The DamageInstance replacement.
  *
@@ -39,6 +41,15 @@ public:
 	 */
 	UPROPERTY()
 	TWeakObjectPtr<UActorComponent> SourceHitbox;
+
+	/**
+	 * What kind of damage this is. UARPGDamageExecution reads the categories,
+	 * penetration, min-resistance floor and resistance attribute off it, so this
+	 * being unset means an unmitigated hit -- the execution warns rather than
+	 * silently dealing full damage.
+	 */
+	UPROPERTY()
+	TWeakObjectPtr<UARPGDamageTypeAsset> DamageType;
 
 	/**
 	 * World-space point where the strike connected, used to drive the victim's

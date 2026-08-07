@@ -31,9 +31,10 @@ bool FARPGGameplayEffectContext::NetSerialize(FArchive& Ar, UPackageMap* Map, bo
 		if (HitStopDuration != 0.f)            { RepBits |= 1 << 4; }
 		if (Penetration >= 0.f)                { RepBits |= 1 << 5; }
 		if (MagicElementTag.IsValid())         { RepBits |= 1 << 6; }
+		if (DamageType.IsValid())              { RepBits |= 1 << 7; }
 	}
 
-	Ar.SerializeBits(&RepBits, 7);
+	Ar.SerializeBits(&RepBits, 8);
 
 	// The two standalone flags are cheap enough to always send.
 	uint8 Flags = 0;
@@ -90,6 +91,11 @@ bool FARPGGameplayEffectContext::NetSerialize(FArchive& Ar, UPackageMap* Map, bo
 	if (RepBits & (1 << 6))
 	{
 		MagicElementTag.NetSerialize(Ar, Map, bOutSuccess);
+	}
+	if (RepBits & (1 << 7))
+	{
+		// A loaded data asset, so the package map resolves it by path reference.
+		Ar << DamageType;
 	}
 
 	// Metadata is deliberately absent -- see the header.
