@@ -14,6 +14,9 @@ class UInputAction;
 class UARPGAbilitySystemComponent;
 class UARPGHitboxComponent;
 class UARPGDamageTypeAsset;
+class UARPGComboComponent;
+class UARPGWeaponAttackTree;
+class UGameplayAbility;
 struct FInputActionValue;
 
 DECLARE_LOG_CATEGORY_EXTERN(LogTemplateCharacter, Log, All);
@@ -133,6 +136,25 @@ protected:
 	UFUNCTION(Exec)
 	void ARPGSwing();
 
+	/**
+	 *  Drives the real attack path: combo component resolves the tree position and
+	 *  raises Event.Attack.Begin, the melee ability plays the montage, and its
+	 *  notifies arm the hitbox and open the cancel window.
+	 *
+	 *  Distinct from ARPGSwing, which arms the debug hitbox directly and
+	 *  deliberately bypasses all of that -- keeping both means the damage pipeline
+	 *  can still be tested in isolation when an attack misbehaves.
+	 */
+	UFUNCTION(Exec)
+	void ARPGAttack();
+
+	UFUNCTION(Exec)
+	void ARPGAttackHeavy();
+
+	/** Reports combo position and granted abilities. */
+	UFUNCTION(Exec)
+	void ARPGComboState();
+
 	/** Prints this character's vitals, on whichever machine you type it. */
 	UFUNCTION(Exec)
 	void ARPGStats();
@@ -144,6 +166,29 @@ protected:
 protected:
 	UFUNCTION(Server, Reliable)
 	void ServerDebugSwing();
+
+	UFUNCTION(Server, Reliable)
+	void ServerComboInput(bool bHeavy);
+
+	/**
+	 *  Granted once, server-side, when the ability actor info is initialised.
+	 *
+	 *  A gameplay-event-triggered ability only fires if it has been GRANTED to
+	 *  the ability system component first -- raising Event.Attack.Begin against
+	 *  an ASC that was never given the melee ability does nothing at all, with no
+	 *  error to say so.
+	 */
+	UPROPERTY(EditDefaultsOnly, Category = "ARPG|Abilities")
+	TArray<TSubclassOf<UGameplayAbility>> DefaultAbilities;
+
+	/** Assigned to the combo component on begin play. Soft, so no hard content reference. */
+	UPROPERTY(EditAnywhere, Category = "ARPG|Combat")
+	TSoftObjectPtr<UARPGWeaponAttackTree> DefaultAttackTree;
+
+	UPROPERTY(VisibleAnywhere, Category = "Components")
+	TObjectPtr<UARPGComboComponent> ComboComponent;
+
+	bool bAbilitiesGranted = false;
 
 	void EndDebugSwing();
 

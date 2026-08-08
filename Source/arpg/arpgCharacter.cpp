@@ -15,6 +15,11 @@
 #include "ARPGAbilitySystemComponent.h"
 #include "ARPGHitboxComponent.h"
 #include "ARPGDamageTypeAsset.h"
+#include "ARPGComboComponent.h"
+#include "ARPGWeaponAttackTree.h"
+#include "ARPGAttackDefinition.h"
+#include "ARPGGameplayAbility_MeleeAttack.h"
+#include "Abilities/GameplayAbility.h"
 #include "ARPGVitalSet.h"
 #include "TimerManager.h"
 
@@ -71,6 +76,16 @@ AarpgCharacter::AarpgCharacter()
 	// harness names content at all.
 	DebugDamageType = TSoftObjectPtr<UARPGDamageTypeAsset>(
 		FSoftObjectPath(TEXT("/Game/ARPG/DamageTypes/DA_Damage_Physical.DA_Damage_Physical")));
+
+	ComboComponent = CreateDefaultSubobject<UARPGComboComponent>(TEXT("ComboComponent"));
+
+	// The melee ability is the one thing without which the whole attack path is
+	// silently inert, so it is defaulted here rather than left to per-Blueprint
+	// setup.
+	DefaultAbilities.Add(UARPGGameplayAbility_MeleeAttack::StaticClass());
+
+	DefaultAttackTree = TSoftObjectPtr<UARPGWeaponAttackTree>(
+		FSoftObjectPath(TEXT("/Game/ARPG/Weapons/DA_AttackTree_Sword.DA_AttackTree_Sword")));
 }
 
 void AarpgCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
@@ -196,6 +211,32 @@ void AarpgCharacter::InitAbilityActorInfo()
 	// the wrong way round is what makes montages fail to play on a possessed
 	// pawn while attributes still appear to work.
 	CachedAbilitySystemComponent->InitAbilityActorInfo(ARPGPlayerState, this);
+
+	// Granting is server-only and must happen exactly once: InitAbilityActorInfo
+	// runs again on respawn and on late PlayerState replication, and re-granting
+	// would stack duplicate specs.
+	if (HasAuthority() && !bAbilitiesGranted)
+	{
+		bAbilitiesGranted = true;
+		for (const TSubclassOf<UGameplayAbility>& AbilityClass : DefaultAbilities)
+		{
+			if (AbilityClass)
+			{
+				CachedAbilitySystemComponent->GiveAbility(
+					FGameplayAbilitySpec(AbilityClass, 1, INDEX_NONE, this));
+			}
+		}
+	}
+
+	if (ComboComponent && !ComboComponent->AttackTree && !DefaultAttackTree.IsNull())
+	{
+		ComboComponent->AttackTree = DefaultAttackTree.LoadSynchronous();
+		if (!ComboComponent->AttackTree)
+		{
+			UE_LOG(Logarpg, Warning, TEXT("Could not load attack tree '%s'; attacks will do nothing."),
+				*DefaultAttackTree.ToString());
+		}
+	}
 }
 
 // --- Debug harness ----------------------------------------------------------
@@ -286,4 +327,50 @@ void AarpgCharacter::ARPGDebugDraw(bool bEnabled)
 		UE_LOG(Logarpg, Log, TEXT("Debug hitbox trace drawing %s"),
 			bEnabled ? TEXT("ON") : TEXT("OFF"));
 	}
+}
+
+void AarpgCharacter::ARPGAttack()
+{
+	if (HasAuthority()) { ServerComboInput_Implementation(false); }
+	else { ServerComboInput(false); }
+}
+
+void AarpgCharacter::ARPGAttackHeavy()
+{
+	if (HasAuthority()) { ServerComboInput_Implementation(true); }
+	else { ServerComboInput(true); }
+}
+
+void AarpgCharacter::ServerComboInput_Implementation(bool bHeavy)
+{
+	if (!ComboComponent)
+	{
+		return;
+	}
+
+	ComboComponent->ReceiveInput(bHeavy ? EARPGAttackInput::Heavy : EARPGAttackInput::Light);
+
+	// Released immediately: a console command has no held state, and leaving the
+	// input latched would make every continuous_hold attack chain forever.
+	ComboComponent->ReceiveInputReleased(bHeavy ? EARPGAttackInput::Heavy : EARPGAttackInput::Light);
+}
+
+void AarpgCharacter::ARPGComboState()
+{
+	const UAbilitySystemComponent* ASC = GetAbilitySystemComponent();
+	const int32 AbilityCount = ASC ? ASC->GetActivatableAbilities().Num() : -1;
+
+	FString Node = TEXT("<none>");
+	if (ComboComponent && ComboComponent->GetCurrentNode() && ComboComponent->GetCurrentNode()->Attack)
+	{
+		Node = ComboComponent->GetCurrentNode()->Attack->AttackId.ToString();
+	}
+
+	UE_LOG(Logarpg, Log,
+		TEXT("[%s] combo node=%s attacking=%d seq=%d tree=%s abilities=%d"),
+		HasAuthority() ? TEXT("SERVER") : TEXT("CLIENT"), *Node,
+		ComboComponent && ComboComponent->IsAttacking(),
+		ComboComponent ? ComboComponent->GetAttackSequenceNumber() : -1,
+		ComboComponent && ComboComponent->AttackTree ? *ComboComponent->AttackTree->GetName() : TEXT("<none>"),
+		AbilityCount);
 }

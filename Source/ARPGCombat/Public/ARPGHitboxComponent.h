@@ -6,6 +6,7 @@
 #include "Components/SceneComponent.h"
 #include "GameplayTagContainer.h"
 #include "Engine/EngineTypes.h"
+#include "ARPGCombatTypes.h"
 #include "ARPGHitboxComponent.generated.h"
 
 class UARPGDamageTypeAsset;
@@ -50,6 +51,24 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Hitbox|Damage")
 	float BaseDamage = 10.f;
+
+	/**
+	 * Which hitbox this is, so an attack can arm the blade or the body without
+	 * the ability having to guess between several on the same character.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Hitbox")
+	EARPGHitboxSource HitboxSource = EARPGHitboxSource::Weapon;
+
+	/**
+	 * The weapon's own damage, before the swing's motion value scales it.
+	 *
+	 * Separate from BaseDamage because BaseDamage is REWRITTEN every time an
+	 * attack arms this hitbox (weapon damage x motion value). Multiplying
+	 * BaseDamage in place would compound it with every swing.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Hitbox|Damage",
+		meta = (ClampMin = "0.0"))
+	float WeaponBaseDamage = 10.f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Hitbox|Damage")
 	TObjectPtr<UARPGDamageTypeAsset> DamageType;

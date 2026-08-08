@@ -5,24 +5,12 @@
 #include "CoreMinimal.h"
 #include "Engine/DataAsset.h"
 #include "GameplayTagContainer.h"
+#include "ARPGCombatTypes.h"
 #include "ARPGAttackDefinition.generated.h"
 
 class UAnimMontage;
 class UARPGDamageTypeAsset;
 class UGameplayEffect;
-
-/** Which hitbox an attack arms during its active window. */
-UENUM(BlueprintType)
-enum class EARPGHitboxSource : uint8
-{
-	/** The equipped weapon's blade. Most attacks. */
-	Weapon,
-	/**
-	 * The character's own body. Kicks and unarmed strikes, which must land
-	 * mid-combo without needing the sword to reach.
-	 */
-	BodyFoot
-};
 
 /**
  * What the .tres carried that a montage now owns.
