@@ -87,6 +87,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Hitbox|Damage")
 	float HitStopDuration = 0.f;
 
+	/**
+	 * Per-attack crit chance, ADDED to the attacker's CritChance attribute rather
+	 * than replacing it -- a heavy finisher is authored as "+15% on top of whatever
+	 * this character rolls with", so it stays meaningful across every weapon.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Hitbox|Damage",
 		meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float CriticalChance = 0.f;

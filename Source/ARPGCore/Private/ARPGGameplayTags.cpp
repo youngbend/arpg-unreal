@@ -83,6 +83,7 @@ UE_DEFINE_GAMEPLAY_TAG(TAG_Event_Attack_ComboWindow,   "Event.Attack.ComboWindow
 UE_DEFINE_GAMEPLAY_TAG(TAG_Event_Attack_HitboxOn,      "Event.Attack.HitboxOn");
 UE_DEFINE_GAMEPLAY_TAG(TAG_Event_Attack_HitboxOff,     "Event.Attack.HitboxOff");
 UE_DEFINE_GAMEPLAY_TAG(TAG_Event_Attack_ChargeRelease, "Event.Attack.ChargeRelease");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Event_Attack_ChannelStop,   "Event.Attack.ChannelStop");
 UE_DEFINE_GAMEPLAY_TAG(TAG_Event_Poise_LightFlinch,    "Event.Poise.LightFlinch");
 UE_DEFINE_GAMEPLAY_TAG(TAG_Event_Poise_HeavyFlinch,    "Event.Poise.HeavyFlinch");
 UE_DEFINE_GAMEPLAY_TAG(TAG_Event_Poise_StanceBreak,    "Event.Poise.StanceBreak");

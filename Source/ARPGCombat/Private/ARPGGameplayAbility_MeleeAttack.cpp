@@ -7,8 +7,11 @@
 #include "ARPGGameplayTags.h"
 #include "ARPGHitboxComponent.h"
 #include "AbilitySystemComponent.h"
+#include "ARPGCombatTypes.h"
 #include "Abilities/Tasks/AbilityTask_PlayMontageAndWait.h"
+#include "Abilities/Tasks/AbilityTask_WaitDelay.h"
 #include "Abilities/Tasks/AbilityTask_WaitGameplayEvent.h"
+#include "Animation/AnimMontage.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
 
@@ -67,6 +70,20 @@ void UARPGGameplayAbility_MeleeAttack::ActivateAbility(
 	}
 
 	bComboWindowOpened = false;
+	ChargeFraction = 1.f;
+	bCharging = CurrentAttack->bChargeable;
+	bChanneling = CurrentAttack->bChannel;
+	bChannelLoopEnded = false;
+
+	// Both stretch the same Windup section in incompatible ways, so a definition
+	// flagged as both is an authoring error rather than a blend of the two.
+	if (CurrentAttack->bChargeable && CurrentAttack->bChannel)
+	{
+		UE_LOG(LogARPGCombat, Warning,
+			TEXT("Attack '%s' is flagged both chargeable and channel; treating it as a charge."),
+			*CurrentAttack->AttackId.ToString());
+		bChanneling = false;
+	}
 
 	if (CurrentAttack->bHyperarmor)
 	{
@@ -107,14 +124,144 @@ void UARPGGameplayAbility_MeleeAttack::ActivateAbility(
 	ComboWindow->EventReceived.AddDynamic(this, &UARPGGameplayAbility_MeleeAttack::OnComboWindow);
 	ComboWindow->ReadyForActivation();
 
+	if (bCharging)
+	{
+		UAbilityTask_WaitGameplayEvent* Release =
+			UAbilityTask_WaitGameplayEvent::WaitGameplayEvent(this, TAG_Event_Attack_ChargeRelease);
+		Release->EventReceived.AddDynamic(this, &UARPGGameplayAbility_MeleeAttack::OnChargeReleased);
+		Release->ReadyForActivation();
+	}
+
+	if (bChanneling)
+	{
+		UAbilityTask_WaitGameplayEvent* Stop =
+			UAbilityTask_WaitGameplayEvent::WaitGameplayEvent(this, TAG_Event_Attack_ChannelStop);
+		Stop->EventReceived.AddDynamic(this, &UARPGGameplayAbility_MeleeAttack::OnChannelStop);
+		Stop->ReadyForActivation();
+	}
+
+	PlayAttackMontage();
+}
+
+// ---------------------------------------------------------------------------
+
+float UARPGGameplayAbility_MeleeAttack::GetSectionLength(FName SectionName) const
+{
+	if (!CurrentAttack || !CurrentAttack->Montage)
+	{
+		return 0.f;
+	}
+
+	const int32 Index = CurrentAttack->Montage->GetSectionIndex(SectionName);
+	return Index != INDEX_NONE ? CurrentAttack->Montage->GetSectionLength(Index) : 0.f;
+}
+
+void UARPGGameplayAbility_MeleeAttack::PlayAttackMontage()
+{
+	UAnimMontage* Montage = CurrentAttack->Montage;
+
+	// Stretch the wind-up so holding the button all the way through takes exactly
+	// ChargeTime. Derived from the section's real length rather than authored, so
+	// re-timing the animation cannot put the charge out of step with what is on
+	// screen.
+	float PlayRate = 1.f;
+	if (bCharging)
+	{
+		const float WindupLength = GetSectionLength(ARPGMontageSections::Windup);
+		if (WindupLength > 0.f && CurrentAttack->ChargeTime > 0.f)
+		{
+			PlayRate = WindupLength / CurrentAttack->ChargeTime;
+		}
+		else
+		{
+			// Nothing to stretch. The attack still works -- it just snaps to its
+			// active window on release instead of visibly winding up.
+			UE_LOG(LogARPGCombat, Verbose,
+				TEXT("Chargeable attack '%s' has no Windup section to stretch; playing at normal rate."),
+				*CurrentAttack->AttackId.ToString());
+		}
+	}
+
+	// Start explicitly at Windup where one exists, so a montage that happens to
+	// lead with an intro section still charges from the right place.
+	const FName StartSection = Montage->IsValidSectionName(ARPGMontageSections::Windup)
+		? ARPGMontageSections::Windup
+		: NAME_None;
+
 	UAbilityTask_PlayMontageAndWait* PlayMontage =
 		UAbilityTask_PlayMontageAndWait::CreatePlayMontageAndWaitProxy(
-			this, NAME_None, CurrentAttack->Montage);
+			this, NAME_None, Montage, PlayRate, StartSection);
 	PlayMontage->OnCompleted.AddDynamic(this, &UARPGGameplayAbility_MeleeAttack::OnMontageFinished);
 	PlayMontage->OnBlendOut.AddDynamic(this, &UARPGGameplayAbility_MeleeAttack::OnMontageFinished);
 	PlayMontage->OnInterrupted.AddDynamic(this, &UARPGGameplayAbility_MeleeAttack::OnMontageCancelled);
 	PlayMontage->OnCancelled.AddDynamic(this, &UARPGGameplayAbility_MeleeAttack::OnMontageCancelled);
 	PlayMontage->ReadyForActivation();
+
+	UAbilitySystemComponent* ASC = GetAbilitySystemComponentFromActorInfo();
+
+	if (bCharging && ASC && Montage->IsValidSectionName(ARPGMontageSections::Windup))
+	{
+		// Loop the wind-up on itself. The component auto-releases at full charge,
+		// so this should never actually repeat -- it exists so that the frame
+		// between the charge completing and the release event arriving cannot
+		// leak into the active window and swing early.
+		ASC->CurrentMontageSetNextSectionName(
+			ARPGMontageSections::Windup, ARPGMontageSections::Windup);
+	}
+
+	if (bChanneling && ASC && Montage->IsValidSectionName(ARPGMontageSections::Active))
+	{
+		// The drill keeps drilling. Broken by relinking Active to Recovery, which
+		// lets the current pass finish rather than cutting mid-rotation.
+		ASC->CurrentMontageSetNextSectionName(
+			ARPGMontageSections::Active, ARPGMontageSections::Active);
+
+		// The montage knows how long its own wind-up is, so there is no need for
+		// a notify to announce the end of it -- which is the whole reason the
+		// Godot version had animation.gd publishing phase timings every frame.
+		const float WindupLength = GetSectionLength(ARPGMontageSections::Windup);
+		if (WindupLength > 0.f)
+		{
+			UAbilityTask_WaitDelay* WindupDone = UAbilityTask_WaitDelay::WaitDelay(this, WindupLength);
+			WindupDone->OnFinish.AddDynamic(
+				this, &UARPGGameplayAbility_MeleeAttack::OnChannelWindupFinished);
+			WindupDone->ReadyForActivation();
+		}
+		else
+		{
+			// No wind-up authored: the loop is already what is playing.
+			OnChannelWindupFinished();
+		}
+	}
+}
+
+void UARPGGameplayAbility_MeleeAttack::LeaveChannelLoop()
+{
+	if (bChannelLoopEnded)
+	{
+		return;
+	}
+	bChannelLoopEnded = true;
+
+	UAbilitySystemComponent* ASC = GetAbilitySystemComponentFromActorInfo();
+	UAnimMontage* Montage = CurrentAttack ? CurrentAttack->Montage : nullptr;
+	if (!ASC || !Montage)
+	{
+		return;
+	}
+
+	if (Montage->IsValidSectionName(ARPGMontageSections::Recovery))
+	{
+		ASC->CurrentMontageSetNextSectionName(
+			ARPGMontageSections::Active, ARPGMontageSections::Recovery);
+	}
+	else
+	{
+		// Nothing to fall out to. Clearing the self-link lets the montage run off
+		// its end, which raises OnCompleted and closes the channel properly --
+		// leaving the loop in place would spin forever.
+		ASC->CurrentMontageSetNextSectionName(ARPGMontageSections::Active, NAME_None);
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -169,9 +316,23 @@ void UARPGGameplayAbility_MeleeAttack::ArmHitbox(int32 WindowIndex, bool bLandin
 	// Motion value selects which of the attack's damage scalars this window uses:
 	// a double-hit swing's second window and an air attack's landing impact hit
 	// for different amounts than the opening blow.
-	const float MotionValue = bLandingWindow
-		? CurrentAttack->LandingMotionValue
-		: (WindowIndex > 0 ? CurrentAttack->MotionValue2 : CurrentAttack->MotionValue);
+	//
+	// Charge scales only the FIRST window. A charged attack's follow-through and
+	// landing are authored as fixed beats -- scaling them too would compound the
+	// bonus across a swing the player only charged once.
+	float MotionValue;
+	if (bLandingWindow)
+	{
+		MotionValue = CurrentAttack->LandingMotionValue;
+	}
+	else if (WindowIndex > 0)
+	{
+		MotionValue = CurrentAttack->MotionValue2;
+	}
+	else
+	{
+		MotionValue = CurrentAttack->GetChargedMotionValue(ChargeFraction);
+	}
 
 	if (MotionValue <= 0.f)
 	{
@@ -228,6 +389,15 @@ void UARPGGameplayAbility_MeleeAttack::OnComboWindow(FGameplayEventData Payload)
 	{
 		return; // a looping channel montage can pass the notify more than once
 	}
+
+	// A channel closes out through NotifyChannelEnded instead, which also clears
+	// the channel flags. Calling NotifyAttackFinished here would drop bAttacking
+	// while the loop is still running and let a fresh press start on top of it.
+	if (bChanneling)
+	{
+		return;
+	}
+
 	bComboWindowOpened = true;
 
 	// Hands control back: the component fires a buffered press, auto-chains a
@@ -239,8 +409,72 @@ void UARPGGameplayAbility_MeleeAttack::OnComboWindow(FGameplayEventData Payload)
 	}
 }
 
+void UARPGGameplayAbility_MeleeAttack::OnChargeReleased(FGameplayEventData Payload)
+{
+	if (!bCharging)
+	{
+		return;
+	}
+	bCharging = false;
+
+	ChargeFraction = FMath::Clamp(Payload.EventMagnitude, 0.f, 1.f);
+
+	UAbilitySystemComponent* ASC = GetAbilitySystemComponentFromActorInfo();
+	UAnimMontage* Montage = CurrentAttack ? CurrentAttack->Montage : nullptr;
+	if (!ASC || !Montage)
+	{
+		return;
+	}
+
+	// Back to real time first: the stretch only ever applied to the wind-up, and
+	// leaving it on would play the swing itself in slow motion.
+	ASC->CurrentMontageSetPlayRate(1.f);
+
+	if (Montage->IsValidSectionName(ARPGMontageSections::Active))
+	{
+		// Undo the self-link before jumping, or the montage would come straight
+		// back to the wind-up after the active window.
+		ASC->CurrentMontageSetNextSectionName(
+			ARPGMontageSections::Windup, ARPGMontageSections::Active);
+		ASC->CurrentMontageJumpToSection(ARPGMontageSections::Active);
+	}
+}
+
+void UARPGGameplayAbility_MeleeAttack::OnChannelStop(FGameplayEventData Payload)
+{
+	LeaveChannelLoop();
+}
+
+void UARPGGameplayAbility_MeleeAttack::OnChannelWindupFinished()
+{
+	UARPGComboComponent* Combo = ResolveCombo();
+	if (!Combo)
+	{
+		return;
+	}
+
+	// The component owns the decision: it knows whether the button is still down.
+	if (!Combo->NotifyChannelWindupFinished())
+	{
+		LeaveChannelLoop();
+	}
+}
+
 void UARPGGameplayAbility_MeleeAttack::OnMontageFinished()
 {
+	if (bChanneling)
+	{
+		// Closes the channel out: latches the finisher lockout, fires a buffered
+		// press, or starts the reset timer.
+		if (UARPGComboComponent* Combo = ResolveCombo())
+		{
+			Combo->NotifyChannelEnded();
+		}
+
+		EndAbility(CurrentSpecHandle, CurrentActorInfo, CurrentActivationInfo, true, false);
+		return;
+	}
+
 	// A montage that ends without ever reaching its combo notify still has to
 	// release the chain, or the character is stuck mid-combo until the reset
 	// timer expires. Common on an attack whose notify was never placed.

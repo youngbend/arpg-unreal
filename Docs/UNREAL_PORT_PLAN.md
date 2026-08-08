@@ -565,6 +565,73 @@ filter, seven damage type assets. Verified three ways:
   15, armor-only 40. This is the live confirmation that armor applies flat,
   physical-gated, before resistance.
 
+**Phase 2 — done.** Status effects as GEs, stack behaviours, application
+gating, resistance. `ARPG.Combat.StatusEffects` covers all five stack modes and
+the resist path. StatusVfxManager deferred — it is presentation, and nothing
+downstream reads it.
+
+**Phase 3 — done.** Poise attribute, two-tier flinch, stance break, parry and
+block, interception folded into the execution. `ARPG.Combat.Poise` covers the
+tiers and the interception ordering. Hit-stop deferred with the VFX manager.
+
+**Phase 4 — code complete.** Retarget, combo machine, melee ability, weapons,
+armour, charge and channel are all in. What remains is content: 14 of the 15
+montages still need their sections and notifies placed by hand.
+
+- 42 paladin clips retargeted onto the UE5 mannequin via IK Rig / IK Retargeter.
+- `ARPG.Combat.Combo` covers tree traversal, buffering, timeout and stamina.
+- `ARPG.Combat.Equipment` (5 cases) covers equip, swap and unequip for both
+  weapons and armour.
+- Confirmed in game: the sword moveset fires from `ARPGAttack` against a live
+  montage with hitbox notifies.
+
+Charge and channel are driven as MONTAGE SECTIONS rather than as separately
+sequenced clips. A charge time-stretches `Windup` to take `ChargeTime` -- the
+rate derived from the section's own length, so re-timing a clip cannot desync the
+charge -- and jumps to `Active` on release. A channel self-links `Active` so it
+loops, and relinks it to `Recovery` to break out. Neither needs a notify to
+announce a phase boundary, because a montage knows its own section times; this is
+the concrete payoff of the animation rewrite, and it is what let ~a third of
+Godot's 3,900-line `animation.gd` disappear.
+
+Three ordering decisions worth recording, all verified by
+`ARPG.Combat.Charge.*` / `ARPG.Combat.Channel.*` (8 cases):
+
+- **A charge starts its ability at the PRESS, not the release.** The wind-up has
+  to be on screen while the player holds -- it is both their charge feedback and
+  the opponent's tell. Stamina is therefore deferred to the release, and an
+  interrupted charge costs nothing.
+- **A channel pays at the press but drains only during the loop.** The wind-up is
+  the attack starting, not something to back out of; but charging for the wind-up
+  and recovery would make a long wind-up a tax.
+- **`CancelAttack` must clear the channel flags.** The ability that would
+  otherwise call `NotifyChannelEnded` is the thing being cancelled, so nothing
+  else would ever clear them and every later press would be swallowed.
+
+Two decisions made during the equipment port that depart from the Godot source:
+
+1. **Equipment writes attributes on equip rather than being consulted at hit
+   time.** Godot's `receive_damage()` reached into `ArmorComponent` mid-pipeline.
+   Here armour adds to `BaseArmor` and the resistance attributes on equip and
+   removes exactly that on unequip, so the execution reads one number per stat
+   and everything that can move that number composes through one aggregator.
+   The removal path subtracts *what was applied*, not what the definition
+   currently says — otherwise a reroll or a live asset edit leaves permanent
+   drift. `ArmorEditedWhileWornStillReverses` pins this.
+2. **Weapon crit is wired up.** Godot had `get_total_crit_chance_bonus()` on both
+   `WeaponDefinition` and `WeaponComponent`, but nothing ever called either — a
+   weapon's crit affix was dead data. In the port the bonus goes onto the
+   wielder's `CritChance` attribute, and the hitbox rolls against that attribute
+   *plus* its own per-attack `CriticalChance` rather than the hitbox value alone.
+   Adding rather than replacing keeps an authored "this finisher crits more"
+   meaningful across every weapon.
+
+Armour resistances are keyed by the damage type **asset**, not its tag, because
+the asset already names which resistance attribute answers for it; keying by tag
+would need a parallel tag→attribute lookup that could drift out of step. An asset
+with no `ResistanceAttribute` set logs a warning rather than silently doing
+nothing — `ArmorWarnsOnUnmappedResistance` pins that too.
+
 Each phase ends at something verifiable in-editor. From phase 1 onward, verify in **PIE with 2
 clients** (`Net Mode: Play As Listen Server`, 2 players) — catching authority bugs at the phase
 that introduces them is far cheaper than auditing later.

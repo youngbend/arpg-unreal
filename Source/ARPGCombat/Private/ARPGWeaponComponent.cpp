@@ -1,0 +1,215 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+#include "ARPGWeaponComponent.h"
+#include "ARPGCombat.h"
+#include "ARPGComboComponent.h"
+#include "ARPGDamageTypeAsset.h"
+#include "ARPGHitboxComponent.h"
+#include "ARPGOffenseSet.h"
+#include "ARPGWeaponAttackTree.h"
+#include "ARPGWeaponDefinition.h"
+#include "AbilitySystemComponent.h"
+#include "AbilitySystemGlobals.h"
+#include "Net/UnrealNetwork.h"
+
+UARPGWeaponComponent::UARPGWeaponComponent()
+{
+	PrimaryComponentTick.bCanEverTick = false;
+	SetIsReplicatedByDefault(true); // clients need to know what is equipped
+}
+
+void UARPGWeaponComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+	DOREPLIFETIME(UARPGWeaponComponent, Weapon);
+	DOREPLIFETIME(UARPGWeaponComponent, bDrawn);
+}
+
+void UARPGWeaponComponent::BeginPlay()
+{
+	Super::BeginPlay();
+
+	if (GetOwner() && GetOwner()->HasAuthority() && DefaultWeapon && !Weapon)
+	{
+		EquipWeapon(DefaultWeapon);
+	}
+	else if (Weapon)
+	{
+		// Already equipped -- e.g. a client whose Weapon replicated in before
+		// this component began play.
+		ApplyWeaponToOwner();
+	}
+}
+
+UAbilitySystemComponent* UARPGWeaponComponent::GetASC() const
+{
+	if (!CachedASC)
+	{
+		CachedASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(GetOwner());
+	}
+	return CachedASC;
+}
+
+UARPGComboComponent* UARPGWeaponComponent::GetCombo() const
+{
+	return GetOwner() ? GetOwner()->FindComponentByClass<UARPGComboComponent>() : nullptr;
+}
+
+UARPGHitboxComponent* UARPGWeaponComponent::GetWeaponHitbox() const
+{
+	if (!GetOwner())
+	{
+		return nullptr;
+	}
+
+	TArray<UARPGHitboxComponent*> Hitboxes;
+	GetOwner()->GetComponents<UARPGHitboxComponent>(Hitboxes);
+	for (UARPGHitboxComponent* Hitbox : Hitboxes)
+	{
+		if (Hitbox->HitboxSource == EARPGHitboxSource::Weapon)
+		{
+			return Hitbox;
+		}
+	}
+	return nullptr;
+}
+
+void UARPGWeaponComponent::EquipWeapon(UARPGWeaponDefinition* NewWeapon)
+{
+	if (Weapon == NewWeapon)
+	{
+		return;
+	}
+
+	Weapon = NewWeapon;
+	ApplyWeaponToOwner();
+	RefreshCritChance();
+	OnWeaponChanged.Broadcast(Weapon);
+
+	UE_LOG(LogARPGCombat, Log, TEXT("%s equipped '%s' (tree %s)"),
+		*GetNameSafe(GetOwner()),
+		Weapon ? *Weapon->WeaponId.ToString() : TEXT("<none>"),
+		Weapon && Weapon->AttackTree ? *Weapon->AttackTree->GetName() : TEXT("<none>"));
+}
+
+void UARPGWeaponComponent::UnequipWeapon()
+{
+	EquipWeapon(nullptr);
+
+	// Sheathed state is meaningless with nothing equipped, and leaving it true
+	// would have the animation layer holding a drawn stance over empty hands.
+	SetDrawn(false);
+}
+
+void UARPGWeaponComponent::ApplyWeaponToOwner()
+{
+	// The moveset comes from the weapon. Cleared on unequip so an unarmed
+	// character cannot keep swinging the sword's combo tree.
+	if (UARPGComboComponent* Combo = GetCombo())
+	{
+		Combo->AttackTree = Weapon ? Weapon->AttackTree : nullptr;
+		Combo->ResetCombo();
+
+		if (Weapon && !Weapon->AttackTree)
+		{
+			UE_LOG(LogARPGCombat, Warning,
+				TEXT("Weapon '%s' has no attack tree; melee attacks will do nothing."),
+				*Weapon->WeaponId.ToString());
+		}
+	}
+
+	// WeaponBaseDamage, not BaseDamage: the ability rewrites BaseDamage per swing
+	// as weapon damage x motion value, so writing there would be overwritten and
+	// writing it repeatedly would compound.
+	if (UARPGHitboxComponent* Hitbox = GetWeaponHitbox())
+	{
+		Hitbox->WeaponBaseDamage = Weapon ? Weapon->BaseDamage : 0.f;
+		if (Weapon && Weapon->BaseDamageType)
+		{
+			Hitbox->DamageType = Weapon->BaseDamageType;
+		}
+	}
+}
+
+void UARPGWeaponComponent::RefreshCritChance()
+{
+	UAbilitySystemComponent* ASC = GetASC();
+	if (!ASC || !GetOwner() || !GetOwner()->HasAuthority())
+	{
+		return;
+	}
+
+	const FGameplayAttribute CritAttr = UARPGOffenseSet::GetCritChanceAttribute();
+
+	if (AppliedCritChance != 0.f)
+	{
+		const float Current = ASC->GetNumericAttribute(CritAttr);
+		ASC->SetNumericAttributeBase(CritAttr, FMath::Max(0.f, Current - AppliedCritChance));
+		AppliedCritChance = 0.f;
+	}
+
+	const float Bonus = Weapon ? Weapon->GetTotalCritChanceBonus() : 0.f;
+	if (Bonus != 0.f)
+	{
+		const float Current = ASC->GetNumericAttribute(CritAttr);
+		ASC->SetNumericAttributeBase(CritAttr, FMath::Clamp(Current + Bonus, 0.f, 1.f));
+		AppliedCritChance = Bonus;
+	}
+}
+
+void UARPGWeaponComponent::SetDrawn(bool bNewDrawn)
+{
+	if (bDrawn == bNewDrawn)
+	{
+		return;
+	}
+
+	bDrawn = bNewDrawn;
+	OnWeaponDrawnChanged.Broadcast(bDrawn);
+
+	// Sheathing abandons the combo: redrawing mid-reset-timer would otherwise
+	// resume the chain from wherever it was left off, which reads as the
+	// character remembering a swing they put away.
+	if (!bDrawn)
+	{
+		if (UARPGComboComponent* Combo = GetCombo())
+		{
+			Combo->ResetCombo();
+		}
+	}
+}
+
+float UARPGWeaponComponent::GetEffectiveDamage(float MotionValue) const
+{
+	if (!Weapon)
+	{
+		return 0.f;
+	}
+
+	float Damage = Weapon->GetEffectiveDamage(MotionValue);
+
+	// The same outgoing multiplier magic discharges use, so one Weakened status
+	// weakens both rather than needing a second, parallel debuff for weapons.
+	if (const UAbilitySystemComponent* ASC = GetASC())
+	{
+		const float Amp = ASC->GetNumericAttribute(
+			UARPGOffenseSet::GetDamageAmpMultiplierAttribute());
+		if (Amp > 0.f)
+		{
+			Damage *= Amp;
+		}
+	}
+
+	return Damage;
+}
+
+void UARPGWeaponComponent::OnRep_Weapon()
+{
+	ApplyWeaponToOwner();
+	OnWeaponChanged.Broadcast(Weapon);
+}
+
+void UARPGWeaponComponent::OnRep_Drawn()
+{
+	OnWeaponDrawnChanged.Broadcast(bDrawn);
+}

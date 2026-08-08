@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
 #include "ARPGWeaponAttackTree.h"
+#include "GameplayTagContainer.h"
 #include "ARPGComboComponent.generated.h"
 
 class UAbilitySystemComponent;
@@ -73,6 +74,34 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "ARPG|Combo")
 	void NotifyAttackFinished();
 
+	/**
+	 * The channel's windup finished, so the loop may begin. Called by the ability
+	 * once the montage's Windup section has played out.
+	 *
+	 * Returns false, and ends the channel, when the input was already let go
+	 * during the windup -- a tap on a channel attack should play the wind-up and
+	 * stop, not commit to a loop nobody asked for.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "ARPG|Combo")
+	bool NotifyChannelWindupFinished();
+
+	/**
+	 * Drains one frame of channel stamina. Returns false once the channel should
+	 * stop -- exhausted or released.
+	 *
+	 * Called from this component's own tick while the loop is running, and safe
+	 * to call at any other time: it is a no-op unless bChannelLooping, which is
+	 * only true between the wind-up finishing and the loop breaking. That is what
+	 * keeps the drain off the wind-up and the recovery, where the player is not
+	 * yet (or no longer) getting anything for the stamina.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "ARPG|Combo")
+	bool TickChannelLoop(float DeltaTime);
+
+	/** The channel's recovery finished. Closes it out like NotifyAttackFinished. */
+	UFUNCTION(BlueprintCallable, Category = "ARPG|Combo")
+	void NotifyChannelEnded();
+
 	/** Interrupt immediately -- dodge, hitstun, death. */
 	UFUNCTION(BlueprintCallable, Category = "ARPG|Combo")
 	void CancelAttack();
@@ -98,6 +127,12 @@ public:
 	bool IsAttacking() const { return bAttacking || bCharging; }
 
 	UFUNCTION(BlueprintPure, Category = "ARPG|Combo")
+	bool IsChanneling() const { return bChanneling; }
+
+	UFUNCTION(BlueprintPure, Category = "ARPG|Combo")
+	bool IsChannelLooping() const { return bChannelLooping; }
+
+	UFUNCTION(BlueprintPure, Category = "ARPG|Combo")
 	bool IsCharging() const { return bCharging; }
 
 	UFUNCTION(BlueprintPure, Category = "ARPG|Combo")
@@ -108,6 +143,13 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "ARPG|Combo")
 	float GetChargeElapsed() const { return ChargeElapsed; }
+
+	/**
+	 * How far the charge got, 0-1. Latched at release and kept until the next
+	 * charge begins, because the swing it scales outlives the charge phase.
+	 */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Combo")
+	float GetChargeFraction() const { return ChargeFraction; }
 
 	UFUNCTION(BlueprintPure, Category = "ARPG|Combo")
 	float GetRootLockoutRemaining() const { return RootLockoutTimer; }
@@ -133,11 +175,25 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "ARPG|Combo")
 	FARPGOnComboReset OnComboReset;
 
+	UPROPERTY(BlueprintAssignable, Category = "ARPG|Combo")
+	FARPGOnAttackStarted OnChannelLoopStarted;
+
+	UPROPERTY(BlueprintAssignable, Category = "ARPG|Combo")
+	FARPGOnAttackStarted OnChannelEnded;
+
 private:
 	UAbilitySystemComponent* GetASC() const;
 	UARPGComboAttackNode* ResolveNext(EARPGAttackInput Input) const;
 	void StartAttack(EARPGAttackInput Input, bool bEmpowered);
 	void ReleaseCharge();
+	void StartChannel(UARPGComboAttackNode* Node, int32 InputIndex, bool bEmpowered);
+	void EndChannelLoop();
+
+	/** Raises Event.Attack.Begin for the current node, handing off to the ability. */
+	void SendAttackBeginEvent(bool bEmpowered);
+
+	/** Raises a bare Event.Attack.* at the running ability. */
+	void SendAbilityEvent(const FGameplayTag& EventTag, float Magnitude);
 	float NodeResetTimeout() const;
 	bool TrySpendStamina(float Cost);
 
@@ -159,8 +215,15 @@ private:
 
 	bool bCharging = false;
 	float ChargeElapsed = 0.f;
+	float ChargeFraction = 0.f;
 	int32 ChargeInput = INDEX_NONE;
 	bool bChargeEmpowered = false;
+
+	bool bChanneling = false;      // true across both the windup and the loop
+	bool bChannelLooping = false;  // true once the loop itself has begun
+	int32 ChannelInput = INDEX_NONE;
+	bool bChannelEmpowered = false;
+	bool bChannelReleaseRequested = false;
 
 	bool bInputHeld[static_cast<uint8>(EARPGAttackInput::MAX)] = {};
 	int32 LastInput = INDEX_NONE;

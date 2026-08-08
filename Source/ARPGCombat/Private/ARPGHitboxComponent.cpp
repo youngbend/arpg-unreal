@@ -246,7 +246,12 @@ void UARPGHitboxComponent::DeliverHit(UARPGHurtboxComponent* Hurtbox, const FHit
 		// Rolled HERE, on the server, and carried on the context. Rolling it
 		// inside the execution would be equally authoritative but would let the
 		// client's hit reaction disagree with the number it is reacting to.
-		Context->bIsCritical = CriticalChance > 0.f && FMath::FRand() < CriticalChance;
+		// The wielder's own crit chance (archetype, weapon affixes, buffs) plus
+		// whatever this particular attack adds on top.
+		const float TotalCritChance = FMath::Clamp(
+			SourceASC->GetNumericAttribute(UARPGOffenseSet::GetCritChanceAttribute()) + CriticalChance,
+			0.f, 1.f);
+		Context->bIsCritical = TotalCritChance > 0.f && FMath::FRand() < TotalCritChance;
 	}
 
 	const FGameplayEffectSpecHandle SpecHandle =

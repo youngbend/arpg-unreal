@@ -129,11 +129,25 @@ void UARPGComboComponent::ReceiveInput(EARPGAttackInput Input, bool bEmpowered)
 		CurrentNode = Next;
 		bCharging = true;
 		ChargeElapsed = 0.f;
+		ChargeFraction = 0.f;
 		ChargeInput = InputIndex;
 		bChargeEmpowered = bEmpowered;
 		ResetTimer = 0.f;
 		BufferedInput = INDEX_NONE;
+		LastInput = InputIndex;
 		OnChargeStarted.Broadcast(CurrentNode, bEmpowered);
+
+		// The ability starts NOW, not on release: the wind-up has to be on screen
+		// while the player holds, both as the feedback that tells them how far
+		// they have charged and as the tell an opponent reads. Stamina is not
+		// spent yet -- an interrupted charge should cost nothing.
+		SendAttackBeginEvent(bEmpowered);
+		return;
+	}
+
+	if (Attack && Attack->bChannel)
+	{
+		StartChannel(Next, InputIndex, bEmpowered);
 		return;
 	}
 
@@ -153,6 +167,18 @@ void UARPGComboComponent::ReceiveInputReleased(EARPGAttackInput Input)
 	if (bCharging && ChargeInput == InputIndex)
 	{
 		ReleaseCharge();
+		return;
+	}
+
+	if (bChanneling && ChannelInput == InputIndex)
+	{
+		bChannelReleaseRequested = true;
+		if (bChannelLooping)
+		{
+			EndChannelLoop();
+		}
+		// Otherwise still in the wind-up, and NotifyChannelWindupFinished will
+		// see the request and decline to start the loop.
 	}
 }
 
@@ -163,13 +189,203 @@ void UARPGComboComponent::ReleaseCharge()
 		return;
 	}
 
-	const int32 Input = ChargeInput;
-	const bool bEmpowered = bChargeEmpowered;
+	UARPGAttackDefinition* Attack = CurrentNode ? CurrentNode->Attack : nullptr;
+	const float ChargeTime = Attack ? Attack->ChargeTime : 0.f;
+
+	// A zero charge time would divide by zero; treat it as instantly full, which
+	// is the only reading of "chargeable over no time" that makes sense.
+	ChargeFraction = ChargeTime > 0.f
+		? FMath::Clamp(ChargeElapsed / ChargeTime, 0.f, 1.f)
+		: 1.f;
 
 	bCharging = false;
 	ChargeInput = INDEX_NONE;
+	ResetTimer = 0.f;
+	BufferedInput = INDEX_NONE;
 
-	StartAttack(static_cast<EARPGAttackInput>(Input), bEmpowered);
+	// Deferred from the press. Releasing without the stamina to swing cancels the
+	// whole thing rather than producing a free attack.
+	if (Attack && !TrySpendStamina(Attack->StaminaCost))
+	{
+		UE_LOG(LogARPGCombat, Log, TEXT("%s: charged '%s' fizzled, needs %.0f stamina."),
+			*GetNameSafe(GetOwner()), *Attack->AttackId.ToString(), Attack->StaminaCost);
+		CancelAttack();
+		if (UAbilitySystemComponent* ASC = GetASC())
+		{
+			FGameplayTagContainer AttackTags;
+			AttackTags.AddTag(TAG_Ability_Attack_Melee);
+			ASC->CancelAbilities(&AttackTags);
+		}
+		return;
+	}
+
+	bAttacking = true;
+	++AttackSequenceNumber;
+	OnAttackStarted.Broadcast(CurrentNode, bChargeEmpowered);
+
+	// The ability is already running the wind-up. This tells it to cut to the
+	// active window, and at what charge -- it does not start a second ability.
+	SendAbilityEvent(TAG_Event_Attack_ChargeRelease, ChargeFraction);
+}
+
+// ---------------------------------------------------------------------------
+
+void UARPGComboComponent::StartChannel(UARPGComboAttackNode* Node, int32 InputIndex, bool bEmpowered)
+{
+	UARPGAttackDefinition* Attack = Node ? Node->Attack : nullptr;
+	if (!Attack)
+	{
+		return;
+	}
+
+	// Unlike a charge, a channel commits its opening cost at the press: the
+	// wind-up is the attack starting, not a wind-up the player can back out of.
+	if (!TrySpendStamina(Attack->StaminaCost))
+	{
+		UE_LOG(LogARPGCombat, Log, TEXT("%s: channel '%s' denied, needs %.0f stamina."),
+			*GetNameSafe(GetOwner()), *Attack->AttackId.ToString(), Attack->StaminaCost);
+		return;
+	}
+
+	CurrentNode = Node;
+	bChanneling = true;
+	bChannelLooping = false;
+	ChannelInput = InputIndex;
+	bChannelEmpowered = bEmpowered;
+	bChannelReleaseRequested = false;
+	bAttacking = true;
+	ResetTimer = 0.f;
+	BufferedInput = INDEX_NONE;
+	LastInput = InputIndex;
+	++AttackSequenceNumber;
+
+	OnAttackStarted.Broadcast(CurrentNode, bEmpowered);
+	SendAttackBeginEvent(bEmpowered);
+}
+
+bool UARPGComboComponent::NotifyChannelWindupFinished()
+{
+	if (!bChanneling || bChannelLooping)
+	{
+		return false;
+	}
+
+	// Tapped rather than held. The wind-up still played -- the player committed
+	// that much -- but nothing loops.
+	const bool bStillHeld = ChannelInput != INDEX_NONE && bInputHeld[ChannelInput];
+	if (bChannelReleaseRequested || !bStillHeld)
+	{
+		OnChannelEnded.Broadcast(CurrentNode, bChannelEmpowered);
+		return false;
+	}
+
+	bChannelLooping = true;
+	OnChannelLoopStarted.Broadcast(CurrentNode, bChannelEmpowered);
+	return true;
+}
+
+bool UARPGComboComponent::TickChannelLoop(float DeltaTime)
+{
+	if (!bChanneling || !bChannelLooping)
+	{
+		return false;
+	}
+
+	UARPGAttackDefinition* Attack = CurrentNode ? CurrentNode->Attack : nullptr;
+	const float Rate = Attack ? Attack->ChannelStaminaPerSecond : 0.f;
+
+	if (Rate > 0.f && !TrySpendStamina(Rate * DeltaTime))
+	{
+		EndChannelLoop();
+		return false;
+	}
+
+	return true;
+}
+
+void UARPGComboComponent::EndChannelLoop()
+{
+	if (!bChanneling || !bChannelLooping)
+	{
+		return;
+	}
+
+	bChannelLooping = false;
+	OnChannelEnded.Broadcast(CurrentNode, bChannelEmpowered);
+
+	// Tells the running ability to break out of the looping Active section and
+	// fall through to its recovery.
+	SendAbilityEvent(TAG_Event_Attack_ChannelStop, 0.f);
+}
+
+void UARPGComboComponent::NotifyChannelEnded()
+{
+	if (!bChanneling)
+	{
+		return;
+	}
+
+	// A channel's recovery is a recovery like any other, so the same finisher
+	// lockout applies -- see NotifyAttackFinished.
+	if (CurrentNode && CurrentNode->IsLeaf() && CurrentNode->Attack)
+	{
+		const float Lockout = CurrentNode->Attack->FinisherLockout;
+		if (Lockout > 0.f)
+		{
+			RootLockoutTimer = Lockout;
+		}
+	}
+
+	bChanneling = false;
+	bChannelLooping = false;
+	bChannelReleaseRequested = false;
+	ChannelInput = INDEX_NONE;
+	bAttacking = false;
+
+	if (BufferedInput != INDEX_NONE)
+	{
+		const EARPGAttackInput Input = static_cast<EARPGAttackInput>(BufferedInput);
+		const bool bEmpowered = bBufferedEmpowered;
+		BufferedInput = INDEX_NONE;
+		StartAttack(Input, bEmpowered);
+		return;
+	}
+
+	ResetTimer = NodeResetTimeout();
+}
+
+// ---------------------------------------------------------------------------
+
+void UARPGComboComponent::SendAttackBeginEvent(bool bEmpowered)
+{
+	UAbilitySystemComponent* ASC = GetASC();
+	if (!ASC || !CurrentNode || !CurrentNode->Attack)
+	{
+		return;
+	}
+
+	FGameplayEventData EventData;
+	EventData.EventTag = TAG_Event_Attack_Begin;
+	EventData.OptionalObject = CurrentNode->Attack;
+	EventData.Instigator = GetOwner();
+	EventData.Target = GetOwner();
+	EventData.EventMagnitude = bEmpowered ? 1.f : 0.f;
+
+	ASC->HandleGameplayEvent(TAG_Event_Attack_Begin, &EventData);
+}
+
+void UARPGComboComponent::SendAbilityEvent(const FGameplayTag& EventTag, float Magnitude)
+{
+	if (UAbilitySystemComponent* ASC = GetASC())
+	{
+		FGameplayEventData EventData;
+		EventData.EventTag = EventTag;
+		EventData.Instigator = GetOwner();
+		EventData.Target = GetOwner();
+		EventData.EventMagnitude = Magnitude;
+
+		ASC->HandleGameplayEvent(EventTag, &EventData);
+	}
 }
 
 void UARPGComboComponent::StartAttack(EARPGAttackInput Input, bool bEmpowered)
@@ -257,19 +473,13 @@ void UARPGComboComponent::StartAttack(EARPGAttackInput Input, bool bEmpowered)
 
 	OnAttackStarted.Broadcast(CurrentNode, bEmpowered);
 
+	// An uncharged swing is at full charge by definition, so anything reading the
+	// fraction gets 1 rather than whatever the last charge happened to leave.
+	ChargeFraction = 1.f;
+
 	// Hand off to the ability, which owns the montage, the tags and the hitbox
 	// window. This component never touches animation.
-	if (UAbilitySystemComponent* ASC = GetASC())
-	{
-		FGameplayEventData EventData;
-		EventData.EventTag = TAG_Event_Attack_Begin;
-		EventData.OptionalObject = Next->Attack;
-		EventData.Instigator = GetOwner();
-		EventData.Target = GetOwner();
-		EventData.EventMagnitude = bEmpowered ? 1.f : 0.f;
-
-		ASC->HandleGameplayEvent(TAG_Event_Attack_Begin, &EventData);
-	}
+	SendAttackBeginEvent(bEmpowered);
 }
 
 void UARPGComboComponent::NotifyAttackFinished()
@@ -319,6 +529,15 @@ void UARPGComboComponent::CancelAttack()
 	bCharging = false;
 	ChargeElapsed = 0.f;
 	ChargeInput = INDEX_NONE;
+
+	// A channel interrupted mid-loop must not leave bChanneling set: the ability
+	// that would have called NotifyChannelEnded is the thing being cancelled, so
+	// nothing else would ever clear it and every later press would be swallowed.
+	bChanneling = false;
+	bChannelLooping = false;
+	bChannelReleaseRequested = false;
+	ChannelInput = INDEX_NONE;
+
 	BufferedInput = INDEX_NONE;
 	ResetTimer = NodeResetTimeout();
 }
@@ -364,6 +583,15 @@ void UARPGComboComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 	if (RootLockoutTimer > 0.f)
 	{
 		RootLockoutTimer = FMath::Max(0.f, RootLockoutTimer - DeltaTime);
+	}
+
+	// Drains while the loop runs, and ends the channel the moment stamina runs
+	// out. Deliberately before the charging early-return: the two are mutually
+	// exclusive, but ordering it this way means a future attack that somehow set
+	// both flags still drains rather than looping for free.
+	if (bChannelLooping)
+	{
+		TickChannelLoop(DeltaTime);
 	}
 
 	if (bCharging)

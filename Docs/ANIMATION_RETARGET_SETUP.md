@@ -176,7 +176,58 @@ handles it.
 carried across purely so this timing was not lost and re-guessed — put the notify
 where the number says.
 
-I will write the notify classes once one montage exists to test against.
+The notify classes (`UARPGAnimNotifyState_Hitbox`, `UARPGAnimNotify_ComboWindow`)
+are written and live in `ARPGCombat`.
+
+### Charge attacks (`bChargeable`)
+
+Author these **exactly like a normal attack**. Do not stretch the wind-up by hand
+and do not add a hold loop — the ability does both at runtime:
+
+- The `Windup` section is time-stretched so it takes `ChargeTime` regardless of
+  how long the clip actually is. The play rate is derived from the section's
+  real length, so **re-timing the animation cannot put the charge out of step**
+  with what the player sees.
+- `Windup` is temporarily self-linked, so it cannot leak into `Active` in the
+  frame between the charge completing and the release arriving.
+- On release the rate returns to 1 and playback jumps straight to `Active`, at
+  whatever fraction was reached.
+
+So: author `Windup` at whatever length reads well as a single wind-up pose, and
+set `ChargeTime` to how long the charge should take. They are independent.
+
+Damage scales through `ChargeMotionMin`..`ChargeMotionMax` and applies **only to
+the first active window** — `Active2` and `Landing` keep their own fixed motion
+values, so a charge cannot compound across a multi-hit swing.
+
+### Channel attacks (`bChannel`)
+
+| Section | Role |
+|---|---|
+| `Windup` | Plays once. Required — its length is how the ability knows when the loop may begin. |
+| `Active` | **Loops** while the button is held and stamina lasts. Author it to loop cleanly. |
+| `Recovery` | Optional. Played once the loop breaks. Without it the montage simply runs off its end. |
+
+The loop is a section self-link, not a re-trigger, so the pass that is playing
+always finishes rather than being cut mid-rotation.
+
+Put the hitbox notify state **inside `Active`**, spanning as much of it as should
+connect. It re-arms every pass; `HitboxTickInterval` controls how often a target
+that stays inside it is re-hit.
+
+Two things that are easy to get wrong:
+
+- **Do not put a combo-window notify in a channel's `Active` section.** It is
+  ignored there by design (the loop would otherwise pass it every revolution),
+  but it will not do what you want. A channel closes out when its montage ends.
+- `Windup` with no length means the loop starts immediately. That works, but the
+  channel then has no tell at all.
+
+`ChannelStaminaPerSecond` drains **only during the loop** — never during the
+wind-up or the recovery, so a long wind-up is not a tax on the player.
+
+`bChargeable` and `bChannel` are mutually exclusive; setting both logs a warning
+and is treated as a charge.
 
 ---
 

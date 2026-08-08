@@ -30,6 +30,21 @@ class UARPGHitboxComponent;
  * loose tag for the attack's duration rather than declared in
  * ActivationOwnedTags -- the same ability class serves armoured and unarmoured
  * swings alike.
+ *
+ * CHARGE AND CHANNEL ARE MONTAGE SECTIONS, NOT SEPARATE CLIPS. Godot's
+ * animation.gd played a windup clip, then an active clip, tracking elapsed time
+ * by hand to know when each ended. Here one montage carries both as named
+ * sections (see ARPGMontageSections) and the ability steers it:
+ *
+ *   - CHARGE holds on Windup, time-stretched so the section takes exactly
+ *     ChargeTime, and jumps to Active on release at whatever fraction was
+ *     reached. Because the section knows its own length, the stretch factor is
+ *     derived rather than authored -- retiming the clip cannot desync the charge.
+ *   - CHANNEL plays Windup once, then links Active to itself so it loops, and
+ *     relinks it to Recovery to break out. No polling, no manual re-triggering.
+ *
+ * Both degrade to plain linear playback on a montage with no named sections, so
+ * an attack flagged chargeable against unfinished content still swings.
  */
 UCLASS()
 class ARPGCOMBAT_API UARPGGameplayAbility_MeleeAttack : public UGameplayAbility
@@ -56,6 +71,15 @@ protected:
 	UFUNCTION() void OnMontageFinished();
 	UFUNCTION() void OnMontageCancelled();
 
+	/** The player let go, or the charge reached full. Cuts to the active window. */
+	UFUNCTION() void OnChargeReleased(FGameplayEventData Payload);
+
+	/** The channel should stop looping and fall out to its recovery. */
+	UFUNCTION() void OnChannelStop(FGameplayEventData Payload);
+
+	/** The Windup section has played out -- ask the component whether to loop. */
+	UFUNCTION() void OnChannelWindupFinished();
+
 private:
 	UARPGHitboxComponent* ResolveHitbox() const;
 	UARPGComboComponent* ResolveCombo() const;
@@ -66,6 +90,15 @@ private:
 
 	/** Puts back anything the attack changed on the character. */
 	void RestoreCharacter();
+
+	/** Starts the montage, applying whatever charge or channel setup it needs. */
+	void PlayAttackMontage();
+
+	/** Length of a named section, or 0 when the montage has no such section. */
+	float GetSectionLength(FName SectionName) const;
+
+	/** Breaks the Active loop and heads for Recovery, ending the montage if absent. */
+	void LeaveChannelLoop();
 
 	UPROPERTY(Transient)
 	TObjectPtr<const UARPGAttackDefinition> CurrentAttack;
@@ -80,4 +113,17 @@ private:
 
 	/** Guards against the combo window notify firing twice on a looping montage. */
 	bool bComboWindowOpened = false;
+
+	/**
+	 * How far the charge got, 0-1. Drives GetChargedMotionValue when the hitbox
+	 * arms, so a released-early swing hits for less.
+	 *
+	 * Starts at 1 rather than 0: an attack that is not chargeable never receives
+	 * a release event, and must not be scaled down for it.
+	 */
+	float ChargeFraction = 1.f;
+
+	bool bCharging = false;
+	bool bChanneling = false;
+	bool bChannelLoopEnded = false;
 };
