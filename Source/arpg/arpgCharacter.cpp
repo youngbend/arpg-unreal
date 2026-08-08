@@ -84,8 +84,11 @@ AarpgCharacter::AarpgCharacter()
 	// setup.
 	DefaultAbilities.Add(UARPGGameplayAbility_MeleeAttack::StaticClass());
 
+	// A convenience default only. SET THIS ON THE BLUEPRINT -- a hard-coded
+	// content path in C++ silently stops working the moment the asset is moved
+	// or renamed, which is exactly what happened the first time.
 	DefaultAttackTree = TSoftObjectPtr<UARPGWeaponAttackTree>(
-		FSoftObjectPath(TEXT("/Game/ARPG/Weapons/DA_AttackTree_Sword.DA_AttackTree_Sword")));
+		FSoftObjectPath(TEXT("/Game/ARPG/Weapons/sword/DA_AttackTree_Sword.DA_AttackTree_Sword")));
 }
 
 void AarpgCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
@@ -233,7 +236,9 @@ void AarpgCharacter::InitAbilityActorInfo()
 		ComboComponent->AttackTree = DefaultAttackTree.LoadSynchronous();
 		if (!ComboComponent->AttackTree)
 		{
-			UE_LOG(Logarpg, Warning, TEXT("Could not load attack tree '%s'; attacks will do nothing."),
+			UE_LOG(Logarpg, Error,
+				TEXT("Attack tree '%s' failed to load -- EVERY attack will silently do nothing. "
+				     "Set DefaultAttackTree on the character Blueprint to the real asset."),
 				*DefaultAttackTree.ToString());
 		}
 	}

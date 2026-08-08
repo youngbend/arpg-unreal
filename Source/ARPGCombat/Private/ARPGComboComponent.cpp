@@ -2,6 +2,7 @@
 
 #include "ARPGComboComponent.h"
 #include "ARPGAttackDefinition.h"
+#include "ARPGCombat.h"
 #include "ARPGGameplayTags.h"
 #include "ARPGVitalSet.h"
 #include "AbilitySystemComponent.h"
@@ -86,6 +87,8 @@ void UARPGComboComponent::ReceiveInput(EARPGAttackInput Input, bool bEmpowered)
 	// through StartAttack below.
 	if (bAttackLocked && !bAttacking)
 	{
+		UE_LOG(LogARPGCombat, Verbose, TEXT("%s: attack input dropped, attack locked (flinching)."),
+			*GetNameSafe(GetOwner()));
 		return;
 	}
 
@@ -110,6 +113,13 @@ void UARPGComboComponent::ReceiveInput(EARPGAttackInput Input, bool bEmpowered)
 	UARPGComboAttackNode* Next = ResolveNext(Input);
 	if (!Next)
 	{
+		// Silence here is what makes a misconfigured tree look like broken input.
+		UE_LOG(LogARPGCombat, Warning,
+			TEXT("%s: no attack resolved for input %d (%s). %s"),
+			*GetNameSafe(GetOwner()), InputIndex,
+			CurrentNode ? TEXT("mid-combo") : TEXT("from root"),
+			AttackTree ? TEXT("The tree has no node for this input.")
+			           : TEXT("NO ATTACK TREE ASSIGNED to the combo component."));
 		return;
 	}
 
@@ -166,6 +176,8 @@ void UARPGComboComponent::StartAttack(EARPGAttackInput Input, bool bEmpowered)
 {
 	if (!AttackTree)
 	{
+		UE_LOG(LogARPGCombat, Warning, TEXT("%s: cannot attack, no attack tree assigned."),
+			*GetNameSafe(GetOwner()));
 		return;
 	}
 
@@ -214,8 +226,19 @@ void UARPGComboComponent::StartAttack(EARPGAttackInput Input, bool bEmpowered)
 		return;
 	}
 
+	if (!Next->Attack)
+	{
+		UE_LOG(LogARPGCombat, Warning,
+			TEXT("%s: resolved a combo node with no AttackDefinition assigned."),
+			*GetNameSafe(GetOwner()));
+		return;
+	}
+
 	if (Next->Attack && !TrySpendStamina(Next->Attack->StaminaCost))
 	{
+		UE_LOG(LogARPGCombat, Log, TEXT("%s: '%s' denied, needs %.0f stamina."),
+			*GetNameSafe(GetOwner()), *Next->Attack->AttackId.ToString(),
+			Next->Attack->StaminaCost);
 		return;
 	}
 
@@ -225,6 +248,12 @@ void UARPGComboComponent::StartAttack(EARPGAttackInput Input, bool bEmpowered)
 	BufferedInput = INDEX_NONE;
 	LastInput = static_cast<int32>(Input);
 	++AttackSequenceNumber;
+
+	UE_LOG(LogARPGCombat, Log, TEXT("%s: beat %d '%s' (montage %s)"),
+		*GetNameSafe(GetOwner()), AttackSequenceNumber,
+		Next->Attack ? *Next->Attack->AttackId.ToString() : TEXT("<no attack>"),
+		Next->Attack && Next->Attack->Montage ? *Next->Attack->Montage->GetName()
+		                                      : TEXT("<NONE - nothing will play>"));
 
 	OnAttackStarted.Broadcast(CurrentNode, bEmpowered);
 
