@@ -568,11 +568,12 @@ filter, seven damage type assets. Verified three ways:
 **Phase 2 — done.** Status effects as GEs, stack behaviours, application
 gating, resistance. `ARPG.Combat.StatusEffects` covers all five stack modes and
 the resist path. StatusVfxManager deferred — it is presentation, and nothing
-downstream reads it.
+downstream reads it. **Landed in phase 12.**
 
 **Phase 3 — done.** Poise attribute, two-tier flinch, stance break, parry and
 block, interception folded into the execution. `ARPG.Combat.Poise` covers the
-tiers and the interception ordering. Hit-stop deferred with the VFX manager.
+tiers and the interception ordering. Hit-stop deferred with the VFX manager;
+**both landed in phase 12.**
 
 **Phase 4 — code complete.** Retarget, combo machine, melee ability, weapons,
 armour, charge and channel are all in. What remains is content: 14 of the 15
@@ -978,6 +979,77 @@ greatshield differed; those still come from the parry component's own settings.
 That belongs with the rest of the per-weapon animation fields, which are waiting
 on content.
 
+**Phase 12 -- code complete. The two things phases 2 and 3 deferred as
+presentation, plus the per-weapon data that closes phase 11's open gap.** 7 new
+cases; 106 pass in total.
+
+The gate is a hit that READS as a hit: a burning tree alight at its own size, a
+heavy blow that catches for a few frames, and a guard whose timing depends on
+what is being held.
+
+**Status VFX: one authored asset per effect, fitted to anything.** The naive
+shape of this feature is an asset per (effect x silhouette) -- a burning tree, a
+burning barrel, a burning rat -- which is an N x M authoring cost that grows
+whenever either axis does, and which is wrong about where the variation lives.
+What differs between a burning tree and a burning rat is the BOUNDS; what
+differs between fire and corruption is the LOOK. Those are orthogonal, so
+`ARPGGeometryProbe` measures the first at runtime and only the second is
+authored.
+
+Two measurement rules carried over intact, both load-bearing:
+
+- **The probe UNIONS meshes and colliders.** Preferring meshes and falling back
+  to colliders looks equivalent and is not: the moment a thing has any mesh its
+  collision extent stops counting, and a body of water whose surface is a flat
+  plane inside a taller box measures as flat. Reading colliders matters equally
+  in the other direction -- a prop whose visual is instanced elsewhere has a
+  hull and nothing else.
+- **Except for `Top`, which asks a different question.** "Where is this thing's
+  surface" is the mesh's top, not the union's; water's collider deliberately
+  stands above the waterline so a spell arriving at the river enters it, and an
+  arc placed on the union would float in that headroom.
+
+**The subsystem POLLS rather than subscribing, and that is a deliberate
+departure.** Godot connected to each combat component's applied/removed/expired
+signals to maintain a request map, then reconciled that map on a timer anyway.
+Keeping both halves means a missed signal leaves a visual that never retires,
+with nothing to correct it. Since the reconcile pass already runs, deriving the
+whole map from the ability system's live effect list each pass removes the
+bookkeeping AND the class of desync -- at the cost of noticing an affliction up
+to `ReevaluateInterval` late, which for a fire lighting is not a cost.
+
+Discovery is one override on `UARPGAbilitySystemComponent`, which everything
+with gameplay state already routes through -- so the visual layer costs zero
+per-object authoring, the original's best property. It registers on
+`InitializeComponent`, NOT BeginPlay: an ability system can carry effects before
+play begins, and in a world with no game mode (an automation fixture) BeginPlay
+never runs at all.
+
+**Hit-stop got dramatically simpler than the original.** Godot needed an
+AnimationTree time-scale sweep plus a separate pose-freeze node to hold the few
+clips that had no time scale of their own; `GlobalAnimRateScale` does the whole
+job in one number, since the mesh keeps evaluating and applying its pose. The
+rule that matters survived unchanged: stacking hits take the LONGEST REMAINING
+rather than summing, or a busy exchange piles into a lockup measured in whole
+seconds -- and gets worse exactly when the fight gets busiest. It freezes BOTH
+parties, never a corpse, and counts down in UNDILATED time so a slow-motion
+finisher does not stretch every hit-stop inside it into a stall.
+
+**Per-weapon block and flinch data closes the gap phase 11 left open.** A
+buckler snaps up and offers a narrow parry; a greatshield takes a beat and then
+covers everything -- and that is a property of the weapon, not of the character.
+`UARPGBlockDefinition` also carries the movement scale a raised guard costs, and
+dropping the guard gives it back. A weapon with no block authored still defends
+on the parry component's own settings, so an unfinished weapon is playable
+rather than defenceless.
+
+Two things this phase surfaced that were worth fixing rather than working
+around: a VFX actor with no root component silently no-opped through every
+placement call and would have sat at the world origin at unit size looking like
+a fitting bug, so the probe now refuses it loudly; and automation worlds have no
+game mode, which means **no BeginPlay runs in them at all** -- worth knowing
+before writing another fixture that assumes it does.
+
 Each phase ends at something verifiable in-editor. From phase 1 onward, verify in **PIE with 2
 clients** (`Net Mode: Play As Listen Server`, 2 players) — catching authority bugs at the phase
 that introduces them is far cheaper than auditing later.
@@ -996,6 +1068,7 @@ that introduces them is far cheaper than auditing later.
 | 9 ✅ | Fire spread subsystem (+ landscape fuel bake, MPC mask, replicated mask) | Grass fire crosses a clearing, burns a second player, rain quenches it |
 | 10 ✅ | Fluid surface subsystem (+ Clipper2 backend, dynamic meshing, replicated outlines) | Water pools; ice shard freezes a floe both players can stand on |
 | 11 ✅ | Modal input scheme, speed tiers and sprint stamina, input buffering, element-consumption routing, auto-sheathe | Controller in hand: LT+face readies, RT+face discharges, a swing imbues, steel sheathes itself |
+| 12 ✅ | Fitted status VFX + budget, hit-stop, per-weapon block and flinch definitions | A burning tree is alight at its own size; a heavy blow catches; a greatshield guards differently from a buckler |
 
 Phases 1–3 are close to mechanical transcription. **Phase 4 is the largest single risk** — it
 combines the animation rewrite with the mannequin retarget. Phases 9–10 are self-contained and

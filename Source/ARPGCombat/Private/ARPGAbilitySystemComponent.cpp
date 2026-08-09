@@ -1,6 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ARPGAbilitySystemComponent.h"
+#include "ARPGStatusVfxSubsystem.h"
+#include "Engine/World.h"
 
 UARPGAbilitySystemComponent::UARPGAbilitySystemComponent()
 {
@@ -12,4 +14,30 @@ UARPGAbilitySystemComponent::UARPGAbilitySystemComponent()
 	// Minimal where their ASC is constructed -- nobody owns them, so nobody
 	// needs the full effect list.
 	SetReplicationMode(EGameplayEffectReplicationMode::Mixed);
+}
+
+void UARPGAbilitySystemComponent::InitializeComponent()
+{
+	Super::InitializeComponent();
+
+	if (const UWorld* World = GetWorld())
+	{
+		if (UARPGStatusVfxSubsystem* Vfx = World->GetSubsystem<UARPGStatusVfxSubsystem>())
+		{
+			Vfx->RegisterAbilitySystem(this);
+		}
+	}
+}
+
+void UARPGAbilitySystemComponent::UninitializeComponent()
+{
+	if (const UWorld* World = GetWorld())
+	{
+		if (UARPGStatusVfxSubsystem* Vfx = World->GetSubsystem<UARPGStatusVfxSubsystem>())
+		{
+			Vfx->UnregisterAbilitySystem(this);
+		}
+	}
+
+	Super::UninitializeComponent();
 }

@@ -10,6 +10,7 @@
 #include "ARPGMagicLoadout.h"
 #include "ARPGParryComponent.h"
 #include "ARPGQuickSlotComponent.h"
+#include "ARPGReactionDefinitions.h"
 #include "ARPGWeaponAttackTree.h"
 #include "ARPGWeaponComponent.h"
 #include "ARPGWeaponDefinition.h"
@@ -345,6 +346,14 @@ void UARPGPlayerActionComponent::RouteAttack(EARPGInputFace Slot, bool bSpecial)
 	if (Parry && Parry->IsBlocking())
 	{
 		Parry->EndBlock();
+
+		// The block's movement scaling goes with it. The attack sets its own a
+		// moment later; leaving the block's in place would have the first swing
+		// out of a guard move at whatever the shield allowed.
+		if (UARPGLocomotionComponent* Locomotion = GetLocomotion())
+		{
+			Locomotion->ClearAttackMovement();
+		}
 	}
 	bParryHeld = false;
 	bBlockPending = false;
@@ -444,6 +453,14 @@ void UARPGPlayerActionComponent::HandleParryReleased()
 	{
 		Parry->EndBlock();
 	}
+
+	// Give the movement scale back. Without this the character walks at block
+	// speed for the rest of their life, and it reads as a movement bug rather
+	// than as a guard nobody dropped.
+	if (UARPGLocomotionComponent* Locomotion = GetLocomotion())
+	{
+		Locomotion->ClearAttackMovement();
+	}
 }
 
 void UARPGPlayerActionComponent::TryBeginBlock()
@@ -459,17 +476,31 @@ void UARPGPlayerActionComponent::TryBeginBlock()
 	// Blocking is a property of the weapon, not of the character: there is
 	// nothing to raise bare-handed. A weapon with no attack tree has no moveset
 	// at all, which counts as nothing to raise for the same reason.
-	//
-	// NOT YET per-weapon TIMINGS. Godot's BlockDefinition carried its own
-	// blend-in and parry window so a buckler and a greatshield differed; here
-	// those still come from the parry component's own settings. Closing that
-	// belongs with the rest of the per-weapon animation fields, which are
-	// waiting on content -- see the plan's remaining-gaps list.
 	UARPGWeaponComponent* Weapon = GetWeapon();
 	const UARPGWeaponDefinition* Definition = Weapon ? Weapon->GetWeapon() : nullptr;
-	if (!Definition || !Definition->AttackTree)
+	const UARPGWeaponAttackTree* Tree = Definition ? Definition->AttackTree : nullptr;
+	if (!Tree)
 	{
 		return;
+	}
+
+	// The WEAPON's timings, so a buckler that snaps up with a narrow parry and a
+	// greatshield that takes a beat and then covers everything genuinely differ.
+	// A tree with no block authored falls back to the parry component's own
+	// settings rather than refusing -- an unfinished weapon should still defend.
+	if (const UARPGBlockDefinition* Block = Tree->Block)
+	{
+		Parry->BlendInTime = Block->BlendInTime;
+		Parry->ParryWindow = Block->ParryWindow;
+
+		// Holding a guard costs mobility, and how much is part of what
+		// distinguishes the weapon. Sprint stays permitted: it is the movement
+		// SCALE that a block restricts, and dropping the guard to run is the
+		// player's call, not the block's.
+		if (UARPGLocomotionComponent* Locomotion = GetLocomotion())
+		{
+			Locomotion->SetAttackMovement(Block->MovementSpeedFactor, /*bAllowSprint=*/true);
+		}
 	}
 
 	Parry->BeginBlock();

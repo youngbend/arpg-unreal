@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ARPGHitboxComponent.h"
+#include "ARPGHitStopComponent.h"
 #include "ARPGCombat.h"
 #include "ARPGCombatLibrary.h"
 #include "ARPGDamageGameplayEffect.h"
@@ -265,6 +266,13 @@ void UARPGHitboxComponent::DeliverHit(UARPGHurtboxComponent* Hurtbox, const FHit
 	SpecHandle.Data->SetSetByCallerMagnitude(TAG_Data_Damage, BaseDamage);
 
 	SourceASC->ApplyGameplayEffectSpecToTarget(*SpecHandle.Data, TargetASC);
+
+	// Fired on the SERVER once the hit has actually been delivered, and
+	// multicast from there -- so every machine freezes on the same hit rather
+	// than each predicting its own. Purely presentational: it holds the pose,
+	// not the character, and nothing downstream reads it.
+	UARPGHitStopComponent::ApplyToPair(
+		SourceASC->GetAvatarActor(), TargetASC->GetAvatarActor(), HitStopDuration);
 
 	// Applied AFTER the damage, and through the same context, so a status can be
 	// read alongside the hit that carried it -- and so a target killed by the

@@ -25,4 +25,22 @@ class ARPGCOMBAT_API UARPGAbilitySystemComponent : public UAbilitySystemComponen
 
 public:
 	UARPGAbilitySystemComponent();
+
+	/**
+	 * Registers with the status VFX subsystem, and unregisters on the way out.
+	 *
+	 * HERE, rather than a per-actor component or a world sweep, because this is
+	 * the one class everything with gameplay state already routes through --
+	 * which makes the visual layer's discovery cost exactly zero authoring, the
+	 * property worth preserving from the Godot original. That subsystem polls
+	 * what is registered; see its class comment for why it polls.
+	 *
+	 * On INITIALIZE rather than BeginPlay, and the difference is real: an
+	 * ability system can be carrying effects before play begins, and in a world
+	 * with no game mode -- an automation fixture, a tools harness -- BeginPlay
+	 * never runs at all while InitializeComponent always does. Registering
+	 * something that turns out to have nothing on it costs one array entry.
+	 */
+	virtual void InitializeComponent() override;
+	virtual void UninitializeComponent() override;
 };

@@ -123,6 +123,20 @@ public:
 	FARPGOnPoiseResult OnPoiseResult;
 
 	/**
+	 * Play the equipped weapon's reaction clip on a flinch or a break.
+	 *
+	 * On by default so a hit READS as a hit the moment clips are authored,
+	 * without a Blueprint ability per weapon standing between the two. Turn it
+	 * off where an ability owns the reaction instead -- the Event.Poise.* events
+	 * fire either way, so taking over costs nothing and loses nothing.
+	 *
+	 * The clips are the WEAPON's, not the character's; see UARPGFlinchDefinition
+	 * for why staggering is a thing you do with something in your hands.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Poise|Presentation")
+	bool bPlayReactionMontages = true;
+
+	/**
 	 * Binds to the vital set's poise delegate if not already bound. Idempotent.
 	 *
 	 * Called from BeginPlay AND from tick, because BeginPlay is not a reliable
@@ -141,6 +155,9 @@ private:
 
 	/** Raises the matching Event.Poise.* so an ability can react to it. */
 	void SendPoiseEvent(EARPGPoiseResult Result) const;
+
+	/** Plays the equipped weapon's clip for this reaction, if there is one. */
+	void PlayReactionMontage(EARPGPoiseResult Result) const;
 
 	UPROPERTY(Transient)
 	mutable TObjectPtr<UAbilitySystemComponent> CachedASC;

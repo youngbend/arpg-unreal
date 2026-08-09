@@ -1,6 +1,12 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ARPGPoiseComponent.h"
+#include "ARPGReactionDefinitions.h"
+#include "ARPGWeaponAttackTree.h"
+#include "ARPGWeaponComponent.h"
+#include "ARPGWeaponDefinition.h"
+#include "Animation/AnimInstance.h"
+#include "GameFramework/Character.h"
 #include "ARPGGameplayTags.h"
 #include "ARPGVitalSet.h"
 #include "AbilitySystemComponent.h"
@@ -134,6 +140,7 @@ EARPGPoiseResult UARPGPoiseComponent::ApplyPoiseDamage(float Amount)
 
 		OnPoiseResult.Broadcast(EARPGPoiseResult::StanceBreak);
 		SendPoiseEvent(EARPGPoiseResult::StanceBreak);
+		PlayReactionMontage(EARPGPoiseResult::StanceBreak);
 		return EARPGPoiseResult::StanceBreak;
 	}
 
@@ -153,6 +160,7 @@ EARPGPoiseResult UARPGPoiseComponent::ApplyPoiseDamage(float Amount)
 	{
 		OnPoiseResult.Broadcast(EARPGPoiseResult::HeavyFlinch);
 		SendPoiseEvent(EARPGPoiseResult::HeavyFlinch);
+		PlayReactionMontage(EARPGPoiseResult::HeavyFlinch);
 		return EARPGPoiseResult::HeavyFlinch;
 	}
 
@@ -160,6 +168,7 @@ EARPGPoiseResult UARPGPoiseComponent::ApplyPoiseDamage(float Amount)
 	{
 		OnPoiseResult.Broadcast(EARPGPoiseResult::LightFlinch);
 		SendPoiseEvent(EARPGPoiseResult::LightFlinch);
+		PlayReactionMontage(EARPGPoiseResult::LightFlinch);
 		return EARPGPoiseResult::LightFlinch;
 	}
 
@@ -230,5 +239,38 @@ void UARPGPoiseComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 	if (DrainRate > 0.f)
 	{
 		SetPoise(Current - DrainRate * DeltaTime);
+	}
+}
+
+void UARPGPoiseComponent::PlayReactionMontage(EARPGPoiseResult Result) const
+{
+	if (!bPlayReactionMontages)
+	{
+		return;
+	}
+
+	const ACharacter* Character = Cast<ACharacter>(GetOwner());
+	if (!Character)
+	{
+		return;
+	}
+
+	const UARPGWeaponComponent* Weapon = Character->FindComponentByClass<UARPGWeaponComponent>();
+	const UARPGWeaponDefinition* Definition = Weapon ? Weapon->GetWeapon() : nullptr;
+	const UARPGWeaponAttackTree* Tree = Definition ? Definition->AttackTree : nullptr;
+	const UARPGFlinchDefinition* Flinch = Tree ? Tree->Flinch : nullptr;
+
+	// No weapon, no tree, no flinch asset, or no clip authored for this tier all
+	// mean the same thing and none of them is an error. The mechanics above have
+	// already run; this is the part that is allowed to be missing.
+	UAnimMontage* Montage = Flinch ? Flinch->GetMontageFor(Result) : nullptr;
+	if (!Montage)
+	{
+		return;
+	}
+
+	if (UAnimInstance* Anim = Character->GetMesh() ? Character->GetMesh()->GetAnimInstance() : nullptr)
+	{
+		Anim->Montage_Play(Montage);
 	}
 }

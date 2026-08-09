@@ -7,6 +7,8 @@
 #include "ARPGWeaponAttackTree.generated.h"
 
 class UARPGAttackDefinition;
+class UARPGBlockDefinition;
+class UARPGFlinchDefinition;
 
 /** Which button drove the input. */
 UENUM(BlueprintType)
@@ -106,6 +108,20 @@ public:
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Air")
 	TObjectPtr<UARPGAttackDefinition> AirSpecial;
+
+	/**
+	 * Block and parry timings for this weapon, and the clips that go with them.
+	 *
+	 * Null means this weapon CANNOT block, which is the honest default: a bow
+	 * has no guard to raise. The parry component falls back to its own settings
+	 * so an unarmed or unauthored character still behaves sanely.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Defence")
+	TObjectPtr<UARPGBlockDefinition> Block;
+
+	/** Poise reactions played while holding this weapon. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Defence")
+	TObjectPtr<UARPGFlinchDefinition> Flinch;
 
 	/** Seconds at rest before the chain returns to root. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Combo", meta = (ClampMin = "0.0"))
