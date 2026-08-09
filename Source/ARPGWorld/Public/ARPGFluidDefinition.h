@@ -1,0 +1,154 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+#pragma once
+
+#include "CoreMinimal.h"
+#include "Engine/DataAsset.h"
+#include "GameplayTagContainer.h"
+#include "ARPGFluidDefinition.generated.h"
+
+class UARPGMagicElement;
+class UMaterialInterface;
+
+/**
+ * What a fluid is like as a BODY LYING ON THE GROUND. Port of Godot's
+ * FluidDefinition.
+ *
+ * Distinct from the element itself, which says what the fluid IS, and from the
+ * spread definition, which says how it diffuses. This is only how it behaves as
+ * a puddle: how deep, how fast rain fills it and sun takes it away, how much of
+ * it has to gather before it counts as bottomless.
+ */
+UCLASS(BlueprintType)
+class ARPGWORLD_API UARPGFluidDefinition : public UPrimaryDataAsset
+{
+	GENERATED_BODY()
+
+public:
+	/** What this pools. Identity, damage, status and reactions all come from it. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Identity")
+	TObjectPtr<UARPGMagicElement> Element;
+
+	/** Surface height above the ground the deposit landed on. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Body",
+		meta = (ClampMin = "0.0"))
+	float Depth = 20.f;
+
+	/**
+	 * Below this area a body is too small to be worth keeping and is removed.
+	 *
+	 * Not zero, because an evaporating pool's area approaches zero
+	 * asymptotically -- without a floor it would live forever as a sliver,
+	 * costing a rebuild every tick to become imperceptibly smaller.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Body",
+		meta = (ClampMin = "0.0"))
+	float MinimumArea = 2500.f;
+
+	/**
+	 * Area above which the body's volume becomes a RESERVOIR -- bottomless, and
+	 * damping rather than explosive when a spell lands in it.
+	 *
+	 * A threshold rather than a flag, so the same asset describes a splash and a
+	 * lake and the difference falls out of how much has gathered.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Body",
+		meta = (ClampMin = "0.0"))
+	float ReservoirArea = 200000.f;
+
+	/** How much energy the body's volume carries per unit of area. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Body",
+		meta = (ClampMin = "0.0"))
+	float EnergyPerArea = 0.001f;
+
+	/** Outward offset per second while it is raining. 0 means rain does nothing. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weather",
+		meta = (ClampMin = "0.0"))
+	float RainGrowthRate = 4.f;
+
+	/** Inward offset per second otherwise. 0 means it never dries. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weather",
+		meta = (ClampMin = "0.0"))
+	float EvaporationRate = 1.f;
+
+	/** How far a fresh deposit may sit from a body and still merge into it. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Body",
+		meta = (ClampMin = "0.0"))
+	float MergeDistance = 100.f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Presentation")
+	TSoftObjectPtr<UMaterialInterface> SurfaceMaterial;
+
+	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
+	FGameplayTag GetElementTag() const;
+
+	virtual FPrimaryAssetId GetPrimaryAssetId() const override
+	{
+		return FPrimaryAssetId("ARPGFluid", GetFName());
+	}
+};
+
+/**
+ * What an element is like as a SOLID frozen out of a fluid. Port of Godot's
+ * SolidDefinition.
+ *
+ * Nothing here knows that water freezes: WHICH pairs solidify is a Solidify row
+ * in the combination table's Surface scope -- the same table and the same
+ * scoping every other relationship in the game uses. So ice + water making a
+ * floe and lava + water making a crust of obsidian are two rows and two assets,
+ * and neither is a branch in any C++ file.
+ */
+UCLASS(BlueprintType)
+class ARPGWORLD_API UARPGSolidDefinition : public UPrimaryDataAsset
+{
+	GENERATED_BODY()
+
+public:
+	/** What this is made of -- matched against a Solidify row's result. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Identity")
+	TObjectPtr<UARPGMagicElement> Element;
+
+	/** How far the slab stands above the fluid surface it formed on. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Body",
+		meta = (ClampMin = "0.0"))
+	float Thickness = 30.f;
+
+	/**
+	 * Whether the slab carries collision.
+	 *
+	 * The whole point for ice, and deliberately optional: a crust of obsidian
+	 * over lava should be standable, a sheet of frost should not.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Body")
+	bool bStandable = true;
+
+	/** Inward offset per second as it melts. 0 means it is permanent. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Melting",
+		meta = (ClampMin = "0.0"))
+	float MeltRate = 0.5f;
+
+	/**
+	 * What the slab turns back into as it melts, if anything.
+	 *
+	 * Null is right for obsidian, which is permanent rock rather than frozen
+	 * lava. Ice points back at water, so a floe melting returns its area to the
+	 * pool it came from rather than the fluid simply vanishing.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Melting")
+	TObjectPtr<UARPGFluidDefinition> MeltsInto;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Body",
+		meta = (ClampMin = "0.0"))
+	float MinimumArea = 2500.f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Presentation")
+	TSoftObjectPtr<UMaterialInterface> SurfaceMaterial;
+
+	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
+	FGameplayTag GetElementTag() const;
+
+	virtual FPrimaryAssetId GetPrimaryAssetId() const override
+	{
+		return FPrimaryAssetId("ARPGSolid", GetFName());
+	}
+};

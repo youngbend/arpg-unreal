@@ -866,6 +866,49 @@ Structural notes:
   map-wide firestorm and a single burning bush each cost in proportion to what is
   actually burning.
 
+**Phase 10 — code complete. All ten phases are now ported.** Persistent fluids:
+polygon bodies, deposit merging, rain and evaporation, freezing and melting. 8
+new cases; 86 pass in total.
+
+The gate -- an ice shard freezing part of a pool into something a player can
+stand on -- is `Fluid.Solidify.FreezesTheOverlapIntoAStandableSlab`.
+
+**The polygon backend is NOT raw Clipper2, and this is a correction to the
+plan.** Clipper2 IS vendored under GeometryProcessing, but in
+`GeometryAlgorithms/Private`, so it cannot be included from another module. Its
+PUBLIC wrapper turned out to be a better fit than the plan anticipated:
+`PolygonsUnion` / `PolygonsOffset` / `PolygonsIntersection` /
+`PolygonsDifference` already speak in `FGeneralPolygon2d`, which is exactly the
+polygon-with-holes type the design wants -- so the four operations the design
+reduces to map one-for-one onto public engine API, with no vendoring and no
+module surgery.
+
+The design survived the port unchanged, which is the point worth recording:
+depositing is a union, rain and evaporation are offsets of opposite sign, and
+freezing is an intersection. Nothing is quantised, so a pool that has had three
+spells land in it and an ice shard cut across it is a genuinely irregular outline
+rather than a union of discs.
+
+Two rules that are easy to mistake for limitations and are not:
+
+- **A fluid keeps ONE ring; a solid keeps its holes.** Cut a region out of the
+  middle of a puddle and the water flows back over it -- so a pool discards holes
+  and islands and takes the largest outer ring. A floe with a melted-through gap
+  is a floe with a gap you can fall into, so a solid keeps them, SEPARATE rather
+  than bridged. Bridging leaves a zero-width slit that the offsetter rounds into
+  arcs, and eroding that compounds; the Godot version measured 50 vertices
+  becoming 7193 over eighteen melt ticks.
+- **Freezing SHRINKS the pool rather than subtracting the frozen region.** The
+  fluid is genuinely used up, but a liquid does not keep a hole, so the pool
+  keeps its shape and loses the area -- one square root, since area scales with
+  the square of a uniform scale.
+
+This also closed the two extension points phase 6 deliberately left open: the
+reaction subsystem now asks the fluid system to solidify before resolving an
+energy trade, and conduction checks whether a strike was roofed by a solid --
+NOT THROUGH THE ICE, since a floe roofs over the water beneath it and the pool's
+own collider knows nothing about that.
+
 Each phase ends at something verifiable in-editor. From phase 1 onward, verify in **PIE with 2
 clients** (`Net Mode: Play As Listen Server`, 2 players) — catching authority bugs at the phase
 that introduces them is far cheaper than auditing later.
@@ -882,7 +925,7 @@ that introduces them is far cheaper than auditing later.
 | 7 ✅ | Progression trackers, inventory, quick slots, consumables | Mastery multiplies discharge damage; quick-slot potions work |
 | 8 ✅ | NPC AI — perception, behavior trees, reactive parry | NPC engages, parries a telegraphed swing, flees and heals |
 | 9 ✅ | Fire spread subsystem (+ landscape fuel bake, MPC mask, replicated mask) | Grass fire crosses a clearing, burns a second player, rain quenches it |
-| 10 | Fluid surface subsystem (+ Clipper2 backend, dynamic meshing, replicated outlines) | Water pools; ice shard freezes a floe both players can stand on |
+| 10 ✅ | Fluid surface subsystem (+ Clipper2 backend, dynamic meshing, replicated outlines) | Water pools; ice shard freezes a floe both players can stand on |
 
 Phases 1–3 are close to mechanical transcription. **Phase 4 is the largest single risk** — it
 combines the animation rewrite with the mannequin retarget. Phases 9–10 are self-contained and

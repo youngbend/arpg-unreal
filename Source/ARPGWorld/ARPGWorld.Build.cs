@@ -10,9 +10,12 @@ using UnrealBuildTool;
 ///   SpreadSystem              a medium diffusing through the ground
 ///   FluidSurfaceSystem        an element lying somewhere as a discrete body
 ///
-/// Phase 10 adds GeometryCore/GeometryFramework/DynamicMesh here for the fluid
-/// polygon backend. Deliberately not listed yet — unused deps slow builds and
-/// the exact 5.8 module names should be confirmed at that point.
+/// The fluid polygon backend uses GeometryCore + GeometryAlgorithms. The plan
+/// expected raw Clipper2, which IS vendored under GeometryProcessing but sits in
+/// GeometryAlgorithms/Private and cannot be included from here. Its public
+/// wrapper is a better fit anyway: PolygonsUnion / PolygonsOffset /
+/// PolygonsIntersection / PolygonsDifference already speak in FGeneralPolygon2d,
+/// which is exactly the polygon-with-holes type the fluid design wants.
 public class ARPGWorld : ModuleRules
 {
 	public ARPGWorld(ReadOnlyTargetRules Target) : base(Target)
@@ -28,7 +31,9 @@ public class ARPGWorld : ModuleRules
 			"GameplayTasks",
 			"ARPGCore",
 			"ARPGCombat",
-			"ARPGMagic"
+			"ARPGMagic",
+			"GeometryCore",
+			"GeometryAlgorithms"
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[] { });

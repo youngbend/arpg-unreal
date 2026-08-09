@@ -5,6 +5,7 @@
 #include "ARPGDischargeContext.h"
 #include "ARPGDischargeEffect.h"
 #include "ARPGElementalVolumeComponent.h"
+#include "ARPGFluidSurfaceSubsystem.h"
 #include "ARPGMagicCombinationTable.h"
 #include "ARPGMagicElement.h"
 #include "ARPGWorld.h"
@@ -119,6 +120,25 @@ void UARPGElementalReactionSubsystem::Resolve(UARPGElementalVolumeComponent* A,
 		return;
 	}
 
+	// --- Solidifying -------------------------------------------------------
+	// Asked FIRST because it is the narrower question. An ice shard meeting a
+	// water JET is a collision that trades energy; the same shard meeting a
+	// PUDDLE freezes part of its surface into something you can stand on. Only a
+	// Surface-scope row says the latter, and the fluid subsystem hands the pair
+	// straight back when neither side is actually a body of fluid -- so this
+	// narrows the case without ever swallowing the general one.
+	//
+	// Structurally identical to the conduction hand-off below, and for the same
+	// reason: a mode that is not an energy trade belongs to the system that owns
+	// that behaviour, not to this solver.
+	if (UARPGFluidSurfaceSubsystem* Fluids = GetWorld()->GetSubsystem<UARPGFluidSurfaceSubsystem>())
+	{
+		if (Fluids->TrySolidify(A, B))
+		{
+			return;
+		}
+	}
+
 	// --- Conduction --------------------------------------------------------
 	// The row says this charge TRAVELS THROUGH the other side rather than
 	// reacting with it. Handed off whole: the charge is spent entering the
@@ -129,7 +149,24 @@ void UARPGElementalReactionSubsystem::Resolve(UARPGElementalVolumeComponent* A,
 		UARPGElementalVolumeComponent* Charge = bAIsCharge ? A : B;
 		UARPGElementalVolumeComponent* Medium = bAIsCharge ? B : A;
 
-		if (Medium->Conductivity > 0.f)
+		// NOT THROUGH THE ICE. A floe floating on a pool roofs over the water
+		// beneath it, and the pool's own collider knows nothing about that -- so
+		// a bolt that struck the ice would enter the river underneath and
+		// conduct from there. What it hit was the ice.
+		//
+		// Asked at the CHARGE's own position, because that is where the strike
+		// landed.
+		bool bRoofed = false;
+		if (Medium->bReservoir)
+		{
+			if (const UARPGFluidSurfaceSubsystem* Fluids =
+					GetWorld()->GetSubsystem<UARPGFluidSurfaceSubsystem>())
+			{
+				bRoofed = Fluids->IsCoveredBySolid(Charge->GetVolumeLocation());
+			}
+		}
+
+		if (!bRoofed && Medium->Conductivity > 0.f)
 		{
 			if (UARPGConductionSubsystem* Conduction =
 					GetWorld()->GetSubsystem<UARPGConductionSubsystem>())
