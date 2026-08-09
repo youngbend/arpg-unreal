@@ -680,6 +680,55 @@ Two things were found dead during this phase and fixed:
    dodge i-frames would have been inert. `UARPGHurtboxComponent::IsInvincible`
    now checks it, which also means any effect granting it works.
 
+**Phase 6 — code complete.** Elemental volumes, the reaction subsystem and the
+conduction subsystem. 12 new cases under `ARPG.World.*`; 50 pass in total.
+
+The first half of the plan's gate -- fire into water produces steam at the right
+contact point -- is `Reaction.MatchedProjectilesBothSpend` plus
+`Reaction.ReservoirIsNotDepleted`, which asserts the contact lands on the
+waterline rather than the collider centre. The second half (a puddle chain
+hurting a second player) is covered as far as it can be without fluids:
+`Conduction.ChargeFollowsTouchingMedia` proves the chain, and damage goes through
+the ordinary hurtbox and damage execution, but the puddles themselves are phase
+10.
+
+Where the module split paid off:
+
+- **Volumes live in `ARPGMagic`; the solvers live in `ARPGWorld`**, as planned,
+  because phase 10 needs the solvers to reach the fluid system. That means a
+  volume cannot call the reaction subsystem directly without closing a cycle, so
+  a volume ANNOUNCES that it met something (a static `OnVolumesMet` delegate) and
+  the subsystem subscribes. Subscribers filter by world -- the delegate is
+  process-wide, and a PIE server and client would otherwise resolve each other's
+  collisions.
+- **`ElementalVolume` is a component over an assigned collider**, not a
+  shape-derived class. A spell is a sphere and a river is a long box; one
+  component serving both beats two classes sharing all their behaviour.
+
+Three corrections to the Godot behaviour, all found by porting it:
+
+1. **Default reaction scaling compounded.** The Godot version multiplied the
+   volume's CURRENT scale by the remaining fraction on every reaction, so two
+   reactions leaving 0.5 then 0.25 of the original energy landed at 0.5x linear
+   instead of 0.63x -- a twice-reacted spell shrank faster than its energy fell.
+   Scaling is now absolute against a captured base scale.
+2. **Geometry must come from the COLLIDER, not the component.** They coincide
+   only when the component sits at the shape's origin, and nothing enforces
+   that. Contact points, conduction hop distances and immersion all read
+   `GetVolumeLocation()` now; the alternative is reactions resolving at a
+   position nothing is actually at.
+3. **The conduction graph queries live rather than reading the overlap cache.**
+   That cache is maintained as a side effect of MOVEMENT, so it is empty for
+   anything standing still -- every reservoir and every puddle. A chain of
+   stationary puddles conducted to nothing. Conduction is rare enough that a real
+   overlap query costs nothing worth saving. Begin-overlap still needs a movable
+   collider, and a static one now warns.
+
+Also wired: conduction delivers damage through the SAME execution every other hit
+uses, so resistance, armour and poise behave identically to being hit by the
+spell itself, and it is routed through the hurtbox so i-frames and dodging still
+apply.
+
 Each phase ends at something verifiable in-editor. From phase 1 onward, verify in **PIE with 2
 clients** (`Net Mode: Play As Listen Server`, 2 players) — catching authority bugs at the phase
 that introduces them is far cheaper than auditing later.
@@ -692,7 +741,7 @@ that introduces them is far cheaper than auditing later.
 | 3 | Poise (attribute + component), flinch/stance-break abilities, parry, block, hit-stop | Light/heavy flinch and stance break all trigger and play remotely |
 | 4 | Mannequin retarget, montages, notifies, weapons, armor, `AttackDefinition` assets, `ComboComponent`, `GA_MeleeAttack` | Full sword moveset plays, branches, buffers, charges, channels — predicted client-side |
 | 5 ✅ | Magic: elements, loadout pages, combination table, complexity gating, all discharge types, imbue, elemental dodge, cloak | fire+water→steam; cast, imbue, dodge all work; charge drain is server-clamped |
-| 6 | `ElementalVolume`, reaction subsystem, conduction subsystem | Fireball into water jet produces steam at the right contact point; lightning floods a puddle chain and hurts a *second player* standing in it |
+| 6 ✅ | `ElementalVolume`, reaction subsystem, conduction subsystem | Fireball into water jet produces steam at the right contact point; lightning floods a puddle chain and hurts a *second player* standing in it |
 | 7 | Progression trackers, inventory, quick slots, consumables | Mastery multiplies discharge damage; quick-slot potions work |
 | 8 | NPC AI — perception, behavior trees, reactive parry | NPC engages, parries a telegraphed swing, flees and heals |
 | 9 | Fire spread subsystem (+ landscape fuel bake, MPC mask, replicated mask) | Grass fire crosses a clearing, burns a second player, rain quenches it |
