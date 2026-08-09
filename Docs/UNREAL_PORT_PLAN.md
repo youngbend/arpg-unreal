@@ -783,6 +783,44 @@ Two small extensions this phase required:
 - `UARPGMagicComponent` raises `OnDischargeExecuted`, the port of Godot's
   `discharge_executed` signal and the magic tracker's XP source.
 
+**Phase 8 — code complete.** Perception, behaviour-tree nodes and the reactive
+parry. 8 new cases; 71 pass in total.
+
+**The tree MACHINERY was deleted, not ported.** Godot hand-rolled BTNode,
+BTComposite, BTDecorator and their per-node blackboard state because Godot has no
+behaviour trees; UE has all of it, with an editor and a gameplay debugger. What
+ported is only the domain: five decorators and tasks that read this game's combat
+components, plus the parry. UE's node memory replaces the blackboard-keyed
+per-node state trick exactly -- one tree asset shared by every goblin, with each
+instance keeping its own timers.
+
+**The reactive parry is where phase 4 pays off.** Its fallback timing reads the
+target's ACTIVE MONTAGE -- time left in Windup, at the montage's own play rate.
+Godot could not do that: AttackDefinition stored clip NAMES with no access to
+durations, so `animation.gd` published `time_until_hit_estimate` every frame
+purely so the AI could read it. A montage knows its own section times, and that
+whole channel disappears into one query.
+
+Its primary path is unchanged and better than a timing constant: it tracks the
+target's live weapon hitbox, solves kinematically for time to contact, and
+compares against a threshold DERIVED from this actor's own parry component
+(`BlendInTime + ParryWindow/2`) so the perfect window is centred on predicted
+contact. Guard timings are never duplicated as a second set of knobs.
+
+**Perception is NOT UAIPerceptionComponent**, deliberately. The design's rule is
+that the sight cone gates ACQUISITION but not retention -- an NPC mid-fight does
+not lose its target by turning its back. UE's sight sense drops a target the
+moment it leaves the cone, so expressing this on top of it means reimplementing
+retention anyway and then fighting the sense's own forget timer. The three
+channels are ~150 lines, deterministic, and testable without a perception system
+tick; `Perception.ConeGatesAcquisitionButNotRetention` pins the rule directly.
+
+Hearing is its own channel and ignores range, cone and line of sight entirely: a
+loud enough sound is heard through a wall and from behind. Noise is a POLLED
+RADIUS rather than UE's event-based hearing sense, because it is a continuous
+property of how a character is moving -- sprinting is loud for as long as you
+sprint, which an event stream would have to synthesise a tick rate to represent.
+
 Each phase ends at something verifiable in-editor. From phase 1 onward, verify in **PIE with 2
 clients** (`Net Mode: Play As Listen Server`, 2 players) — catching authority bugs at the phase
 that introduces them is far cheaper than auditing later.
@@ -797,7 +835,7 @@ that introduces them is far cheaper than auditing later.
 | 5 ✅ | Magic: elements, loadout pages, combination table, complexity gating, all discharge types, imbue, elemental dodge, cloak | fire+water→steam; cast, imbue, dodge all work; charge drain is server-clamped |
 | 6 ✅ | `ElementalVolume`, reaction subsystem, conduction subsystem | Fireball into water jet produces steam at the right contact point; lightning floods a puddle chain and hurts a *second player* standing in it |
 | 7 ✅ | Progression trackers, inventory, quick slots, consumables | Mastery multiplies discharge damage; quick-slot potions work |
-| 8 | NPC AI — perception, behavior trees, reactive parry | NPC engages, parries a telegraphed swing, flees and heals |
+| 8 ✅ | NPC AI — perception, behavior trees, reactive parry | NPC engages, parries a telegraphed swing, flees and heals |
 | 9 | Fire spread subsystem (+ landscape fuel bake, MPC mask, replicated mask) | Grass fire crosses a clearing, burns a second player, rain quenches it |
 | 10 | Fluid surface subsystem (+ Clipper2 backend, dynamic meshing, replicated outlines) | Water pools; ice shard freezes a floe both players can stand on |
 
