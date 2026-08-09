@@ -36,6 +36,8 @@ public:
 	UARPGWeaponComponent();
 
 	virtual void BeginPlay() override;
+	virtual void TickComponent(float DeltaTime, ELevelTick TickType,
+		FActorComponentTickFunction* ThisTickFunction) override;
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
 	/** Equipped on begin play. The character's starting kit. */
@@ -74,6 +76,49 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "ARPG|Weapon")
 	FARPGOnWeaponDrawnChanged OnWeaponDrawnChanged;
 
+	// --- Auto-sheathe ---------------------------------------------------------
+	//
+	// Steel goes away on its own once the fight does, so the player never has to
+	// think about putting it back. Lives here rather than on the character
+	// because this component already owns drawn state -- and because a thing
+	// that puts a weapon away is a weapon concern.
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Weapon|Auto Sheathe")
+	bool bAutoSheatheEnabled = true;
+
+	/** Seconds of no combat activity before the weapon goes away by itself. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Weapon|Auto Sheathe",
+		meta = (ClampMin = "0.0"))
+	float AutoSheatheDelay = 5.f;
+
+	/**
+	 * Restarts the idle countdown. Called on every attack, block and hit taken.
+	 *
+	 * A method rather than a set of delegate bindings: the events that count as
+	 * "still fighting" are not all combat events, and the owner is the only
+	 * thing that knows which ones its own scheme cares about.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "ARPG|Weapon|Auto Sheathe")
+	void NotifyCombatActivity();
+
+	/**
+	 * Holds off the sheathe without resetting the countdown -- for as long as
+	 * something out there is still aiming at you.
+	 *
+	 * The distinction from NotifyCombatActivity is the whole point. Resetting
+	 * while suppressed would mean waiting out another full delay after the last
+	 * enemy disengages; holding AT the threshold means the weapon goes away on
+	 * the very next frame, which is what "the fight is over" should feel like.
+	 *
+	 * Set by the owner: knowing whether an NPC is targeting you needs the AI
+	 * layer, which sits above this module.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "ARPG|Weapon|Auto Sheathe")
+	void SetAutoSheatheSuppressed(bool bSuppressed) { bAutoSheatheSuppressed = bSuppressed; }
+
+	UFUNCTION(BlueprintPure, Category = "ARPG|Weapon|Auto Sheathe")
+	float GetTimeSinceCombatActivity() const { return TimeSinceCombatActivity; }
+
 protected:
 	UFUNCTION()
 	void OnRep_Weapon();
@@ -109,6 +154,12 @@ private:
 
 	/** What this component last added to CritChance, so swapping reverses it exactly. */
 	float AppliedCritChance = 0.f;
+
+	/** Server-authoritative: bDrawn replicates, so only authority may run the countdown. */
+	void TickAutoSheathe(float DeltaTime);
+
+	float TimeSinceCombatActivity = 0.f;
+	bool bAutoSheatheSuppressed = false;
 
 	UPROPERTY(Transient)
 	mutable TObjectPtr<UAbilitySystemComponent> CachedASC;

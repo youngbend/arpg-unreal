@@ -16,6 +16,14 @@
 #include "ARPGHitboxComponent.h"
 #include "ARPGDamageTypeAsset.h"
 #include "ARPGComboComponent.h"
+#include "ARPGInventoryComponent.h"
+#include "ARPGMagicComponent.h"
+#include "ARPGParryComponent.h"
+#include "ARPGQuickSlotComponent.h"
+#include "ARPGWeaponComponent.h"
+#include "ARPGLocomotionComponent.h"
+#include "ARPGModalInputComponent.h"
+#include "ARPGPlayerActionComponent.h"
 #include "ARPGWeaponAttackTree.h"
 #include "ARPGAttackDefinition.h"
 #include "ARPGGameplayAbility_MeleeAttack.h"
@@ -79,6 +87,32 @@ AarpgCharacter::AarpgCharacter()
 
 	ComboComponent = CreateDefaultSubobject<UARPGComboComponent>(TEXT("ComboComponent"));
 
+	// The modal scheme and the two components that consume it. Created in C++
+	// rather than added per-Blueprint because the three only work together: an
+	// input component with nothing listening is silent, and an action component
+	// with no input to bind to never fires.
+	ModalInput = CreateDefaultSubobject<UARPGModalInputComponent>(TEXT("ModalInput"));
+	Locomotion = CreateDefaultSubobject<UARPGLocomotionComponent>(TEXT("Locomotion"));
+	PlayerActions = CreateDefaultSubobject<UARPGPlayerActionComponent>(TEXT("PlayerActions"));
+
+	WeaponComponent = CreateDefaultSubobject<UARPGWeaponComponent>(TEXT("WeaponComponent"));
+	ParryComponent = CreateDefaultSubobject<UARPGParryComponent>(TEXT("ParryComponent"));
+	MagicComponent = CreateDefaultSubobject<UARPGMagicComponent>(TEXT("MagicComponent"));
+
+	// Inventory before quick slots reads like ordering that does not matter, and
+	// it does not -- the quick-slot component resolves its inventory lazily by
+	// class, not by construction order. Kept adjacent because they are one
+	// feature: a bar with nothing behind it has nothing to hand out.
+	InventoryComponent = CreateDefaultSubobject<UARPGInventoryComponent>(TEXT("InventoryComponent"));
+	QuickSlotComponent = CreateDefaultSubobject<UARPGQuickSlotComponent>(TEXT("QuickSlotComponent"));
+
+	// The movement component's own default is what the character runs at, so the
+	// tiers are anchored to it rather than to a second set of numbers that could
+	// silently disagree with the Blueprint's.
+	Locomotion->RunSpeed = GetCharacterMovement()->MaxWalkSpeed;
+	Locomotion->WalkSpeed = Locomotion->RunSpeed * 0.4f;
+	Locomotion->SprintSpeed = Locomotion->RunSpeed * 1.5f;
+
 	// The melee ability is the one thing without which the whole attack path is
 	// silently inert, so it is defaulted here rather than left to per-Blueprint
 	// setup.
@@ -106,6 +140,22 @@ void AarpgCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCompo
 
 		// Looking
 		EnhancedInputComponent->BindAction(LookAction, ETriggerEvent::Triggered, this, &AarpgCharacter::Look);
+
+		// Sprint toggle
+		if (SprintAction)
+		{
+			EnhancedInputComponent->BindAction(SprintAction, ETriggerEvent::Started, this,
+				&AarpgCharacter::ToggleSprint);
+		}
+
+		// The whole modal scheme in one call. LAST, so the template's own
+		// bindings above keep their dispatch order -- and first among the modal
+		// bindings themselves are the two triggers, which is what makes a
+		// same-frame trigger-plus-face press resolve as modal. See BindActions.
+		if (ModalInput)
+		{
+			ModalInput->BindActions(EnhancedInputComponent);
+		}
 	}
 	else
 	{
@@ -131,8 +181,31 @@ void AarpgCharacter::Look(const FInputActionValue& Value)
 	DoLook(LookAxisVector.X, LookAxisVector.Y);
 }
 
+void AarpgCharacter::ToggleSprint()
+{
+	if (Locomotion)
+	{
+		Locomotion->ToggleSprint();
+	}
+}
+
 void AarpgCharacter::DoMove(float Right, float Forward)
 {
+	if (Locomotion)
+	{
+		// How hard the stick is pushed, before the camera turns it into a
+		// direction. Centring it ends a sprint, and a sprint in progress ignores
+		// the magnitude entirely -- see UARPGLocomotionComponent.
+		Locomotion->SetMoveMagnitude(FVector2D(Right, Forward).Size());
+
+		if (Locomotion->ShouldIgnoreInputMagnitude())
+		{
+			const FVector2D Normalised = FVector2D(Right, Forward).GetSafeNormal();
+			Right = static_cast<float>(Normalised.X);
+			Forward = static_cast<float>(Normalised.Y);
+		}
+	}
+
 	if (GetController() != nullptr)
 	{
 		// find out which way is forward

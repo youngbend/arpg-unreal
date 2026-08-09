@@ -15,6 +15,14 @@ class UARPGAbilitySystemComponent;
 class UARPGHitboxComponent;
 class UARPGDamageTypeAsset;
 class UARPGComboComponent;
+class UARPGInventoryComponent;
+class UARPGLocomotionComponent;
+class UARPGMagicComponent;
+class UARPGParryComponent;
+class UARPGQuickSlotComponent;
+class UARPGWeaponComponent;
+class UARPGModalInputComponent;
+class UARPGPlayerActionComponent;
 class UARPGWeaponAttackTree;
 class UGameplayAbility;
 struct FInputActionValue;
@@ -58,6 +66,17 @@ protected:
 	/** Mouse Look Input Action */
 	UPROPERTY(EditAnywhere, Category="Input")
 	UInputAction* MouseLookAction;
+
+	/**
+	 *  Sprint toggle. A TOGGLE, not a hold -- see UARPGLocomotionComponent.
+	 *
+	 *  Bound here rather than on the modal input component because sprinting is
+	 *  not modal: it means the same thing whichever trigger is down, so routing
+	 *  it through a component whose entire job is deciding what a button means
+	 *  under a modifier would be putting it in the wrong place.
+	 */
+	UPROPERTY(EditAnywhere, Category="Input")
+	UInputAction* SprintAction;
 
 public:
 
@@ -187,6 +206,43 @@ protected:
 
 	UPROPERTY(VisibleAnywhere, Category = "Components")
 	TObjectPtr<UARPGComboComponent> ComboComponent;
+
+	/** The modal control scheme. Bound in SetupPlayerInputComponent. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UARPGModalInputComponent> ModalInput;
+
+	/** Speed tiers and the stamina that pays for the sprint. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UARPGLocomotionComponent> Locomotion;
+
+	/** Routes modal input events into the combat and magic components. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UARPGPlayerActionComponent> PlayerActions;
+
+	// The components the modal scheme routes INTO. Created here rather than
+	// added per-Blueprint because the scheme is not partially useful: a control
+	// layout whose magic buttons reach nothing is not a smaller feature, it is a
+	// controller with dead keys. Every handler null-checks, so a derived pawn
+	// may still remove any of them.
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UARPGWeaponComponent> WeaponComponent;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UARPGParryComponent> ParryComponent;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UARPGMagicComponent> MagicComponent;
+
+	/** The bar the D-pad cycles. Reads its stock from the inventory below. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UARPGQuickSlotComponent> QuickSlotComponent;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UARPGInventoryComponent> InventoryComponent;
+
+	/** Toggles the sprint. */
+	void ToggleSprint();
 
 	bool bAbilitiesGranted = false;
 

@@ -4,8 +4,10 @@
 #include "ARPGCombat.h"
 #include "ARPGComboComponent.h"
 #include "ARPGDamageTypeAsset.h"
+#include "ARPGGameplayTags.h"
 #include "ARPGHitboxComponent.h"
 #include "ARPGOffenseSet.h"
+#include "ARPGParryComponent.h"
 #include "ARPGWeaponAttackTree.h"
 #include "ARPGWeaponDefinition.h"
 #include "AbilitySystemComponent.h"
@@ -14,8 +16,17 @@
 
 UARPGWeaponComponent::UARPGWeaponComponent()
 {
-	PrimaryComponentTick.bCanEverTick = false;
+	// Ticks only while the weapon is actually out; see SetDrawn.
+	PrimaryComponentTick.bCanEverTick = true;
+	PrimaryComponentTick.bStartWithTickEnabled = false;
 	SetIsReplicatedByDefault(true); // clients need to know what is equipped
+}
+
+void UARPGWeaponComponent::TickComponent(float DeltaTime, ELevelTick TickType,
+	FActorComponentTickFunction* ThisTickFunction)
+{
+	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+	TickAutoSheathe(DeltaTime);
 }
 
 void UARPGWeaponComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -167,6 +178,11 @@ void UARPGWeaponComponent::SetDrawn(bool bNewDrawn)
 	bDrawn = bNewDrawn;
 	OnWeaponDrawnChanged.Broadcast(bDrawn);
 
+	// Drawing IS combat activity, so the countdown starts from the draw rather
+	// than from whatever happened before it.
+	TimeSinceCombatActivity = 0.f;
+	SetComponentTickEnabled(bDrawn);
+
 	// Sheathing abandons the combo: redrawing mid-reset-timer would otherwise
 	// resume the chain from wherever it was left off, which reads as the
 	// character remembering a swing they put away.
@@ -177,6 +193,63 @@ void UARPGWeaponComponent::SetDrawn(bool bNewDrawn)
 			Combo->ResetCombo();
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Auto-sheathe
+// ---------------------------------------------------------------------------
+
+void UARPGWeaponComponent::NotifyCombatActivity()
+{
+	TimeSinceCombatActivity = 0.f;
+}
+
+void UARPGWeaponComponent::TickAutoSheathe(float DeltaTime)
+{
+	const AActor* Owner = GetOwner();
+	if (!bAutoSheatheEnabled || !bDrawn || !Owner || !Owner->HasAuthority())
+	{
+		return;
+	}
+
+	// Abandoned entirely while dead, timer and all. The death animation and the
+	// respawn both put the weapon away on their own terms, and a sheathe that
+	// fired during the death window would resolve visually at the far end of it
+	// -- the character appears to put their sword away the instant they spawn.
+	const UAbilitySystemComponent* ASC = GetASC();
+	if (ASC && ASC->HasMatchingGameplayTag(TAG_State_Dead))
+	{
+		TimeSinceCombatActivity = 0.f;
+		return;
+	}
+
+	// Mid-swing or mid-block is activity by definition, and neither reports
+	// itself frame by frame -- a long channel would otherwise time out and
+	// sheathe the weapon it is still swinging.
+	const UARPGComboComponent* Combo = GetCombo();
+	const UARPGParryComponent* Parry = Owner->FindComponentByClass<UARPGParryComponent>();
+	if ((Combo && Combo->IsAttacking()) || (Parry && Parry->IsBlocking()))
+	{
+		TimeSinceCombatActivity = 0.f;
+		return;
+	}
+
+	TimeSinceCombatActivity += DeltaTime;
+	if (TimeSinceCombatActivity < AutoSheatheDelay)
+	{
+		return;
+	}
+
+	if (bAutoSheatheSuppressed)
+	{
+		// HELD at the threshold, not reset -- see SetAutoSheatheSuppressed. The
+		// weapon goes away on the first frame after the last enemy loses
+		// interest, not a full delay later.
+		TimeSinceCombatActivity = AutoSheatheDelay;
+		return;
+	}
+
+	SetDrawn(false);
 }
 
 float UARPGWeaponComponent::GetEffectiveDamage(float MotionValue) const

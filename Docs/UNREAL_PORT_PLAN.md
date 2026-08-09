@@ -909,6 +909,75 @@ energy trade, and conduction checks whether a strike was roofed by a solid --
 NOT THROUGH THE ICE, since a floe roofs over the water beneath it and the pool's
 own collider knows nothing about that.
 
+**Phase 11 -- code complete. Not in the original ten: this is the layer that
+makes the other ten reachable from a controller.** The modal control scheme, the
+speed tiers, the buffering, and auto-sheathe. 13 new cases; 99 pass in total.
+
+The gate is a controller in hand: LT + face readies an element, RT + face
+charges and discharges it, a swing spends what is in hand as an imbue, and steel
+puts itself away when the fight ends.
+
+**The scheme splits across THREE components rather than living on the pawn**,
+which is the one structural departure from Godot's PlayerCharacter and the
+reason any of it is testable:
+
+- `UARPGModalInputComponent` (ARPGCore) -- raw actions in, semantic events out,
+  zero gameplay knowledge. Runs with no pawn, no controller and no ability
+  system, which is how the modal rules get tested at all.
+- `UARPGLocomotionComponent` (ARPGCore) -- three speed tiers, the sprint toggle,
+  and the stamina that pays for it. Writes `MaxWalkSpeed` and nothing else; the
+  movement itself stays with the engine.
+- `UARPGPlayerActionComponent` (game module) -- where buttons meet systems, and
+  therefore where the element-consumption rule lives. It is deliberately NOT in
+  a runtime module: deciding that a swing imbues and a dodge goes elemental is a
+  choice BETWEEN the combat and magic systems, so it cannot sit inside either.
+
+Enhanced Input made one thing easier and one thing harder than the Godot
+version. Easier: LB's press and release are edges the engine already reports, so
+the original's `_process`-time polling of the parry action is gone. Harder: the
+original had a real bug where a trigger and a face button pressed on the same
+frame routed as a plain attack, because the cached modifier flag was only
+refreshed after input was delivered. Two things fix it here -- **the modifiers
+are bound FIRST**, since Enhanced Input dispatches a frame's bindings in the
+order they were added, and `PollModifiers()` re-reads the live action state at
+the moment of the press anyway.
+
+Three rules are preserved exactly, and every one of them looks like a bug from
+outside:
+
+- **LT + D-pad Up is swallowed.** Nothing is bound to it and the press is still
+  consumed, so being a frame late releasing LT cannot drink a potion.
+- **Releasing RT does not cancel a charge.** RT chooses the mode; from there the
+  charge belongs to its own face button. The release is checked BEFORE the
+  modifiers, so picking up LT mid-charge does not turn the release into an
+  element select either.
+- **Dodge, block and element select buffer to the cancel window; drinking does
+  not.** A potion that arrives several beats late, once the swing finally ends,
+  is worse than one that plainly did not happen.
+
+Two corrections to the original:
+
+- **`discharge_cancelled` was declared and never emitted.** A charge begun
+  before dying survived the respawn and fired on the first face release
+  afterwards. `CancelCharge()` now exists and is what the owner calls.
+- **The discharge activates on the PRESS, not the release.** Godot measured the
+  charge in the input layer and handed a number over at the end. Here the
+  ability owns it, because the charge is not a measurement -- it is a process
+  that spends mana server-side while the button is down and forces the release
+  when the player runs dry. The input layer still reports a charge fraction, and
+  that number is now explicitly a UI value rather than a gameplay one.
+
+Auto-sheathe went onto `UARPGWeaponComponent` rather than the character, since
+that component already owns drawn state. Its suppression flag HOLDS the idle
+timer at the threshold instead of resetting it -- so the weapon goes away on the
+first frame after the last enemy disengages, not a full delay later.
+
+**Still open from this phase**: per-weapon block timings. Godot's
+`BlockDefinition` carried its own blend-in and parry window so a buckler and a
+greatshield differed; those still come from the parry component's own settings.
+That belongs with the rest of the per-weapon animation fields, which are waiting
+on content.
+
 Each phase ends at something verifiable in-editor. From phase 1 onward, verify in **PIE with 2
 clients** (`Net Mode: Play As Listen Server`, 2 players) — catching authority bugs at the phase
 that introduces them is far cheaper than auditing later.
@@ -926,6 +995,7 @@ that introduces them is far cheaper than auditing later.
 | 8 ✅ | NPC AI — perception, behavior trees, reactive parry | NPC engages, parries a telegraphed swing, flees and heals |
 | 9 ✅ | Fire spread subsystem (+ landscape fuel bake, MPC mask, replicated mask) | Grass fire crosses a clearing, burns a second player, rain quenches it |
 | 10 ✅ | Fluid surface subsystem (+ Clipper2 backend, dynamic meshing, replicated outlines) | Water pools; ice shard freezes a floe both players can stand on |
+| 11 ✅ | Modal input scheme, speed tiers and sprint stamina, input buffering, element-consumption routing, auto-sheathe | Controller in hand: LT+face readies, RT+face discharges, a swing imbues, steel sheathes itself |
 
 Phases 1–3 are close to mechanical transcription. **Phase 4 is the largest single risk** — it
 combines the animation rewrite with the mannequin retarget. Phases 9–10 are self-contained and

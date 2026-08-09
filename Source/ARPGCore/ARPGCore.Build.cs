@@ -20,6 +20,13 @@ public class ARPGCore : ModuleRules
 			"GameplayTasks"
 		});
 
-		PrivateDependencyModuleNames.AddRange(new string[] { });
+		// PRIVATE on purpose. The modal input component binds Enhanced Input in
+		// its .cpp and names UInputAction only as a forward declaration in its
+		// header, so nothing downstream inherits an input dependency it has no
+		// use for -- ARPGCombat, ARPGMagic, ARPGWorld and ARPGAI all sit on top
+		// of this module and none of them read input.
+		PrivateDependencyModuleNames.AddRange(new string[] {
+			"EnhancedInput"
+		});
 	}
 }
