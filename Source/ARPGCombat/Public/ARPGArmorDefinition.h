@@ -93,9 +93,13 @@ public:
 	/** Every resistance this piece grants, summed per damage type. */
 	TMap<TObjectPtr<UARPGDamageTypeAsset>, float> GetAggregatedResistances() const;
 
-	/** Stable lowercase id, used as the mastery progression key. */
+	/** Stable lowercase id, for display and legacy keying. */
 	UFUNCTION(BlueprintPure, Category = "ARPG|Armor")
 	static FName ArmorTypeToName(EARPGArmorType Type);
+
+	/** The progression id for this armour's type. */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Armor")
+	static FGameplayTag ArmorTypeToTag(EARPGArmorType Type);
 
 	virtual FPrimaryAssetId GetPrimaryAssetId() const override
 	{

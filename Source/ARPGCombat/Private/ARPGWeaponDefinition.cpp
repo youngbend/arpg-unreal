@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ARPGWeaponDefinition.h"
+#include "ARPGGameplayTags.h"
 #include "ARPGDamageTypeAsset.h"
 
 float UARPGWeaponDefinition::GetTotalFlatDamageBonus() const
@@ -66,5 +67,23 @@ FName UARPGWeaponDefinition::WeaponTypeToName(EARPGWeaponType Type)
 	case EARPGWeaponType::Orb:        return TEXT("orb");
 	case EARPGWeaponType::Unarmed:
 	default:                          return TEXT("unarmed");
+	}
+}
+
+FGameplayTag UARPGWeaponDefinition::WeaponTypeToTag(EARPGWeaponType Type)
+{
+	switch (Type)
+	{
+	case EARPGWeaponType::Sword:      return TAG_Weapon_Sword;
+	case EARPGWeaponType::Axe:        return TAG_Weapon_Axe;
+	case EARPGWeaponType::Mace:       return TAG_Weapon_Mace;
+	case EARPGWeaponType::Spear:      return TAG_Weapon_Spear;
+	case EARPGWeaponType::Dagger:     return TAG_Weapon_Dagger;
+	case EARPGWeaponType::Greatsword: return TAG_Weapon_Greatsword;
+	case EARPGWeaponType::Staff:      return TAG_Weapon_Staff;
+	case EARPGWeaponType::Wand:       return TAG_Weapon_Wand;
+	case EARPGWeaponType::Orb:        return TAG_Weapon_Orb;
+	case EARPGWeaponType::Unarmed:
+	default:                          return TAG_Weapon_Unarmed;
 	}
 }

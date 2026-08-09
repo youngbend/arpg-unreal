@@ -299,7 +299,7 @@ void UARPGHitboxComponent::DeliverHit(UARPGHurtboxComponent* Hurtbox, const FHit
 	}
 
 	Hurtbox->OnHitReceived.Broadcast(ContextHandle, BaseDamage);
-	OnHitLanded.Broadcast(Hit.GetActor(), Hit);
+	OnHitLanded.Broadcast(Hit.GetActor(), Hit, BaseDamage);
 }
 
 AActor* UARPGHitboxComponent::ResolveSourceActor() const

@@ -14,8 +14,15 @@ class UARPGHurtboxComponent;
 class UGameplayEffect;
 class UAbilitySystemComponent;
 
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FARPGOnHitLanded,
-	AActor*, HitActor, const FHitResult&, Hit);
+/**
+ * Damage is the amount the hitbox APPLIED, before the target's mitigation.
+ *
+ * Pre-mitigation on purpose: the attacker-side consumers are progression and
+ * feedback, and earning less proficiency for fighting an armoured enemy would
+ * punish the player for the fight being harder.
+ */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FARPGOnHitLanded,
+	AActor*, HitActor, const FHitResult&, Hit, float, Damage);
 
 /**
  * Delivers damage along a swing. Port of Godot's HitboxComponent.

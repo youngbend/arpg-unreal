@@ -18,6 +18,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FARPGOnSelectionChanged, int32, Acti
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FARPGOnCombinationResolved, UARPGMagicElement*, Combination);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FARPGOnSpellFailed, FGameplayTagContainer, ActiveElements);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FARPGOnElementBlocked, EARPGElementSlot, Slot, UARPGMagicElement*, Element);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FARPGOnDischargeExecuted, const FARPGDischargeContext&, Context);
 
 /**
  * The four authoring knobs that differ per discharge type.
@@ -226,11 +227,11 @@ public:
 		FVector Direction, float Charge, bool bForcedRelease = false) const;
 
 	/**
-	 * Called by a discharge ability once the cast has actually happened: clears
-	 * the selection and remembers it for auto-ready.
+	 * Called by a discharge ability once the cast has actually happened: raises
+	 * OnDischargeExecuted, clears the selection, and remembers it for auto-ready.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "ARPG|Magic")
-	void NotifyDischarged();
+	void NotifyDischarged(const FARPGDischargeContext& Context);
 
 	/** Total mana a cast of this type at this charge would cost. */
 	UFUNCTION(BlueprintPure, Category = "ARPG|Magic")
@@ -306,6 +307,14 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "ARPG|Magic")
 	FARPGOnElementBlocked OnElementActivationFailed;
 
+	/**
+	 * A cast actually happened. Fires on every discharge whether or not the
+	 * resulting effect lands on anything, which is what the magic progression
+	 * tracker keys off -- see UARPGMagicProgressionTracker.
+	 */
+	UPROPERTY(BlueprintAssignable, Category = "ARPG|Magic")
+	FARPGOnDischargeExecuted OnDischargeExecuted;
+
 protected:
 	UFUNCTION(Server, Reliable)
 	void ServerToggleElement(EARPGElementSlot Slot);
@@ -341,6 +350,17 @@ private:
 
 	float GetEffectiveLevel(const UARPGMagicElement* Element) const;
 	float GetMasteryDamageMultiplier(const UARPGMagicElement* Element) const;
+
+	/**
+	 * Whoever answers for this caster's mastery: a component implementing
+	 * IARPGMagicProgression, or the owning actor itself.
+	 *
+	 * Components are checked FIRST because the real tracker is one; the actor
+	 * fallback exists so a simple test caster can answer without hosting a
+	 * component. Null means no progression system applies -- gating off, and
+	 * multipliers at 1.
+	 */
+	UObject* GetProgressionProvider() const;
 
 	/** Outgoing damage amp, so one Weakened weakens spells and swings alike. */
 	float GetDamageAmpMultiplier() const;

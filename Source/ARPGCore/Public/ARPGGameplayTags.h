@@ -52,6 +52,31 @@ ARPGCORE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Element_Steam);
 ARPGCORE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Element_ConductedLightning);
 
 // -----------------------------------------------------------------------------
+// Progression subcomponents
+//
+// Weapon and armour TYPES, as the ids progression tracks proficiency against.
+// Tags rather than the enums they mirror because a tracker keys every category
+// the same way -- Element.Fire, Weapon.Sword and Armor.Heavy are all just "which
+// thing did you use" -- and one keying scheme means one tracker rather than
+// three that differ only in their map type.
+// -----------------------------------------------------------------------------
+ARPGCORE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Weapon_Unarmed);
+ARPGCORE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Weapon_Sword);
+ARPGCORE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Weapon_Axe);
+ARPGCORE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Weapon_Mace);
+ARPGCORE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Weapon_Spear);
+ARPGCORE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Weapon_Dagger);
+ARPGCORE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Weapon_Greatsword);
+ARPGCORE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Weapon_Staff);
+ARPGCORE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Weapon_Wand);
+ARPGCORE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Weapon_Orb);
+
+ARPGCORE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Armor_Unarmored);
+ARPGCORE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Armor_Light);
+ARPGCORE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Armor_Medium);
+ARPGCORE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Armor_Heavy);
+
+// -----------------------------------------------------------------------------
 // Status effects  (project/combat/status_effects/*.tres)
 // -----------------------------------------------------------------------------
 ARPGCORE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Status_Burning);

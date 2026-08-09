@@ -96,28 +96,49 @@ float UARPGMagicComponent::GetDamageAmpMultiplier() const
 	return Amp > 0.f ? Amp : 1.f;
 }
 
+UObject* UARPGMagicComponent::GetProgressionProvider() const
+{
+	AActor* Owner = GetOwner();
+	if (!Owner)
+	{
+		return nullptr;
+	}
+
+	// Components first: the real tracker is one, and an actor that also happens
+	// to implement the interface (a test caster) should not shadow it.
+	TArray<UActorComponent*> Components;
+	Owner->GetComponents(Components);
+	for (UActorComponent* Component : Components)
+	{
+		if (Component && Component->Implements<UARPGMagicProgression>())
+		{
+			return Component;
+		}
+	}
+
+	return Owner->Implements<UARPGMagicProgression>() ? Owner : nullptr;
+}
+
 float UARPGMagicComponent::GetEffectiveLevel(const UARPGMagicElement* Element) const
 {
-	const AActor* Owner = GetOwner();
-	if (!Element || !Owner || !Owner->Implements<UARPGMagicProgression>())
+	UObject* Provider = Element ? GetProgressionProvider() : nullptr;
+	if (!Provider)
 	{
 		return 0.f;
 	}
 
-	return IARPGMagicProgression::Execute_GetEffectiveElementLevel(
-		const_cast<AActor*>(Owner), Element->ElementTag);
+	return IARPGMagicProgression::Execute_GetEffectiveElementLevel(Provider, Element->ElementTag);
 }
 
 float UARPGMagicComponent::GetMasteryDamageMultiplier(const UARPGMagicElement* Element) const
 {
-	const AActor* Owner = GetOwner();
-	if (!Element || !Owner || !Owner->Implements<UARPGMagicProgression>())
+	UObject* Provider = Element ? GetProgressionProvider() : nullptr;
+	if (!Provider)
 	{
 		return 1.f;
 	}
 
-	return IARPGMagicProgression::Execute_GetElementDamageMultiplier(
-		const_cast<AActor*>(Owner), Element->ElementTag);
+	return IARPGMagicProgression::Execute_GetElementDamageMultiplier(Provider, Element->ElementTag);
 }
 
 // ---------------------------------------------------------------------------
@@ -185,8 +206,7 @@ bool UARPGMagicComponent::PassesComplexityGate(const UARPGMagicElement* Candidat
 		return true;
 	}
 
-	const AActor* Owner = GetOwner();
-	if (!Owner || !Owner->Implements<UARPGMagicProgression>())
+	if (!GetProgressionProvider())
 	{
 		return true; // no progression wired up = gating disabled, e.g. an NPC
 	}
@@ -520,8 +540,11 @@ FARPGDischargeContext UARPGMagicComponent::BuildDischargeContext(EARPGDischargeT
 	return Context;
 }
 
-void UARPGMagicComponent::NotifyDischarged()
+void UARPGMagicComponent::NotifyDischarged(const FARPGDischargeContext& Context)
 {
+	// Raised BEFORE the clear, so a listener still sees what was readied.
+	OnDischargeExecuted.Broadcast(Context);
+
 	// Remembered before the clear, so pressing cast again with nothing readied
 	// re-readies exactly what was just cast.
 	LastDischargedMask = ActiveMask;

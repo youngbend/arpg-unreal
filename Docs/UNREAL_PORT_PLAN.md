@@ -729,6 +729,60 @@ uses, so resistance, armour and poise behave identically to being hit by the
 spell itself, and it is routed through the hurtbox so i-frames and dodging still
 apply.
 
+**Phase 7 — code complete.** Progression trackers, the visible level, inventory,
+quick slots and consumables. 13 new cases; 63 pass in total.
+
+The plan's gate is met on both halves: `Progression.Tracker.
+MasteryMultipliesDischargeDamage` drives a real tracker through the magic
+component and asserts the damage, and `Inventory.QuickSlots.
+UsingSpendsOneAndStartsTheCooldown` covers the potion path end to end.
+
+**`IARPGMagicProgression` is now implemented.** Phase 5 deliberately left it
+open; `UARPGMagicProgressionTracker` closes it. The magic component now looks for
+the interface on the owner's COMPONENTS before the actor, so the real tracker
+wins over the test caster's stub. Both branches of the gate are pinned: a caster
+with no progression is exempt, and a caster with an empty tracker is gated.
+
+Structural decisions:
+
+- **Three Godot trackers became one base plus three thin subclasses.** They
+  differed only in what they listened to and what they called a subcomponent;
+  the level model, mastery window and multiplier were duplicated across all
+  three. Keying every category by gameplay tag -- `Element.Fire`,
+  `Weapon.Sword`, `Armor.Heavy` are all just "which thing did you use" --
+  collapses the duplication.
+- **Mastery is a window query, not a fourth stored level.** It is the fraction of
+  recent use attributed to one subcomponent, so it FADES when the player switches
+  -- which a stored number could not express without a decay tick. Its floor at
+  proficiency 3 is what stops a decaying window silently re-locking combinations
+  the player had unlocked.
+- **Allocation recomputes an absolute total**, never a delta. Re-applying a save
+  has to land on the same number; a delta compounds every point on every load,
+  which is invisible in one session and unbounded across many. Pinned by
+  `Level.AllocationIsIdempotent`.
+- **XP sources differ deliberately.** Weapons progress on LANDING hits, magic on
+  CASTING at all. Skill with a sword is about connecting; skill with an element
+  is about use, and requiring a hit would leave a purely healing or debuffing
+  element unable to progress. Armour progresses on being hit, which is the only
+  thing armour does.
+
+**Consumables became GameplayEffects.** Godot's `ConsumableEffect` carried a
+ten-value enum -- restore, restore-over-time, damage amp, resistance buff, status
+immunity -- with a switch applying each. Every one of those is exactly what a GE
+is, and keeping the enum would mean a second, worse effect system inside a
+project that already has GAS. The cost is that "restore 50 health" is an asset
+rather than a number; the gain is stacking, refresh, dispel and resistance for
+free, plus effects the enum could never express.
+
+Two small extensions this phase required:
+
+- `FARPGOnHitLanded` now carries the damage it applied, pre-mitigation. A hit
+  that landed without saying how hard is not much use to a listener, and
+  pre-mitigation is the right basis for progression: earning less proficiency for
+  fighting an armoured enemy would punish the player for the fight being harder.
+- `UARPGMagicComponent` raises `OnDischargeExecuted`, the port of Godot's
+  `discharge_executed` signal and the magic tracker's XP source.
+
 Each phase ends at something verifiable in-editor. From phase 1 onward, verify in **PIE with 2
 clients** (`Net Mode: Play As Listen Server`, 2 players) — catching authority bugs at the phase
 that introduces them is far cheaper than auditing later.
@@ -742,7 +796,7 @@ that introduces them is far cheaper than auditing later.
 | 4 | Mannequin retarget, montages, notifies, weapons, armor, `AttackDefinition` assets, `ComboComponent`, `GA_MeleeAttack` | Full sword moveset plays, branches, buffers, charges, channels — predicted client-side |
 | 5 ✅ | Magic: elements, loadout pages, combination table, complexity gating, all discharge types, imbue, elemental dodge, cloak | fire+water→steam; cast, imbue, dodge all work; charge drain is server-clamped |
 | 6 ✅ | `ElementalVolume`, reaction subsystem, conduction subsystem | Fireball into water jet produces steam at the right contact point; lightning floods a puddle chain and hurts a *second player* standing in it |
-| 7 | Progression trackers, inventory, quick slots, consumables | Mastery multiplies discharge damage; quick-slot potions work |
+| 7 ✅ | Progression trackers, inventory, quick slots, consumables | Mastery multiplies discharge damage; quick-slot potions work |
 | 8 | NPC AI — perception, behavior trees, reactive parry | NPC engages, parries a telegraphed swing, flees and heals |
 | 9 | Fire spread subsystem (+ landscape fuel bake, MPC mask, replicated mask) | Grass fire crosses a clearing, burns a second player, rain quenches it |
 | 10 | Fluid surface subsystem (+ Clipper2 backend, dynamic meshing, replicated outlines) | Water pools; ice shard freezes a floe both players can stand on |

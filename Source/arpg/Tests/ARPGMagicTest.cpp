@@ -614,7 +614,8 @@ bool FARPGMagicAutoReadyTest::RunTest(const FString& Parameters)
 	Rig.Magic->ToggleElement(EARPGElementSlot::West);
 	TestEqual(TEXT("Setup: steam is readied"), Rig.Magic->GetActiveCount(), 2);
 
-	Rig.Magic->NotifyDischarged();
+	Rig.Magic->NotifyDischarged(Rig.Magic->BuildDischargeContext(
+		EARPGDischargeType::Burst, FVector::ZeroVector, FVector::ForwardVector, 0.f));
 	TestEqual(TEXT("Casting clears the mix"), Rig.Magic->GetActiveCount(), 0);
 
 	const float BeforeAutoReady = Rig.Mana();

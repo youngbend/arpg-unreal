@@ -27,6 +27,23 @@ UE_DEFINE_GAMEPLAY_TAG(TAG_Element_Ice,                "Element.Ice");
 UE_DEFINE_GAMEPLAY_TAG(TAG_Element_Steam,              "Element.Steam");
 UE_DEFINE_GAMEPLAY_TAG(TAG_Element_ConductedLightning, "Element.ConductedLightning");
 
+// Progression subcomponents.
+UE_DEFINE_GAMEPLAY_TAG(TAG_Weapon_Unarmed,             "Weapon.Unarmed");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Weapon_Sword,               "Weapon.Sword");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Weapon_Axe,                 "Weapon.Axe");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Weapon_Mace,                "Weapon.Mace");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Weapon_Spear,               "Weapon.Spear");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Weapon_Dagger,              "Weapon.Dagger");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Weapon_Greatsword,          "Weapon.Greatsword");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Weapon_Staff,               "Weapon.Staff");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Weapon_Wand,                "Weapon.Wand");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Weapon_Orb,                 "Weapon.Orb");
+
+UE_DEFINE_GAMEPLAY_TAG(TAG_Armor_Unarmored,            "Armor.Unarmored");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Armor_Light,                "Armor.Light");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Armor_Medium,               "Armor.Medium");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Armor_Heavy,                "Armor.Heavy");
+
 // Status effects.
 UE_DEFINE_GAMEPLAY_TAG(TAG_Status_Burning,  "Status.Burning");
 UE_DEFINE_GAMEPLAY_TAG(TAG_Status_Shocked,  "Status.Shocked");

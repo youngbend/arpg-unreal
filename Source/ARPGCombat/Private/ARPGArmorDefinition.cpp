@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ARPGArmorDefinition.h"
+#include "ARPGGameplayTags.h"
 #include "ARPGDamageTypeAsset.h"
 
 float UARPGArmorDefinition::GetTotalArmorValue() const
@@ -56,5 +57,17 @@ FName UARPGArmorDefinition::ArmorTypeToName(EARPGArmorType Type)
 	case EARPGArmorType::Heavy:  return TEXT("heavy");
 	case EARPGArmorType::Unarmored:
 	default:                     return TEXT("unarmored");
+	}
+}
+
+FGameplayTag UARPGArmorDefinition::ArmorTypeToTag(EARPGArmorType Type)
+{
+	switch (Type)
+	{
+	case EARPGArmorType::Light:  return TAG_Armor_Light;
+	case EARPGArmorType::Medium: return TAG_Armor_Medium;
+	case EARPGArmorType::Heavy:  return TAG_Armor_Heavy;
+	case EARPGArmorType::Unarmored:
+	default:                     return TAG_Armor_Unarmored;
 	}
 }

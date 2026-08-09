@@ -166,7 +166,7 @@ void UARPGGameplayAbility_Discharge::OnChargeReleased(float ChargeFraction, bool
 	if (HasAuthority(&CurrentActivationInfo))
 	{
 		PerformDischarge(Context);
-		Magic->NotifyDischarged();
+		Magic->NotifyDischarged(Context);
 	}
 
 	EndAbility(CurrentSpecHandle, CurrentActorInfo, CurrentActivationInfo, true, false);

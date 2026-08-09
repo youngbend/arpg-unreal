@@ -159,6 +159,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "ARPG|Weapon")
 	float GetTotalFlatDamageBonus() const;
 
+	/** The progression id for this weapon's type. */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Weapon")
+	static FGameplayTag WeaponTypeToTag(EARPGWeaponType Type);
+
 	UFUNCTION(BlueprintPure, Category = "ARPG|Weapon")
 	float GetTotalCritChanceBonus() const;
 
