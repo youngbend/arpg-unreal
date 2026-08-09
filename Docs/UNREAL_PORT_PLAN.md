@@ -821,6 +821,51 @@ RADIUS rather than UE's event-based hearing sense, because it is a continuous
 property of how a character is moving -- sprinting is loud for as long as you
 sprint, which an event stream would have to synthesise a tick rate to represent.
 
+**Phase 9 — code complete.** The fire spread field, the fuel map, cross-medium
+attrition and contact damage. 7 new cases; 78 pass in total.
+
+Both halves of the plan's gate are covered: `Spread.ReachScalesWithEnergyPutIn`
+shows a fire crossing open ground, and `Spread.RainQuenchesFire` puts it out.
+Burning a second player is the contact-damage path, which routes through the
+hurtbox and so is the same delivery every other damage source uses.
+
+**THE PROPERTY WORTH PROTECTING is that reach is bounded by energy.** Under the
+conserved budget, every unit of exposure a burning cell delivers is paid for out
+of a finite bank -- seeded by whatever lit it, topped up by burning fuel. That
+makes "how far does a fire travel" a linear function of "how much went in"
+instead of a binary stall-or-firestorm. It is also one tuning slip from being
+wrong, because the sub-critical condition (a cell yields less over its life than
+lighting the next one costs) is a relationship between three authored numbers
+that no code enforces -- so the definition's validation now states it as a
+warning, and two tests pin it from either side.
+
+Two bugs the tests found, both in code written this phase:
+
+1. **Media were rebuilt only on seeding.** Setting fuel before the first seed
+   silently did nothing -- the medium it named did not exist yet -- so a
+   firebreak painted that way simply burned. Every entry point now ensures the
+   media list, including the const queries, which is why the cache is mutable.
+2. **A cell driven cold by ATTRITION kept its energy bank.** The cooling branch
+   that drops the bank was only reached by a cell that cooled naturally; one
+   quenched by rain skipped it entirely, so the moment the rain stopped the fire
+   could re-ignite at the reach it had before.
+
+Structural notes:
+
+- **Fuel is baked, not sampled.** Landscape foliage density is expensive to query
+  per cell and does not change during play, so baking makes "bare dirt cannot
+  carry a fire" a property of the WORLD rather than something the tick
+  rediscovers every step -- and a firebreak becomes something a designer paints.
+  A chunk with NO entry means "never baked" and falls back to full fuel, so an
+  unbaked test level burns rather than being silently fireproof.
+- **Attrition comes off the shared combination table's Field-scope rows.** Rain
+  quenching a grass fire and a water jet punching through a fireball read
+  identical numbers -- one authored row, two solvers.
+- **Chunks are allocated on demand and freed when inert**, so memory tracks what
+  is alight rather than everywhere a fire has ever been. The active set means a
+  map-wide firestorm and a single burning bush each cost in proportion to what is
+  actually burning.
+
 Each phase ends at something verifiable in-editor. From phase 1 onward, verify in **PIE with 2
 clients** (`Net Mode: Play As Listen Server`, 2 players) — catching authority bugs at the phase
 that introduces them is far cheaper than auditing later.
@@ -836,7 +881,7 @@ that introduces them is far cheaper than auditing later.
 | 6 ✅ | `ElementalVolume`, reaction subsystem, conduction subsystem | Fireball into water jet produces steam at the right contact point; lightning floods a puddle chain and hurts a *second player* standing in it |
 | 7 ✅ | Progression trackers, inventory, quick slots, consumables | Mastery multiplies discharge damage; quick-slot potions work |
 | 8 ✅ | NPC AI — perception, behavior trees, reactive parry | NPC engages, parries a telegraphed swing, flees and heals |
-| 9 | Fire spread subsystem (+ landscape fuel bake, MPC mask, replicated mask) | Grass fire crosses a clearing, burns a second player, rain quenches it |
+| 9 ✅ | Fire spread subsystem (+ landscape fuel bake, MPC mask, replicated mask) | Grass fire crosses a clearing, burns a second player, rain quenches it |
 | 10 | Fluid surface subsystem (+ Clipper2 backend, dynamic meshing, replicated outlines) | Water pools; ice shard freezes a floe both players can stand on |
 
 Phases 1–3 are close to mechanical transcription. **Phase 4 is the largest single risk** — it

@@ -1,0 +1,271 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+#pragma once
+
+#include "CoreMinimal.h"
+#include "GameplayTagContainer.h"
+#include "GameFramework/Actor.h"
+#include "Subsystems/WorldSubsystem.h"
+#include "ARPGSpreadSubsystem.generated.h"
+
+class UARPGMagicCombinationTable;
+class UARPGSpreadDefinition;
+class UARPGSpreadFuelMap;
+class UMaterialParameterCollection;
+
+/**
+ * Simulates every DIFFUSIVE spreadable medium -- fire, corruption, pestilence --
+ * on one budgeted tick. Port of Godot's SpreadSystem.
+ *
+ * TWO COUPLED LAYERS, and a medium may use either or both:
+ *
+ *   OBJECT LAYER  Discrete registered targets (trees, props, characters).
+ *                 Afflicted targets push exposure at nearby ones through a
+ *                 uniform spatial hash. "Afflicted" is NOT state kept here: it
+ *                 is whether the target carries the medium's status effect, so
+ *                 the status system stays the single source of truth and
+ *                 anything that applies or strips one -- a fireball's on-hit
+ *                 effects, a Wet status removing Burning -- steers the spread
+ *                 for free.
+ *
+ *   FIELD LAYER   A per-chunk cellular grid carrying the medium across open
+ *                 ground between discrete objects. This is what makes a grass
+ *                 fire cross a CLEARING rather than stopping at each tree.
+ *
+ * Design notes, in the order they matter for performance:
+ *
+ *   - Field grids are allocated PER CHUNK on demand and freed when a chunk goes
+ *     inert. One mask sliding with the player is the obvious alternative and is
+ *     wrong: it has to move the whole grid as the player walks, and silently
+ *     drops any fire that leaves the window.
+ *
+ *   - Each tick visits only cells in an ACTIVE SET plus their one-ring, never
+ *     the whole grid. A map-wide firestorm and a single burning bush each cost
+ *     in proportion to what is actually alight.
+ *
+ *   - Environmental damage spawns NO hitboxes and no per-cell volumes. There are
+ *     few characters and potentially thousands of hot cells, so the query runs
+ *     the cheap way round: walk the registered targets and sample the field
+ *     under each. Damage goes through the hurtbox, so i-frames apply and dodging
+ *     through fire works exactly as dodging through a sword does.
+ *
+ * Ticked at a fixed rate rather than per frame. Diffusion is slow and visually
+ * forgiving; 10Hz is plenty and keeps the cost off the render frame.
+ */
+UCLASS()
+class ARPGWORLD_API UARPGSpreadSubsystem : public UTickableWorldSubsystem
+{
+	GENERATED_BODY()
+
+public:
+	/** Media registered at once. Fixed, so per-target accumulators stay flat. */
+	static constexpr int32 MaxMedia = 8;
+
+	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
+	virtual bool DoesSupportWorldType(const EWorldType::Type WorldType) const override;
+	virtual void Tick(float DeltaTime) override;
+	virtual TStatId GetStatId() const override;
+
+	// --- Configuration --------------------------------------------------------
+
+	/** Registered media. Entries with no element are rejected with a warning. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Spread")
+	TArray<TObjectPtr<UARPGSpreadDefinition>> Definitions;
+
+	/** The SAME table every other solver reads. Drives cross-medium attrition. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Spread")
+	TObjectPtr<UARPGMagicCombinationTable> CombinationTable;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Spread")
+	TObjectPtr<UARPGSpreadFuelMap> FuelMap;
+
+	/** Simulation ticks per second. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Spread",
+		meta = (ClampMin = "1.0", ClampMax = "60.0"))
+	float TickRate = 10.f;
+
+	/** Chunk edge in centimetres. Must match the fuel map's bake. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Spread",
+		meta = (ClampMin = "100.0"))
+	float ChunkSize = 15360.f;
+
+	/** Cells per chunk edge. 64 over a 153.6m chunk gives 2.4m cells. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Spread",
+		meta = (ClampMin = "4", ClampMax = "256"))
+	int32 FieldResolution = 64;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Spread|Wind")
+	FVector2D WindDirection = FVector2D(1.f, 0.f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Spread|Wind",
+		meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float WindStrength = 0.f;
+
+	// --- Seeding --------------------------------------------------------------
+
+	/**
+	 * Deposits exposure into the field over a disc. The entry point for
+	 * everything that starts a fire: a spell, a hazard, a script.
+	 *
+	 * @return how much was actually deposited, which is less than asked for
+	 *         where the ground has no fuel.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "ARPG|Spread")
+	float AddExposure(FVector WorldPosition, float Radius, float Amount, FGameplayTag ElementTag);
+
+	/** Removes intensity over a disc -- a dispel, or a bucket of water. */
+	UFUNCTION(BlueprintCallable, Category = "ARPG|Spread")
+	void Extinguish(FVector WorldPosition, float Radius, FGameplayTag ElementTag);
+
+	/** Overrides baked fuel over a disc, for runtime terrain changes. */
+	UFUNCTION(BlueprintCallable, Category = "ARPG|Spread")
+	void SetFieldFuel(FVector WorldPosition, float Radius, float FuelFraction, FGameplayTag ElementTag);
+
+	// --- Queries --------------------------------------------------------------
+
+	/** Current intensity at a point, 0 when nothing is there. */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Spread")
+	float GetFieldIntensity(FVector WorldPosition, FGameplayTag ElementTag) const;
+
+	/** How burnt the ground is, 0-1. Monotonic; what the char shader reads. */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Spread")
+	float GetFieldResidue(FVector WorldPosition, FGameplayTag ElementTag) const;
+
+	/** Remaining fuel at a point, 0-1. */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Spread")
+	float GetFieldFuel(FVector WorldPosition, FGameplayTag ElementTag) const;
+
+	/** Unspent energy bank at a point -- what bounds how much further it reaches. */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Spread")
+	float GetFieldEnergy(FVector WorldPosition, FGameplayTag ElementTag) const;
+
+	/** Is this point burning, rather than merely warm? */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Spread")
+	bool IsBurning(FVector WorldPosition, FGameplayTag ElementTag) const;
+
+	/** How many cells are currently alight. What a test asserts reach on. */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Spread")
+	int32 GetBurningCellCount(FGameplayTag ElementTag) const;
+
+	/** Runs one simulation step immediately, bypassing the tick rate. */
+	UFUNCTION(BlueprintCallable, Category = "ARPG|Spread")
+	void StepSimulation(float DeltaTime);
+
+	// --- Targets --------------------------------------------------------------
+
+	/** Registers an actor as a discrete spread target. */
+	UFUNCTION(BlueprintCallable, Category = "ARPG|Spread")
+	void RegisterTarget(AActor* Actor);
+
+	UFUNCTION(BlueprintCallable, Category = "ARPG|Spread")
+	void UnregisterTarget(AActor* Actor);
+
+private:
+	/** One medium, resolved once from its definition. */
+	struct FMedium
+	{
+		TObjectPtr<UARPGSpreadDefinition> Definition;
+		FGameplayTag ElementTag;
+		int32 FieldSlot = INDEX_NONE;
+	};
+
+	/**
+	 * One chunk's grids. Parallel flat arrays per medium slot, not an array of
+	 * per-cell structs: the tick touches one field at a time across many cells,
+	 * so this is the layout the access pattern actually wants.
+	 */
+	struct FFieldChunk
+	{
+		TArray<float> Intensity[MaxMedia];
+		TArray<float> Fuel[MaxMedia];
+		TArray<float> Residue[MaxMedia];
+		TArray<float> Energy[MaxMedia];
+		bool bSlotUsed[MaxMedia] = {};
+
+		/** Cells worth visiting. Rebuilt each tick from what stayed hot. */
+		TArray<int32> Active;
+		TArray<int32> NextActive;
+		TArray<uint8> ActiveStamp;
+
+		bool bHasResidue = false;
+	};
+
+	/** A deposit that crossed a chunk edge, resolved after the pass. */
+	struct FCrossDeposit
+	{
+		FIntPoint Coord;
+		int32 Index = 0;
+		int32 Medium = 0;
+		float Amount = 0.f;
+		float Energy = 0.f;
+	};
+
+	/**
+	 * Builds the media list if the definitions have changed since last time.
+	 *
+	 * Called by EVERY entry point, including the const queries -- which is why
+	 * the cache is mutable. Rebuilding only on seeding was a real bug: setting
+	 * fuel before the first seed silently did nothing, because the medium it
+	 * named did not exist yet, and a firebreak painted that way simply burned.
+	 */
+	void EnsureMedia() const;
+
+	int32 FindMedium(FGameplayTag ElementTag) const;
+
+	float GetCellSize() const { return ChunkSize / FMath::Max(1, FieldResolution); }
+
+	/** Chunk coordinate and cell index for a world position. */
+	bool ResolveCell(FVector WorldPosition, FIntPoint& OutCoord, int32& OutIndex) const;
+
+	FFieldChunk* FindChunk(FIntPoint Coord);
+	const FFieldChunk* FindChunk(FIntPoint Coord) const;
+
+	/** Allocates on demand, seeding fuel from the baked map. */
+	FFieldChunk& FindOrAddChunk(FIntPoint Coord);
+
+	void EnsureSlot(FFieldChunk& Chunk, int32 Slot, FIntPoint Coord);
+
+	void MarkActive(FFieldChunk& Chunk, int32 Index);
+	void MarkNextActive(FFieldChunk& Chunk, int32 Index);
+
+	void TickField(float DeltaTime);
+	void TickFieldChunk(FIntPoint Coord, FFieldChunk& Chunk, float DeltaTime);
+	void TickAttrition(FIntPoint Coord, FFieldChunk& Chunk, float DeltaTime);
+	void TickContactDamage(float DeltaTime);
+
+	/** Deposits a cross-chunk transfer once the pass is done. */
+	void ApplyCrossDeposits();
+
+	void RebuildMedia() const;
+	void RebuildAttritionRates() const;
+
+	/** Directional weight for one neighbour step under the current wind. */
+	float GetWindWeight(FVector2D StepDirection, float Bias) const;
+
+	mutable TArray<FMedium> Media;
+
+	/** Coord to grids. A map rather than a grid: the world is mostly not alight. */
+	TMap<FIntPoint, FFieldChunk> Chunks;
+
+	TArray<FCrossDeposit> CrossDeposits;
+
+	/**
+	 * How fast medium A is destroyed per unit of medium B present, derived from
+	 * the combination table's Field-scope rows.
+	 *
+	 * Precomputed rather than looked up per cell: this is read for every pair of
+	 * co-located media on every active cell, and the table lookup is a container
+	 * comparison.
+	 */
+	mutable float AttritionRates[MaxMedia][MaxMedia] = {};
+
+	float TickAccumulator = 0.f;
+
+	UPROPERTY(Transient)
+	TArray<TWeakObjectPtr<AActor>> Targets;
+
+	/** Per-target exposure accumulators, flat and parallel to Targets. */
+	TArray<float> TargetExposure;
+
+	mutable bool bMediaDirty = true;
+};
