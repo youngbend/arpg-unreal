@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ARPGHurtboxComponent.h"
+#include "ARPGGameplayTags.h"
 #include "AbilitySystemComponent.h"
 #include "AbilitySystemGlobals.h"
 
@@ -32,6 +33,17 @@ UAbilitySystemComponent* UARPGHurtboxComponent::GetAbilitySystemComponent() cons
 		CachedASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(GetOwner());
 	}
 	return CachedASC;
+}
+
+bool UARPGHurtboxComponent::IsInvincible() const
+{
+	if (bForceInvincible || InvincibilityTimer > 0.f)
+	{
+		return true;
+	}
+
+	const UAbilitySystemComponent* ASC = GetAbilitySystemComponent();
+	return ASC && ASC->HasMatchingGameplayTag(TAG_State_Invulnerable);
 }
 
 bool UARPGHurtboxComponent::TryConsumeHit()

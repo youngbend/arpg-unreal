@@ -109,6 +109,29 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Hitbox|Damage")
 	TSubclassOf<UGameplayEffect> DamageEffectClass;
 
+	/**
+	 * Applied to whatever this hits, alongside the damage. Burning from a
+	 * fireball, Wet from a water jet, a bleed from a serrated blade.
+	 *
+	 * Separate from DamageEffectClass rather than folded into it because these
+	 * are per-ATTACK and per-ELEMENT, while the damage effect is the fixed
+	 * pipeline every hit runs through. An attack swaps what it inflicts without
+	 * touching how damage is calculated.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Hitbox|Damage")
+	TArray<TSubclassOf<UGameplayEffect>> OnHitEffects;
+
+	/**
+	 * Overrides each on-hit effect's own duration when > 0.
+	 *
+	 * Set from UARPGMagicElement::StatusDuration so one status asset can burn for
+	 * different lengths depending on which element delivered it, without needing
+	 * a duplicate effect per element.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Hitbox|Damage",
+		meta = (ClampMin = "0.0"))
+	float OnHitEffectDuration = 0.f;
+
 	// --- Activation behaviour -------------------------------------------------
 
 	/** Stop monitoring after the first successful hit. */

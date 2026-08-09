@@ -22,6 +22,7 @@ public class ARPGMagic : ModuleRules
 			"GameplayAbilities",
 			"GameplayTags",
 			"GameplayTasks",
+			"DeveloperSettings",
 			"ARPGCore",
 			"ARPGCombat"
 		});

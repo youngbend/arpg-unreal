@@ -266,6 +266,38 @@ void UARPGHitboxComponent::DeliverHit(UARPGHurtboxComponent* Hurtbox, const FHit
 
 	SourceASC->ApplyGameplayEffectSpecToTarget(*SpecHandle.Data, TargetASC);
 
+	// Applied AFTER the damage, and through the same context, so a status can be
+	// read alongside the hit that carried it -- and so a target killed by the
+	// damage does not also catch fire. Each gets its own spec rather than being
+	// folded into the damage effect: they have their own durations, stacking and
+	// application gating, none of which the damage pipeline knows about.
+	for (const TSubclassOf<UGameplayEffect>& EffectClass : OnHitEffects)
+	{
+		if (!EffectClass)
+		{
+			continue;
+		}
+
+		const FGameplayEffectSpecHandle StatusSpec =
+			SourceASC->MakeOutgoingSpec(EffectClass, 1.f, ContextHandle);
+		if (!StatusSpec.IsValid())
+		{
+			continue;
+		}
+
+		if (OnHitEffectDuration > 0.f)
+		{
+			// SetDuration rather than a SetByCaller magnitude: the status effects
+			// carry fixed authored durations, and overriding on the spec means an
+			// element can retime one without every status having to be rebuilt
+			// around a caller-supplied duration it usually does not want.
+			// bLockDuration stops the effect recomputing it back on application.
+			StatusSpec.Data->SetDuration(OnHitEffectDuration, /*bLockDuration=*/true);
+		}
+
+		SourceASC->ApplyGameplayEffectSpecToTarget(*StatusSpec.Data, TargetASC);
+	}
+
 	Hurtbox->OnHitReceived.Broadcast(ContextHandle, BaseDamage);
 	OnHitLanded.Broadcast(Hit.GetActor(), Hit);
 }

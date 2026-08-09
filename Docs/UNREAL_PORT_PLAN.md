@@ -632,6 +632,54 @@ would need a parallel tag→attribute lookup that could drift out of step. An as
 with no `ResistanceAttribute` set logs a warning rather than silently doing
 nothing — `ArmorWarnsOnUnmappedResistance` pins that too.
 
+**Phase 5 — code complete.** Elements, palettes, loadout pages, the combination
+table, complexity gating, all four discharge types, imbue, elemental dodge and
+cloak. 19 new cases under `ARPG.Magic.*`; 38 pass in total.
+
+The gate the plan set — fire+water→steam — is `ARPG.Magic.Combination.
+FireAndWaterMakeSteam`. Casting itself is not covered by tests: the discharge
+abilities spawn effect actors and play montages that need authored content, so
+the formulas they consume are tested through `BuildDischargeContext` instead.
+`AARPGMagicCaster` is the placeable equivalent of the combat dummy for trying it
+in-editor, and supplies its own mastery levels.
+
+Structural decisions:
+
+- **The magic component decides; the abilities cast.** Same split as the combo
+  component and the melee ability, for the same reason: selection state outlives
+  any one cast and has to survive being interrupted, which GAS models badly,
+  while a cast is predicted, interruptible and animation-driven, which GAS models
+  well.
+- **Charge drain is an ability task, not a cost GE** (§4.5 as planned). The
+  deciding detail is that running dry does not FAIL a discharge — it fires at
+  whatever fraction was paid for, and a cost effect can only answer yes or no.
+  Spending is cumulative rather than per-frame, so the price of a given charge
+  does not depend on frame rate, and a forced release can solve exactly which
+  fraction the spent mana bought.
+- **Progression is an interface, not a dependency.** Complexity gating and
+  mastery scaling are phase 5 (how casting works); the tracker that computes them
+  is phase 7 (how it is earned). `IARPGMagicProgression` narrows the coupling to
+  two questions, so phase 5 is complete and testable now. A caster that does not
+  implement it is not ungated-by-accident — that is the NPC case, and it is
+  pinned by `Gating.NoProgressionMeansNoGate`.
+- **Per-type knobs are a map keyed by the discharge type**, not sixteen parallel
+  floats behind four switches. Adding a discharge type stops meaning "find every
+  switch".
+- **Consumption rates are keyed by element tag**, not a second array parallel to
+  the reactants. The Godot pairing was by index, which silently mis-assigns every
+  rate the moment a reactant is inserted rather than appended.
+
+Two things were found dead during this phase and fixed:
+
+1. **`OnHitEffects` was authored on attacks since phase 4 and read by nothing.**
+   The hitbox had nowhere to put them, so no attack could ever inflict a status.
+   The hitbox now carries `OnHitEffects` plus a duration override, and the melee
+   ability passes its authored list through. Magic depends on the same path —
+   every element's status lands this way.
+2. **`State.Invulnerable` was defined in phase 0 and honoured by nothing**, so
+   dodge i-frames would have been inert. `UARPGHurtboxComponent::IsInvincible`
+   now checks it, which also means any effect granting it works.
+
 Each phase ends at something verifiable in-editor. From phase 1 onward, verify in **PIE with 2
 clients** (`Net Mode: Play As Listen Server`, 2 players) — catching authority bugs at the phase
 that introduces them is far cheaper than auditing later.
@@ -643,7 +691,7 @@ that introduces them is far cheaper than auditing later.
 | 2 | Status effects as GEs, presentation component, all five stack behaviors, status VFX manager | Burning ticks, stacks, expires, shows VFX on both clients, is resisted correctly |
 | 3 | Poise (attribute + component), flinch/stance-break abilities, parry, block, hit-stop | Light/heavy flinch and stance break all trigger and play remotely |
 | 4 | Mannequin retarget, montages, notifies, weapons, armor, `AttackDefinition` assets, `ComboComponent`, `GA_MeleeAttack` | Full sword moveset plays, branches, buffers, charges, channels — predicted client-side |
-| 5 | Magic: elements, loadout pages, combination table, complexity gating, all discharge types, imbue, elemental dodge, cloak | fire+water→steam; cast, imbue, dodge all work; charge drain is server-clamped |
+| 5 ✅ | Magic: elements, loadout pages, combination table, complexity gating, all discharge types, imbue, elemental dodge, cloak | fire+water→steam; cast, imbue, dodge all work; charge drain is server-clamped |
 | 6 | `ElementalVolume`, reaction subsystem, conduction subsystem | Fireball into water jet produces steam at the right contact point; lightning floods a puddle chain and hurts a *second player* standing in it |
 | 7 | Progression trackers, inventory, quick slots, consumables | Mastery multiplies discharge damage; quick-slot potions work |
 | 8 | NPC AI — perception, behavior trees, reactive parry | NPC engages, parries a telegraphed swing, flees and heals |

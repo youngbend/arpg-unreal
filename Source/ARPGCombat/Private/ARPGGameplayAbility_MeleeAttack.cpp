@@ -346,6 +346,10 @@ void UARPGGameplayAbility_MeleeAttack::ArmHitbox(int32 WindowIndex, bool bLandin
 	Hitbox->TickInterval = CurrentAttack->HitboxTickInterval;
 	Hitbox->bUnblockable = CurrentAttack->bUnblockable;
 
+	// Authored on the attack since phase 4 but never actually delivered until
+	// the hitbox grew somewhere to put them.
+	Hitbox->OnHitEffects = CurrentAttack->OnHitEffects;
+
 	if (CurrentAttack->DamageTypeOverride)
 	{
 		Hitbox->DamageType = CurrentAttack->DamageTypeOverride;

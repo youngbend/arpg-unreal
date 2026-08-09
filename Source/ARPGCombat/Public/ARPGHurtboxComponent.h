@@ -47,14 +47,23 @@ public:
 	float InvincibilityDuration = 0.f;
 
 	/**
-	 * Forced invincibility, independent of the timed window -- what a dodge
-	 * roll's i-frames set. Phase 3 drives this from the State.Invulnerable tag.
+	 * Forced invincibility, independent of the timed window. A blunt override
+	 * for a cutscene or a debug toggle; abilities should grant
+	 * State.Invulnerable instead, which IsInvincible also honours.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "ARPG|Hurtbox")
 	void SetForceInvincible(bool bNewInvincible) { bForceInvincible = bNewInvincible; }
 
+	/**
+	 * Also true while the owner carries State.Invulnerable.
+	 *
+	 * Honouring the tag rather than only the local flag is what lets a dodge's
+	 * i-frames, a cutscene, and a timed invulnerability buff all use one
+	 * mechanism. The tag was defined in phase 0 and read by nothing until dodge
+	 * needed it, which meant anything granting it was silently taking no effect.
+	 */
 	UFUNCTION(BlueprintPure, Category = "ARPG|Hurtbox")
-	bool IsInvincible() const { return bForceInvincible || InvincibilityTimer > 0.f; }
+	bool IsInvincible() const;
 
 	/** The ASC hits are routed to. Cached from the owner via IAbilitySystemInterface. */
 	UFUNCTION(BlueprintPure, Category = "ARPG|Hurtbox")
