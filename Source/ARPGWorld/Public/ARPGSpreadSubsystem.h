@@ -68,7 +68,13 @@ public:
 
 	// --- Configuration --------------------------------------------------------
 
-	/** Registered media. Entries with no element are rejected with a warning. */
+	/**
+	 * Registered media. Entries with no element are rejected with a warning.
+	 *
+	 * Populated from UARPGWorldSettings on Initialize. A test may assign it
+	 * directly instead -- anything already present when Initialize runs is left
+	 * alone, so a fixture never has to fight the project settings.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Spread")
 	TArray<TObjectPtr<UARPGSpreadDefinition>> Definitions;
 
@@ -187,7 +193,18 @@ private:
 		TArray<int32> NextActive;
 		TArray<uint8> ActiveStamp;
 
-		bool bHasResidue = false;
+		/**
+		 * Scorch marks on this chunk's ground, and how many cells carry them.
+		 *
+		 * A count rather than a flag. The flag was set the first time anything
+		 * burned and never cleared, and the inert-chunk sweep refuses to free a
+		 * chunk that has residue -- so every chunk that had ever seen fire was
+		 * retained for the rest of the session, which is the opposite of what
+		 * this class documents. Residue is monotonic per cell, so the count only
+		 * grows; what it buys is an exact answer to "does this chunk still have
+		 * anything worth keeping" for a chunk that never actually caught.
+		 */
+		int32 ResidueCells = 0;
 	};
 
 	/** A deposit that crossed a chunk edge, resolved after the pass. */
@@ -242,12 +259,40 @@ private:
 	/** Directional weight for one neighbour step under the current wind. */
 	float GetWindWeight(FVector2D StepDirection, float Bias) const;
 
+	/**
+	 * True when this machine may resolve the simulation and deal its damage.
+	 *
+	 * A world subsystem ticks on clients too, and nothing here was gated: every
+	 * client ran its own unreplicated fire field and applied contact damage from
+	 * it, burning real invincibility frames against a hazard the server had never
+	 * agreed existed.
+	 */
+	bool HasAuthority() const;
+
 	mutable TArray<FMedium> Media;
 
 	/** Coord to grids. A map rather than a grid: the world is mostly not alight. */
 	TMap<FIntPoint, FFieldChunk> Chunks;
 
 	TArray<FCrossDeposit> CrossDeposits;
+
+	/**
+	 * Scratch reused by every chunk, every medium, every tick.
+	 *
+	 * These used to be two TMaps and an array constructed inside the per-medium
+	 * loop, so a modest fire allocated and freed several heap blocks per chunk
+	 * per medium at 10Hz. Indexed by cell, sized once to the grid, and cleared by
+	 * walking only the cells actually touched -- which is why the touch lists
+	 * exist rather than a Memset over the whole grid.
+	 */
+	TArray<float> ScratchDeltaIntensity;
+	TArray<float> ScratchDeltaEnergy;
+	TArray<int32> ScratchTouchedIntensity;
+	TArray<int32> ScratchTouchedEnergy;
+	TArray<int32> ScratchActive;
+
+	/** Sizes the scratch buffers to the current grid, once. */
+	void EnsureScratch();
 
 	/**
 	 * How fast medium A is destroyed per unit of medium B present, derived from
@@ -263,9 +308,6 @@ private:
 
 	UPROPERTY(Transient)
 	TArray<TWeakObjectPtr<AActor>> Targets;
-
-	/** Per-target exposure accumulators, flat and parallel to Targets. */
-	TArray<float> TargetExposure;
 
 	mutable bool bMediaDirty = true;
 };

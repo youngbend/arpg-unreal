@@ -101,6 +101,18 @@ private:
 	/** Does a Conduct row say this charge travels through this medium? */
 	bool Conducts(const FGameplayTag& ChargeTag, const FGameplayTag& MediumTag) const;
 
+	/** True where this machine owns the simulation. Conduction deals damage. */
+	bool HasAuthority() const;
+
+	/**
+	 * The combination table, resolved from project settings on first use.
+	 *
+	 * The CombinationTable field above is EditAnywhere on a UWorldSubsystem,
+	 * which has no editing surface at all -- so outside the tests it was always
+	 * null and no charge ever conducted anywhere.
+	 */
+	const UARPGMagicCombinationTable* GetTable() const;
+
 	/** Damages everything genuinely standing in the medium. */
 	void StrikeTargets(UARPGElementalVolumeComponent* Medium, UARPGMagicElement* ChargeElement,
 		float Energy, AActor* SourceActor);

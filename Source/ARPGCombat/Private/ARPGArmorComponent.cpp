@@ -4,10 +4,9 @@
 #include "ARPGArmorDefinition.h"
 #include "ARPGCombat.h"
 #include "ARPGDamageTypeAsset.h"
+#include "ARPGEquipmentEffect.h"
 #include "ARPGResistanceSet.h"
 #include "AbilitySystemComponent.h"
-#include "AbilitySystemGlobals.h"
-#include "Engine/AssetManager.h"
 #include "Net/UnrealNetwork.h"
 
 UARPGArmorComponent::UARPGArmorComponent()
@@ -28,19 +27,10 @@ void UARPGArmorComponent::BeginPlay()
 
 	// Attributes are server-authoritative, so only the server applies the
 	// contribution; clients receive the resulting values by replication.
-	if (GetOwner() && GetOwner()->HasAuthority() && DefaultArmor && !Armor)
+	if (HasAuthority() && DefaultArmor && !Armor)
 	{
 		EquipArmor(DefaultArmor);
 	}
-}
-
-UAbilitySystemComponent* UARPGArmorComponent::GetASC() const
-{
-	if (!CachedASC)
-	{
-		CachedASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(GetOwner());
-	}
-	return CachedASC;
 }
 
 FName UARPGArmorComponent::GetArmorTypeName() const
@@ -74,40 +64,25 @@ void UARPGArmorComponent::UnequipArmor()
 void UARPGArmorComponent::RefreshAttributes()
 {
 	UAbilitySystemComponent* ASC = GetASC();
-	if (!ASC || !GetOwner() || !GetOwner()->HasAuthority())
+	if (!ASC || !HasAuthority())
 	{
 		return;
 	}
 
-	// Reverse exactly what was applied, rather than recomputing it from the
-	// definition -- see the header. A modifier rerolled while the piece is worn
-	// would otherwise leave a permanent drift in the wearer's defences.
-	if (AppliedArmorValue != 0.f)
-	{
-		const float Current = ASC->GetNumericAttribute(UARPGResistanceSet::GetBaseArmorAttribute());
-		ASC->SetNumericAttributeBase(UARPGResistanceSet::GetBaseArmorAttribute(),
-			FMath::Max(0.f, Current - AppliedArmorValue));
-		AppliedArmorValue = 0.f;
-	}
-
-	for (const TPair<FGameplayAttribute, float>& Applied : AppliedResistances)
-	{
-		const float Current = ASC->GetNumericAttribute(Applied.Key);
-		ASC->SetNumericAttributeBase(Applied.Key, Current - Applied.Value);
-	}
-	AppliedResistances.Reset();
-
+	// Nothing worn: drop the grant and stop. ApplyGrant would do the same with an
+	// empty list, but saying so here keeps the unequip path obvious.
 	if (!Armor)
 	{
+		UARPGEquipmentEffectLibrary::RemoveGrant(ASC, GrantHandle);
 		return;
 	}
+
+	TArray<TPair<FGameplayAttribute, float>> Grants;
 
 	const float ArmorTotal = Armor->GetTotalArmorValue();
 	if (ArmorTotal != 0.f)
 	{
-		const float Current = ASC->GetNumericAttribute(UARPGResistanceSet::GetBaseArmorAttribute());
-		ASC->SetNumericAttributeBase(UARPGResistanceSet::GetBaseArmorAttribute(), Current + ArmorTotal);
-		AppliedArmorValue = ArmorTotal;
+		Grants.Emplace(UARPGResistanceSet::GetBaseArmorAttribute(), ArmorTotal);
 	}
 
 	for (const TPair<TObjectPtr<UARPGDamageTypeAsset>, float>& Entry : Armor->GetAggregatedResistances())
@@ -130,10 +105,13 @@ void UARPGArmorComponent::RefreshAttributes()
 			continue;
 		}
 
-		const float Current = ASC->GetNumericAttribute(DamageType->ResistanceAttribute);
-		ASC->SetNumericAttributeBase(DamageType->ResistanceAttribute, Current + Entry.Value);
-		AppliedResistances.Emplace(DamageType->ResistanceAttribute, Entry.Value);
+		Grants.Emplace(DamageType->ResistanceAttribute, Entry.Value);
 	}
+
+	// One call replaces the whole previous remove-then-reapply dance: the old
+	// effect is removed by handle, which reverses every modifier it carried
+	// exactly, whatever else has touched those attributes since.
+	UARPGEquipmentEffectLibrary::ApplyGrant(ASC, Grants, GrantHandle);
 }
 
 void UARPGArmorComponent::OnRep_Armor()

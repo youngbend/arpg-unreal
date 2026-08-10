@@ -185,6 +185,22 @@ public:
 	bool IsHitboxActive() const { return bArmed; }
 
 	/**
+	 * The hitbox on an actor matching a source, or null.
+	 *
+	 * @param bAllowFallback  return the first hitbox found when none matches.
+	 *                        True for an attack -- a kick authored for the body
+	 *                        on a character that only has a weapon hitbox should
+	 *                        still land something. False for equipment, which is
+	 *                        asking about one specific hitbox and must not
+	 *                        silently rewrite another.
+	 *
+	 * One copy: the weapon component and the melee ability had a loop each, and
+	 * they differed only in this fallback rule.
+	 */
+	static UARPGHitboxComponent* FindOnActor(const AActor* Actor, EARPGHitboxSource Source,
+		bool bAllowFallback);
+
+	/**
 	 * Who the damage is attributed to. Defaults to the owning actor, which is
 	 * wrong for a weapon actor -- set this to the wielder so a sword does not
 	 * self-attribute its own swings.

@@ -10,16 +10,22 @@ public class ARPGCombat : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 
+		// GameplayAbilities and GameplayTags stay PUBLIC: this module's headers
+		// name FActiveGameplayEffectHandle, UGameplayEffect and FGameplayTag in
+		// their own signatures, so anything including them needs both.
 		PublicDependencyModuleNames.AddRange(new string[] {
 			"Core",
 			"CoreUObject",
 			"Engine",
 			"GameplayAbilities",
 			"GameplayTags",
-			"GameplayTasks",
 			"ARPGCore"
 		});
 
-		PrivateDependencyModuleNames.AddRange(new string[] { });
+		// PRIVATE: ability tasks are used inside the melee ability's .cpp and
+		// appear in no header here, so downstream modules do not inherit it.
+		PrivateDependencyModuleNames.AddRange(new string[] {
+			"GameplayTasks"
+		});
 	}
 }

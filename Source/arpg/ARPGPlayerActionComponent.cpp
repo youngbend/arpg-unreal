@@ -1,8 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ARPGPlayerActionComponent.h"
-#include "ARPGAIController.h"
-#include "ARPGBlackboardKeys.h"
 #include "ARPGComboComponent.h"
 #include "ARPGGameplayTags.h"
 #include "ARPGLocomotionComponent.h"
@@ -14,10 +12,10 @@
 #include "ARPGWeaponAttackTree.h"
 #include "ARPGWeaponComponent.h"
 #include "ARPGWeaponDefinition.h"
+#include "ARPGThreatRegistry.h"
 #include "AbilitySystemComponent.h"
 #include "AbilitySystemGlobals.h"
-#include "BehaviorTree/BlackboardComponent.h"
-#include "EngineUtils.h"
+#include "Engine/World.h"
 #include "GameFramework/Character.h"
 
 UARPGPlayerActionComponent::UARPGPlayerActionComponent()
@@ -29,6 +27,8 @@ UARPGPlayerActionComponent::UARPGPlayerActionComponent()
 void UARPGPlayerActionComponent::BeginPlay()
 {
 	Super::BeginPlay();
+
+	EnsureSiblings();
 
 	// Auto-bind to a sibling if there is one, so the common case needs no setup.
 	if (!BoundInput)
@@ -84,39 +84,74 @@ void UARPGPlayerActionComponent::BindInput(UARPGModalInputComponent* Input)
 // Lookups
 // ---------------------------------------------------------------------------
 
+void UARPGPlayerActionComponent::EnsureSiblings() const
+{
+	if (bSiblingsCached)
+	{
+		return;
+	}
+
+	AActor* Owner = GetOwner();
+	if (!Owner)
+	{
+		return; // not cached: retried once there is an owner to search
+	}
+
+	bSiblingsCached = true;
+
+	CachedCombo = Owner->FindComponentByClass<UARPGComboComponent>();
+	CachedWeapon = Owner->FindComponentByClass<UARPGWeaponComponent>();
+	CachedParry = Owner->FindComponentByClass<UARPGParryComponent>();
+	CachedMagic = Owner->FindComponentByClass<UARPGMagicComponent>();
+	CachedQuickSlots = Owner->FindComponentByClass<UARPGQuickSlotComponent>();
+	CachedLocomotion = Owner->FindComponentByClass<UARPGLocomotionComponent>();
+}
+
 UAbilitySystemComponent* UARPGPlayerActionComponent::GetASC() const
 {
-	return UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(GetOwner());
+	// Retried while null rather than latched with the rest: a player's ability
+	// system lives on the PlayerState, which may not have replicated in yet.
+	if (!CachedASC)
+	{
+		CachedASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(GetOwner());
+	}
+	return CachedASC;
 }
 
 UARPGComboComponent* UARPGPlayerActionComponent::GetCombo() const
 {
-	return GetOwner() ? GetOwner()->FindComponentByClass<UARPGComboComponent>() : nullptr;
+	EnsureSiblings();
+	return CachedCombo;
 }
 
 UARPGWeaponComponent* UARPGPlayerActionComponent::GetWeapon() const
 {
-	return GetOwner() ? GetOwner()->FindComponentByClass<UARPGWeaponComponent>() : nullptr;
+	EnsureSiblings();
+	return CachedWeapon;
 }
 
 UARPGParryComponent* UARPGPlayerActionComponent::GetParry() const
 {
-	return GetOwner() ? GetOwner()->FindComponentByClass<UARPGParryComponent>() : nullptr;
+	EnsureSiblings();
+	return CachedParry;
 }
 
 UARPGMagicComponent* UARPGPlayerActionComponent::GetMagic() const
 {
-	return GetOwner() ? GetOwner()->FindComponentByClass<UARPGMagicComponent>() : nullptr;
+	EnsureSiblings();
+	return CachedMagic;
 }
 
 UARPGQuickSlotComponent* UARPGPlayerActionComponent::GetQuickSlots() const
 {
-	return GetOwner() ? GetOwner()->FindComponentByClass<UARPGQuickSlotComponent>() : nullptr;
+	EnsureSiblings();
+	return CachedQuickSlots;
 }
 
 UARPGLocomotionComponent* UARPGPlayerActionComponent::GetLocomotion() const
 {
-	return GetOwner() ? GetOwner()->FindComponentByClass<UARPGLocomotionComponent>() : nullptr;
+	EnsureSiblings();
+	return CachedLocomotion;
 }
 
 bool UARPGPlayerActionComponent::IsDead() const
@@ -153,7 +188,7 @@ void UARPGPlayerActionComponent::TickComponent(float DeltaTime, ELevelTick TickT
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
 	SyncWalkForced();
-	SyncAutoSheatheSuppression(DeltaTime);
+	SyncAutoSheatheSuppression();
 
 	if (bDrawingForBlock)
 	{
@@ -216,24 +251,13 @@ void UARPGPlayerActionComponent::SyncWalkForced()
 	Locomotion->SetWalkForced(Magic && Magic->HasActiveElements());
 }
 
-void UARPGPlayerActionComponent::SyncAutoSheatheSuppression(float DeltaTime)
+void UARPGPlayerActionComponent::SyncAutoSheatheSuppression()
 {
 	UARPGWeaponComponent* Weapon = GetWeapon();
 	if (!Weapon || !Weapon->IsDrawn())
 	{
 		return;
 	}
-
-	// Throttled, because this is a scan over every AI controller in the level
-	// and the answer is a mood rather than a measurement. Half a second of lag
-	// on "is anything still interested in me" is invisible; doing it per frame
-	// for a check that only matters once an idle timer has run out is not.
-	AggroScanTimer -= DeltaTime;
-	if (AggroScanTimer > 0.f)
-	{
-		return;
-	}
-	AggroScanTimer = AggroScanInterval;
 
 	const AActor* Owner = GetOwner();
 	const UWorld* World = GetWorld();
@@ -242,21 +266,19 @@ void UARPGPlayerActionComponent::SyncAutoSheatheSuppression(float DeltaTime)
 		return;
 	}
 
-	bool bTargeted = false;
-	for (TActorIterator<AARPGAIController> It(const_cast<UWorld*>(World)); It; ++It)
+	// A map lookup. This used to iterate every actor in the level looking for AI
+	// controllers and read each one's blackboard, throttled to twice a second to
+	// make the cost bearable -- so the answer also lagged by up to half a second.
+	// Perception now pushes each transition as it happens, so this is both exact
+	// and cheap enough to ask every frame.
+	//
+	// Still the COMMITTED target rather than merely perceived: the registry is
+	// fed from UARPGPerceptionComponent::SetTarget, which is the same commitment
+	// the behaviour tree acts on.
+	if (const UARPGThreatRegistry* Threats = World->GetSubsystem<UARPGThreatRegistry>())
 	{
-		// The BLACKBOARD's target, not the perception component's -- that is the
-		// one the behaviour tree actually acts on, and an NPC that has perceived
-		// you but not committed to you is not yet a reason to keep steel out.
-		const UBlackboardComponent* Blackboard = It->GetBlackboardComponent();
-		if (Blackboard && Blackboard->GetValueAsObject(ARPGBlackboard::TargetActor) == Owner)
-		{
-			bTargeted = true;
-			break;
-		}
+		Weapon->SetAutoSheatheSuppressed(Threats->IsTargeted(Owner));
 	}
-
-	Weapon->SetAutoSheatheSuppressed(bTargeted);
 }
 
 // ---------------------------------------------------------------------------

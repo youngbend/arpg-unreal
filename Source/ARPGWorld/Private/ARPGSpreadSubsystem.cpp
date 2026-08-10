@@ -11,6 +11,7 @@
 #include "ARPGSpreadDefinition.h"
 #include "ARPGSpreadFuelMap.h"
 #include "ARPGWorld.h"
+#include "ARPGWorldSettings.h"
 #include "AbilitySystemComponent.h"
 #include "AbilitySystemGlobals.h"
 #include "Engine/World.h"
@@ -41,7 +42,50 @@ namespace
 void UARPGSpreadSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
+
+	// Project settings fill in anything not already assigned. A test that has set
+	// Definitions on the subsystem directly therefore keeps them, and a real
+	// session gets a configured simulation instead of an inert one.
+	const UARPGWorldSettings& Settings = UARPGWorldSettings::Get();
+
+	if (Definitions.Num() == 0)
+	{
+		for (const TSoftObjectPtr<UARPGSpreadDefinition>& Soft : Settings.SpreadDefinitions)
+		{
+			if (UARPGSpreadDefinition* Definition = Soft.LoadSynchronous())
+			{
+				Definitions.Add(Definition);
+			}
+			else if (!Soft.IsNull())
+			{
+				UE_LOG(LogARPGWorld, Warning,
+					TEXT("Spread definition '%s' from project settings failed to load."),
+					*Soft.ToString());
+			}
+		}
+	}
+
+	if (!CombinationTable)
+	{
+		CombinationTable = Settings.CombinationTable.LoadSynchronous();
+	}
+
+	if (!FuelMap)
+	{
+		FuelMap = Settings.FuelMap.LoadSynchronous();
+	}
+
 	bMediaDirty = true;
+}
+
+bool UARPGSpreadSubsystem::HasAuthority() const
+{
+	const UWorld* World = GetWorld();
+
+	// A standalone or listen-server world is authoritative; a pure client is not.
+	// Anything with no net driver at all -- an automation fixture -- counts as
+	// authoritative, because there is nobody else to be.
+	return !World || World->GetNetMode() != NM_Client;
 }
 
 bool UARPGSpreadSubsystem::DoesSupportWorldType(const EWorldType::Type WorldType) const
@@ -386,6 +430,15 @@ void UARPGSpreadSubsystem::Extinguish(FVector WorldPosition, float Radius, FGame
 	{
 		for (int32 DX = -CellRadius; DX <= CellRadius; ++DX)
 		{
+			// A DISC, matching AddExposure and this function's own contract. The
+			// square this used to walk quenched the corners too -- about a
+			// quarter more ground than the caller asked for.
+			if (Radius > 0.f && FMath::Square(DX * CellSize) + FMath::Square(DY * CellSize)
+				> FMath::Square(Radius))
+			{
+				continue;
+			}
+
 			const FVector Sample = WorldPosition + FVector(DX * CellSize, DY * CellSize, 0.f);
 
 			FIntPoint Coord;
@@ -433,6 +486,14 @@ void UARPGSpreadSubsystem::SetFieldFuel(FVector WorldPosition, float Radius, flo
 	{
 		for (int32 DX = -CellRadius; DX <= CellRadius; ++DX)
 		{
+			// A DISC, as documented. Painting a firebreak used to square off its
+			// corners, which is visible the moment a fire reaches one.
+			if (Radius > 0.f && FMath::Square(DX * CellSize) + FMath::Square(DY * CellSize)
+				> FMath::Square(Radius))
+			{
+				continue;
+			}
+
 			const FVector Sample = WorldPosition + FVector(DX * CellSize, DY * CellSize, 0.f);
 
 			FIntPoint Coord;
@@ -622,6 +683,14 @@ void UARPGSpreadSubsystem::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
+	// The field is server state. A client simulating its own copy would diverge
+	// immediately -- nothing here replicates -- and TickContactDamage would then
+	// apply gameplay effects and consume invincibility frames from it.
+	if (!HasAuthority())
+	{
+		return;
+	}
+
 	const float Interval = 1.f / FMath::Max(1.f, TickRate);
 
 	TickAccumulator += DeltaTime;
@@ -637,9 +706,20 @@ void UARPGSpreadSubsystem::Tick(float DeltaTime)
 	TickAccumulator = 0.f;
 }
 
+void UARPGSpreadSubsystem::EnsureScratch()
+{
+	const int32 CellCount = FieldResolution * FieldResolution;
+	if (ScratchDeltaIntensity.Num() != CellCount)
+	{
+		ScratchDeltaIntensity.SetNumZeroed(CellCount);
+		ScratchDeltaEnergy.SetNumZeroed(CellCount);
+	}
+}
+
 void UARPGSpreadSubsystem::TickField(float DeltaTime)
 {
 	CrossDeposits.Reset();
+	EnsureScratch();
 
 	for (TPair<FIntPoint, FFieldChunk>& Pair : Chunks)
 	{
@@ -676,7 +756,7 @@ void UARPGSpreadSubsystem::TickField(float DeltaTime)
 			Chunk.ActiveStamp[Index] = 1;
 		}
 
-		if (Chunk.Active.Num() == 0 && !Chunk.bHasResidue)
+		if (Chunk.Active.Num() == 0 && Chunk.ResidueCells == 0)
 		{
 			Inert.Add(Pair.Key);
 		}
@@ -698,8 +778,11 @@ void UARPGSpreadSubsystem::TickFieldChunk(FIntPoint Coord, FFieldChunk& Chunk, f
 
 	// Snapshotted: the pass writes into NextActive, and iterating a list being
 	// appended to would visit this tick's newly lit cells as though they had
-	// been burning all along.
-	const TArray<int32> Active = Chunk.Active;
+	// been burning all along. Into a reused member buffer rather than a fresh
+	// TArray per chunk per tick.
+	ScratchActive.Reset(Chunk.Active.Num());
+	ScratchActive.Append(Chunk.Active);
+	const TArray<int32>& Active = ScratchActive;
 
 	for (int32 MediumIndex = 0; MediumIndex < Media.Num(); ++MediumIndex)
 	{
@@ -726,8 +809,16 @@ void UARPGSpreadSubsystem::TickFieldChunk(FIntPoint Coord, FFieldChunk& Chunk, f
 
 		// Deltas accumulate across the whole pass, so every sender contributes
 		// to a cell before it decides whether it caught -- order-independent.
-		TMap<int32, float> DeltaIntensity;
-		TMap<int32, float> DeltaEnergy;
+		//
+		// Flat arrays indexed by cell, reused across chunks and media, with a
+		// list of the cells actually written so the reset costs the number of
+		// touched cells rather than the size of the grid. This was two TMaps
+		// constructed and destroyed inside this loop -- so per chunk, per medium,
+		// per simulation tick.
+		TArray<float>& DeltaIntensity = ScratchDeltaIntensity;
+		TArray<float>& DeltaEnergy = ScratchDeltaEnergy;
+		ScratchTouchedIntensity.Reset();
+		ScratchTouchedEnergy.Reset();
 
 		for (const int32 Index : Active)
 		{
@@ -773,10 +864,13 @@ void UARPGSpreadSubsystem::TickFieldChunk(FIntPoint Coord, FFieldChunk& Chunk, f
 				Fuel[Index] = FMath::Max(0.f, Fuel[Index] - DeltaTime);
 			}
 
-			Residue[Index] = FMath::Min(1.f, Residue[Index] + DeltaTime / FuelSeconds);
-			if (Residue[Index] > ColdEpsilon)
+			// Counted on the transition only, so the total stays exact rather
+			// than being a one-way flag that pins the chunk in memory forever.
+			const float PreviousResidue = Residue[Index];
+			Residue[Index] = FMath::Min(1.f, PreviousResidue + DeltaTime / FuelSeconds);
+			if (PreviousResidue <= ColdEpsilon && Residue[Index] > ColdEpsilon)
 			{
-				Chunk.bHasResidue = true;
+				++Chunk.ResidueCells;
 			}
 
 			// Saturates rather than growing without bound, so intensity stays
@@ -846,19 +940,31 @@ void UARPGSpreadSubsystem::TickFieldChunk(FIntPoint Coord, FFieldChunk& Chunk, f
 
 								if (Conduct > 0.f)
 								{
-									DeltaEnergy.FindOrAdd(NeighbourIndex) += Conduct;
+									if (DeltaEnergy[NeighbourIndex] == 0.f)
+									{
+										ScratchTouchedEnergy.Add(NeighbourIndex);
+									}
+									DeltaEnergy[NeighbourIndex] += Conduct;
 									Budget -= Conduct;
 								}
 							}
 							continue;
 						}
 
-						DeltaIntensity.FindOrAdd(NeighbourIndex) += Amount;
+						if (DeltaIntensity[NeighbourIndex] == 0.f)
+						{
+							ScratchTouchedIntensity.Add(NeighbourIndex);
+						}
+						DeltaIntensity[NeighbourIndex] += Amount;
 
 						// The receiver banks only TransferKeep of what it was
 						// handed; the sender paid all of it. That gap is the
 						// front's per-hop range decay.
-						DeltaEnergy.FindOrAdd(NeighbourIndex) += Amount * Definition->TransferKeep;
+						if (DeltaEnergy[NeighbourIndex] == 0.f)
+						{
+							ScratchTouchedEnergy.Add(NeighbourIndex);
+						}
+						DeltaEnergy[NeighbourIndex] += Amount * Definition->TransferKeep;
 					}
 					else
 					{
@@ -900,9 +1006,10 @@ void UARPGSpreadSubsystem::TickFieldChunk(FIntPoint Coord, FFieldChunk& Chunk, f
 
 		// Applied after the pass, so every contribution to a cell is counted
 		// before it decides whether it caught.
-		for (const TPair<int32, float>& Pair : DeltaIntensity)
+		for (const int32 Index : ScratchTouchedIntensity)
 		{
-			const int32 Index = Pair.Key;
+			const float Delta = DeltaIntensity[Index];
+			DeltaIntensity[Index] = 0.f; // reset as we go; the buffer is shared
 
 			// Ground with no fuel cannot hold the medium -- a road, a river, or
 			// somewhere the front already burnt out. Without this a spent cell
@@ -914,17 +1021,20 @@ void UARPGSpreadSubsystem::TickFieldChunk(FIntPoint Coord, FFieldChunk& Chunk, f
 				continue;
 			}
 
-			Intensity[Index] = FMath::Min(Intensity[Index] + Pair.Value, Threshold * 2.f);
+			Intensity[Index] = FMath::Min(Intensity[Index] + Delta, Threshold * 2.f);
 			MarkNextActive(Chunk, Index);
 		}
 
-		for (const TPair<int32, float>& Pair : DeltaEnergy)
+		for (const int32 Index : ScratchTouchedEnergy)
 		{
-			if (!bPermanent && Fuel[Pair.Key] <= 0.f)
+			const float Delta = DeltaEnergy[Index];
+			DeltaEnergy[Index] = 0.f;
+
+			if (!bPermanent && Fuel[Index] <= 0.f)
 			{
 				continue;
 			}
-			Energy[Pair.Key] += Pair.Value;
+			Energy[Index] += Delta;
 		}
 	}
 }
@@ -1014,23 +1124,15 @@ void UARPGSpreadSubsystem::TickAttrition(FIntPoint Coord, FFieldChunk& Chunk, fl
 
 void UARPGSpreadSubsystem::RegisterTarget(AActor* Actor)
 {
-	if (!Actor)
+	if (Actor)
 	{
-		return;
+		Targets.AddUnique(Actor);
 	}
-
-	Targets.AddUnique(Actor);
-	TargetExposure.SetNumZeroed(Targets.Num() * MaxMedia);
 }
 
 void UARPGSpreadSubsystem::UnregisterTarget(AActor* Actor)
 {
-	const int32 Index = Targets.IndexOfByKey(Actor);
-	if (Index != INDEX_NONE)
-	{
-		Targets.RemoveAt(Index);
-		TargetExposure.SetNumZeroed(Targets.Num() * MaxMedia);
-	}
+	Targets.RemoveSingleSwap(Actor);
 }
 
 void UARPGSpreadSubsystem::TickContactDamage(float DeltaTime)
@@ -1047,21 +1149,42 @@ void UARPGSpreadSubsystem::TickContactDamage(float DeltaTime)
 			continue;
 		}
 
-		UARPGHurtboxComponent* Hurtbox = Target->FindComponentByClass<UARPGHurtboxComponent>();
+		UARPGHurtboxComponent* Hurtbox = UARPGHurtboxComponent::FindFor(Target);
 		if (!Hurtbox)
 		{
 			continue;
 		}
 
+		// Resolved once per target rather than once per target per medium: the
+		// chunk lookup and the cell solve do not depend on which medium is being
+		// asked about.
+		const FVector TargetLocation = Target->GetActorLocation();
+
+		FIntPoint Coord;
+		int32 CellIndex = 0;
+		if (!ResolveCell(TargetLocation, Coord, CellIndex))
+		{
+			continue;
+		}
+
+		const FFieldChunk* Chunk = FindChunk(Coord);
+		if (!Chunk)
+		{
+			continue; // nothing has ever burned here
+		}
+
 		for (const FMedium& Medium : Media)
 		{
 			const UARPGSpreadDefinition* Definition = Medium.Definition;
-			if (Definition->ContactDamagePerSecond <= 0.f)
+			if (Definition->ContactDamagePerSecond <= 0.f || Medium.FieldSlot == INDEX_NONE)
 			{
 				continue;
 			}
 
-			if (!IsBurning(Target->GetActorLocation(), Medium.ElementTag))
+			// Inlined from IsBurning, which would otherwise redo FindMedium's
+			// linear scan and the cell solve for every target and every medium.
+			if (!Chunk->bSlotUsed[Medium.FieldSlot]
+				|| Chunk->Intensity[Medium.FieldSlot][CellIndex] < Definition->IgnitionThreshold)
 			{
 				continue;
 			}
@@ -1083,7 +1206,7 @@ void UARPGSpreadSubsystem::TickContactDamage(float DeltaTime)
 			ContextHandle.AddSourceObject(this);
 
 			if (FARPGGameplayEffectContext* Context =
-					static_cast<FARPGGameplayEffectContext*>(ContextHandle.Get()))
+					FARPGGameplayEffectContext::ExtractFrom(ContextHandle))
 			{
 				Context->DamageType = Definition->Element->DamageType;
 				Context->MagicElementTag = Medium.ElementTag;

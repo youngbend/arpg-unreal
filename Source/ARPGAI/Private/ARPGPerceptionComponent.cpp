@@ -4,8 +4,12 @@
 #include "ARPGAI.h"
 #include "ARPGBlackboardKeys.h"
 #include "ARPGCombatLibrary.h"
+#include "ARPGGameplayTags.h"
 #include "ARPGNoiseComponent.h"
+#include "ARPGThreatRegistry.h"
 #include "AIController.h"
+#include "AbilitySystemComponent.h"
+#include "AbilitySystemGlobals.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "Engine/OverlapResult.h"
 #include "Engine/World.h"
@@ -15,6 +19,57 @@ UARPGPerceptionComponent::UARPGPerceptionComponent()
 {
 	PrimaryComponentTick.bCanEverTick = true;
 	PrimaryComponentTick.bStartWithTickEnabled = true;
+
+	// The engine's own interval, rather than the hand-rolled accumulator this
+	// used to carry: it skips the dispatch entirely instead of entering the
+	// function to discover there is nothing to do. Kept in step with ScanInterval
+	// by BeginPlay, so the authored value still wins.
+	PrimaryComponentTick.TickInterval = ScanInterval;
+}
+
+void UARPGPerceptionComponent::BeginPlay()
+{
+	Super::BeginPlay();
+
+	// ScanInterval is EditAnywhere, so the constructor's value is only a default.
+	SetComponentTickInterval(FMath::Max(0.f, ScanInterval));
+}
+
+void UARPGPerceptionComponent::PublishTargetChange(AActor* OldTarget, AActor* NewTarget) const
+{
+	if (const UWorld* World = GetWorld())
+	{
+		if (UARPGThreatRegistry* Registry = World->GetSubsystem<UARPGThreatRegistry>())
+		{
+			Registry->NotifyTargetChanged(OldTarget, NewTarget);
+		}
+	}
+}
+
+void UARPGPerceptionComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	// An NPC that dies or is streamed out stops threatening whoever it was after.
+	// Without this its count would never come back down and the player's weapon
+	// would stay drawn forever.
+	PublishTargetChange(Target, nullptr);
+	Target = nullptr;
+
+	Super::EndPlay(EndPlayReason);
+}
+
+bool UARPGPerceptionComponent::IsAlive(const AActor* Candidate)
+{
+	if (!Candidate)
+	{
+		return false;
+	}
+
+	const UAbilitySystemComponent* ASC =
+		UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(Candidate);
+
+	// No ability system means nothing that can die -- a destructible, a scripted
+	// prop. Those are legitimate targets, so absence is not death.
+	return !ASC || !ASC->HasMatchingGameplayTag(TAG_State_Dead);
 }
 
 UBlackboardComponent* UARPGPerceptionComponent::GetBlackboard() const
@@ -170,6 +225,14 @@ void UARPGPerceptionComponent::GatherCandidates(TArray<AActor*>& OutCandidates) 
 			continue;
 		}
 
+		// Corpses are not targets. Nothing granted State.Dead until now, so this
+		// filter would have done nothing -- and NPCs stood around swinging at
+		// bodies, which is exactly what it is here to stop.
+		if (!IsAlive(Candidate))
+		{
+			continue;
+		}
+
 		OutCandidates.AddUnique(Candidate);
 	}
 }
@@ -179,6 +242,19 @@ void UARPGPerceptionComponent::Scan(float DeltaTime)
 	// --- Retention -----------------------------------------------------------
 	if (Target)
 	{
+		// A target that dies is released immediately rather than being held for
+		// the memory window: there is nothing left to look for.
+		if (!IsAlive(Target))
+		{
+			PublishTargetChange(Target, nullptr);
+			Target = nullptr;
+			bAlerted = false;
+			MemoryTimer = 0.f;
+			OnTargetLost.Broadcast();
+			WriteBlackboard();
+			return;
+		}
+
 		// No FOV: a target already engaged is not lost by turning away.
 		const bool bStillPerceived = CanSee(Target, /*bApplyFOV=*/false) || CanHear(Target);
 
@@ -199,7 +275,14 @@ void UARPGPerceptionComponent::Scan(float DeltaTime)
 			return;
 		}
 
+		PublishTargetChange(Target, nullptr);
 		Target = nullptr;
+
+		// Cleared with the target. This was set true on the first acquisition and
+		// never reset, so IsAlerted was a one-way latch and any behaviour-tree
+		// branch on it stayed taken for the rest of the NPC's life.
+		bAlerted = false;
+
 		OnTargetLost.Broadcast();
 		WriteBlackboard();
 		return;
@@ -241,6 +324,7 @@ void UARPGPerceptionComponent::SetTarget(AActor* NewTarget)
 		return;
 	}
 
+	PublishTargetChange(Target, NewTarget);
 	Target = NewTarget;
 
 	if (Target)
@@ -308,14 +392,8 @@ void UARPGPerceptionComponent::TickComponent(float DeltaTime, ELevelTick TickTyp
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
-	ScanAccumulator += DeltaTime;
-	if (ScanAccumulator < ScanInterval)
-	{
-		return;
-	}
-
-	// The accumulated time, not the frame's, so memory counts down in real
-	// seconds regardless of how often the scan actually runs.
-	Scan(ScanAccumulator);
-	ScanAccumulator = 0.f;
+	// DeltaTime here is already the interval's worth of real seconds, because the
+	// component tick interval is what paces this -- so memory counts down in real
+	// seconds without an accumulator of our own.
+	Scan(DeltaTime);
 }

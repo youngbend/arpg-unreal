@@ -3,7 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Components/ActorComponent.h"
+#include "ARPGGameplayComponentBase.h"
 #include "ARPGProgressionComponent.generated.h"
 
 class UAbilitySystemComponent;
@@ -39,7 +39,7 @@ enum class EARPGAttributePoint : uint8
  * and unbounded across many.
  */
 UCLASS(ClassGroup = (ARPG), meta = (BlueprintSpawnableComponent))
-class ARPGCORE_API UARPGProgressionComponent : public UActorComponent
+class ARPGCORE_API UARPGProgressionComponent : public UARPGGameplayComponentBase
 {
 	GENERATED_BODY()
 
@@ -119,7 +119,6 @@ public:
 	FARPGOnPointsChanged OnPointsChanged;
 
 private:
-	UAbilitySystemComponent* GetASC() const;
 
 	/**
 	 * Records the character's unallocated maxima, once.
@@ -136,8 +135,6 @@ private:
 
 	int32& AllocationFor(EARPGAttributePoint Which);
 
-	UPROPERTY(Transient)
-	mutable TObjectPtr<UAbilitySystemComponent> CachedASC;
 
 	int32 Level = 1;
 	float TotalXP = 0.f;

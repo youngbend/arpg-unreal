@@ -28,14 +28,22 @@ public class ARPGWorld : ModuleRules
 			"Engine",
 			"GameplayAbilities",
 			"GameplayTags",
-			"GameplayTasks",
 			"ARPGCore",
 			"ARPGCombat",
-			"ARPGMagic",
+			"ARPGMagic"
+		});
+
+		// PRIVATE. Nothing above this module has any business seeing the geometry
+		// backend -- the fluid headers speak in FVector2D and actors, and the
+		// polygon types stay inside ARPGFluidGeometry.cpp. Re-exporting these
+		// pulled the whole GeometryProcessing include graph into ARPGWorld's
+		// dependents for nothing. UDeveloperSettings is likewise only the
+		// settings object's own base class.
+		PrivateDependencyModuleNames.AddRange(new string[] {
+			"GameplayTasks",
+			"DeveloperSettings",
 			"GeometryCore",
 			"GeometryAlgorithms"
 		});
-
-		PrivateDependencyModuleNames.AddRange(new string[] { });
 	}
 }

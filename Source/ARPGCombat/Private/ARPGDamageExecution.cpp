@@ -239,10 +239,21 @@ void UARPGDamageExecution::Execute_Implementation(
 	const float ResistedDamage = Raw * (1.f - EffectiveResistance);
 
 	AActor* TargetActor = nullptr;
-	if (const UAbilitySystemComponent* TargetASCConst = ExecutionParams.GetTargetAbilitySystemComponent())
+	if (const UAbilitySystemComponent* TargetAvatarASC = ExecutionParams.GetTargetAbilitySystemComponent())
 	{
-		TargetActor = TargetASCConst->GetAvatarActor();
+		TargetActor = TargetAvatarASC->GetAvatarActor();
 	}
+
+	// An execution runs wherever its effect is applied, including on a client
+	// predicting a hit. Everything below that MUTATES state -- burning the parry
+	// window, granting Empowered, pushing poise onto the attacker -- must
+	// therefore happen on the server only, or a mispredicted swing would consume
+	// a parry the server never saw.
+	//
+	// The damage number itself is still computed on both sides: that is what
+	// prediction is for, and the client needs it to play the right reaction.
+	const UAbilitySystemComponent* TargetASCConst = ExecutionParams.GetTargetAbilitySystemComponent();
+	const bool bAuthoritative = TargetASCConst && TargetASCConst->IsOwnerActorAuthoritative();
 
 	// Unblockable bypasses the guard entirely -- it must be dodged. Checked
 	// before the component is even consulted, so an unblockable hit cannot
@@ -256,7 +267,10 @@ void UARPGDamageExecution::Execute_Implementation(
 
 	if (Parry)
 	{
-		Intercept = Parry->TryIntercept();
+		// PeekIntercept on a client: same answer, no side effects. The server's
+		// TryIntercept is what actually spends the window.
+		Intercept = bAuthoritative ? Parry->TryIntercept() : Parry->PeekIntercept();
+
 		if (Intercept == EARPGInterceptResult::Parried)
 		{
 			InterceptMultiplier = 1.f - Parry->ParryDamageReduction;
@@ -280,37 +294,43 @@ void UARPGDamageExecution::Execute_Implementation(
 	// --- Interception costs and feedback --------------------------------------
 	if (Parry && Intercept != EARPGInterceptResult::None)
 	{
-		UAbilitySystemComponent* TargetASC =
-			const_cast<UAbilitySystemComponent*>(ExecutionParams.GetTargetAbilitySystemComponent());
+		const float StaminaCost = (Intercept == EARPGInterceptResult::Parried)
+			? Parry->ParryStaminaCost
+			: Blocked * Parry->BlockStaminaMultiplier;
 
-		if (TargetASC)
+		if (StaminaCost > 0.f)
 		{
-			const float StaminaCost = (Intercept == EARPGInterceptResult::Parried)
-				? Parry->ParryStaminaCost
-				: Blocked * Parry->BlockStaminaMultiplier;
-
-			if (StaminaCost > 0.f)
-			{
-				const float Current = TargetASC->GetNumericAttribute(UARPGVitalSet::GetStaminaAttribute());
-				TargetASC->SetNumericAttributeBase(UARPGVitalSet::GetStaminaAttribute(),
-					FMath::Max(0.f, Current - StaminaCost));
-			}
+			// An OUTPUT MODIFIER, not a write to the attribute. This used to read
+			// the CURRENT stamina and write it back as the BASE, folding any
+			// active stamina modifier permanently into the base; and as a direct
+			// write it bypassed the effect pipeline entirely, so nothing could
+			// observe, predict or roll it back. The aggregator handles both now,
+			// and the vital set clamps it to zero.
+			OutExecutionOutput.AddOutputModifier(FGameplayModifierEvaluatedData(
+				UARPGVitalSet::GetStaminaAttribute(), EGameplayModOp::Additive, -StaminaCost));
 		}
 
 		// Defensive poise: a successful guard pushes back on the ATTACKER's
 		// stance instead of the defender's. This is the pressure that makes
 		// blocking an offensive act rather than pure attrition.
-		if (const UAbilitySystemComponent* SourceASC = ExecutionParams.GetSourceAbilitySystemComponent())
+		//
+		// Server only, and it stays a direct call rather than an output modifier
+		// because an execution can only write to its own TARGET -- and the whole
+		// point here is that the poise lands on somebody else.
+		if (bAuthoritative)
 		{
-			if (AActor* AttackerActor = SourceASC->GetAvatarActor())
+			if (const UAbilitySystemComponent* SourceASC = ExecutionParams.GetSourceAbilitySystemComponent())
 			{
-				if (UARPGPoiseComponent* AttackerPoise =
-						AttackerActor->FindComponentByClass<UARPGPoiseComponent>())
+				if (AActor* AttackerActor = SourceASC->GetAvatarActor())
 				{
-					AttackerPoise->ApplyPoiseDamage(
-						Intercept == EARPGInterceptResult::Parried
-							? AttackerPoise->ParryPoiseDamage
-							: AttackerPoise->BlockPoiseDamage);
+					if (UARPGPoiseComponent* AttackerPoise =
+							AttackerActor->FindComponentByClass<UARPGPoiseComponent>())
+					{
+						AttackerPoise->ApplyPoiseDamage(
+							Intercept == EARPGInterceptResult::Parried
+								? AttackerPoise->ParryPoiseDamage
+								: AttackerPoise->BlockPoiseDamage);
+					}
 				}
 			}
 		}
@@ -337,11 +357,11 @@ void UARPGDamageExecution::Execute_Implementation(
 	}
 
 	// --- Per-type proc hook ---------------------------------------------------
-	if (DamageType)
+	// Server only, per its own contract: a proc is Fire rolling to apply Burning,
+	// and a client rolling independently would show a status that replication
+	// then takes away.
+	if (DamageType && bAuthoritative && TargetActor)
 	{
-		if (const UAbilitySystemComponent* TargetASC = ExecutionParams.GetTargetAbilitySystemComponent())
-		{
-			DamageType->OnDamageApplied(TargetASC->GetAvatarActor(), Final, Spec.GetContext());
-		}
+		DamageType->OnDamageApplied(TargetActor, Final, Spec.GetContext());
 	}
 }

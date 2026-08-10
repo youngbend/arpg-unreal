@@ -30,6 +30,9 @@
 #include "ARPGPlayerActionComponent.h"
 #include "ARPGWeaponAttackTree.h"
 #include "ARPGAttackDefinition.h"
+#include "ARPGGameplayAbility_Discharge.h"
+#include "ARPGGameplayAbility_Dodge.h"
+#include "ARPGGameplayAbility_Imbue.h"
 #include "ARPGGameplayAbility_MeleeAttack.h"
 #include "Abilities/GameplayAbility.h"
 #include "ARPGVitalSet.h"
@@ -122,6 +125,22 @@ AarpgCharacter::AarpgCharacter()
 	// silently inert, so it is defaulted here rather than left to per-Blueprint
 	// setup.
 	DefaultAbilities.Add(UARPGGameplayAbility_MeleeAttack::StaticClass());
+
+	// A gameplay-event or tag activation only fires if the ability has been
+	// GRANTED first -- asking an ability system to activate something it was
+	// never given does nothing at all, with no error to say so. Every action the
+	// modal scheme can reach has to be in this list or the button is dead.
+	//
+	// The four discharges are separate classes rather than one parameterised
+	// ability because the face button chooses between them by tag; see
+	// UARPGPlayerActionComponent::FaceToDischargeAbilityTag.
+	DefaultAbilities.Add(UARPGGameplayAbility_DischargeProject::StaticClass());
+	DefaultAbilities.Add(UARPGGameplayAbility_DischargeBurst::StaticClass());
+	DefaultAbilities.Add(UARPGGameplayAbility_DischargeEmanate::StaticClass());
+	DefaultAbilities.Add(UARPGGameplayAbility_DischargeCloak::StaticClass());
+
+	DefaultAbilities.Add(UARPGGameplayAbility_Dodge::StaticClass());
+	DefaultAbilities.Add(UARPGGameplayAbility_Imbue::StaticClass());
 
 	// A convenience default only. SET THIS ON THE BLUEPRINT -- a hard-coded
 	// content path in C++ silently stops working the moment the asset is moved
@@ -413,14 +432,19 @@ void AarpgCharacter::InitAbilityActorInfo()
 		}
 	}
 
-	if (ComboComponent && !ComboComponent->AttackTree && !DefaultAttackTree.IsNull())
+	// Into the FALLBACK slot, not AttackTree. The weapon component owns
+	// AttackTree outright and clears it on unequip; writing the character default
+	// there too made the outcome depend on whether possession happened before or
+	// after that component began play.
+	if (ComboComponent && !ComboComponent->FallbackAttackTree && !DefaultAttackTree.IsNull())
 	{
-		ComboComponent->AttackTree = DefaultAttackTree.LoadSynchronous();
-		if (!ComboComponent->AttackTree)
+		ComboComponent->FallbackAttackTree = DefaultAttackTree.LoadSynchronous();
+		if (!ComboComponent->FallbackAttackTree)
 		{
 			UE_LOG(Logarpg, Error,
-				TEXT("Attack tree '%s' failed to load -- EVERY attack will silently do nothing. "
-				     "Set DefaultAttackTree on the character Blueprint to the real asset."),
+				TEXT("Attack tree '%s' failed to load -- an unarmed character will have no "
+				     "attacks at all. Set DefaultAttackTree on the character Blueprint to the "
+				     "real asset."),
 				*DefaultAttackTree.ToString());
 		}
 	}
@@ -558,6 +582,7 @@ void AarpgCharacter::ARPGComboState()
 		HasAuthority() ? TEXT("SERVER") : TEXT("CLIENT"), *Node,
 		ComboComponent && ComboComponent->IsAttacking(),
 		ComboComponent ? ComboComponent->GetAttackSequenceNumber() : -1,
-		ComboComponent && ComboComponent->AttackTree ? *ComboComponent->AttackTree->GetName() : TEXT("<none>"),
+		ComboComponent && ComboComponent->GetActiveTree()
+			? *ComboComponent->GetActiveTree()->GetName() : TEXT("<none>"),
 		AbilityCount);
 }

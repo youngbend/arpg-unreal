@@ -33,11 +33,25 @@ namespace
 		Effect.Modifiers.Add(Mod);
 	}
 
+	/**
+	 * MultiplyCompound, NOT the older Multiplicitive spelling.
+	 *
+	 * They are different operations and the old name is misleading:
+	 * EGameplayModOp::Multiplicitive is a back-compat alias for MultiplyAdditive,
+	 * which SUMS the multipliers' deltas from 1 before applying them once --
+	 * two 0.5x debuffs give (0.5-1)+(0.5-1)+1 = 0.0, wiping outgoing damage
+	 * entirely rather than reducing it to 0.25x. MultiplyCompound multiplies them
+	 * together, which is what add_damage_amp() did in Godot and what
+	 * UARPGOffenseSet's header describes.
+	 *
+	 * The damage execution treats a zero amp as "no modifier", so under the old
+	 * op a second concurrent debuff silently removed the first one's effect.
+	 */
 	void AddMultiplyModifier(UGameplayEffect& Effect, const FGameplayAttribute& Attribute, float Value)
 	{
 		FGameplayModifierInfo Mod;
 		Mod.Attribute = Attribute;
-		Mod.ModifierOp = EGameplayModOp::Multiplicitive;
+		Mod.ModifierOp = EGameplayModOp::MultiplyCompound;
 		Mod.ModifierMagnitude = FGameplayEffectModifierMagnitude(FScalableFloat(Value));
 		Effect.Modifiers.Add(Mod);
 	}
@@ -54,7 +68,14 @@ UARPGStatusGameplayEffect::UARPGStatusGameplayEffect()
 	// single active_effects entry keyed by effect id. AggregateBySource would
 	// give each attacker a private stack and multiply the damage by the number
 	// of people involved.
+	//
+	// The field is deprecated as of 5.7 in favour of GetStackingType, but the
+	// matching SetStackingType is WITH_EDITOR-only -- so a runtime constructor
+	// has no other way to declare this yet. Suppressed deliberately rather than
+	// left to warn, and worth revisiting when Epic ships a runtime setter.
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	StackingType = EGameplayEffectStackingType::AggregateByTarget;
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	StackDurationRefreshPolicy = EGameplayEffectStackingDurationPolicy::RefreshOnSuccessfulApplication;
 
 	// Restart the tick clock when a stack lands, matching

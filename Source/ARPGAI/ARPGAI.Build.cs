@@ -16,15 +16,17 @@ public class ARPGAI : ModuleRules
 			"Core",
 			"CoreUObject",
 			"Engine",
-			"AIModule",
-			"NavigationSystem",
-			"GameplayAbilities",
+			"AIModule",          // BT task/decorator base classes are in public headers
+			"GameplayAbilities", // UARPGNPCComponent's header names FGameplayEffectContextHandle
 			"GameplayTags",
-			"GameplayTasks",
 			"ARPGCore",
 			"ARPGCombat"
 		});
 
-		PrivateDependencyModuleNames.AddRange(new string[] { });
+		// PRIVATE: pathing and gameplay tasks are only reached from .cpp here.
+		PrivateDependencyModuleNames.AddRange(new string[] {
+			"NavigationSystem",
+			"GameplayTasks"
+		});
 	}
 }

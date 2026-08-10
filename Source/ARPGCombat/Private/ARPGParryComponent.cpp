@@ -3,22 +3,22 @@
 #include "ARPGParryComponent.h"
 #include "ARPGGameplayTags.h"
 #include "AbilitySystemComponent.h"
-#include "AbilitySystemGlobals.h"
 
 UARPGParryComponent::UARPGParryComponent()
 {
+	// Idle until something opens a timer; see RefreshTickState.
 	PrimaryComponentTick.bCanEverTick = true;
-	PrimaryComponentTick.bStartWithTickEnabled = true;
+	PrimaryComponentTick.bStartWithTickEnabled = false;
 	SetIsReplicatedByDefault(false); // guard state is resolved server-side
 }
 
-UAbilitySystemComponent* UARPGParryComponent::GetASC() const
+void UARPGParryComponent::RefreshTickState()
 {
-	if (!CachedASC)
-	{
-		CachedASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(GetOwner());
-	}
-	return CachedASC;
+	const bool bNeedsTick = bBlocking
+		|| ParryCooldownTimer > 0.f
+		|| (bEmpowered && EmpoweredDuration > 0.f);
+
+	SetComponentTickEnabled(bNeedsTick);
 }
 
 void UARPGParryComponent::BeginBlock()
@@ -41,6 +41,7 @@ void UARPGParryComponent::BeginBlock()
 		ASC->AddLooseGameplayTag(TAG_State_Blocking, 1, EGameplayTagReplicationState::TagOnly);
 	}
 
+	RefreshTickState();
 	OnBlockStarted.Broadcast();
 }
 
@@ -62,7 +63,18 @@ void UARPGParryComponent::EndBlock()
 		ASC->RemoveLooseGameplayTag(TAG_State_Parrying);
 	}
 
+	RefreshTickState();
 	OnBlockEnded.Broadcast();
+}
+
+EARPGInterceptResult UARPGParryComponent::PeekIntercept() const
+{
+	if (!bBlocking || BlendInTimer > 0.f)
+	{
+		return EARPGInterceptResult::None;
+	}
+
+	return ParryTimer > 0.f ? EARPGInterceptResult::Parried : EARPGInterceptResult::Blocked;
 }
 
 EARPGInterceptResult UARPGParryComponent::TryIntercept()
@@ -85,6 +97,7 @@ EARPGInterceptResult UARPGParryComponent::TryIntercept()
 		ParryTimer = 0.f;
 		bEmpowered = true;
 		EmpoweredTimer = EmpoweredDuration;
+		RefreshTickState();
 
 		OnIntercepted.Broadcast(EARPGInterceptResult::Parried);
 		return EARPGInterceptResult::Parried;
@@ -103,6 +116,7 @@ bool UARPGParryComponent::ConsumeEmpowered()
 
 	bEmpowered = false;
 	EmpoweredTimer = 0.f;
+	RefreshTickState();
 	return true;
 }
 
@@ -127,6 +141,9 @@ void UARPGParryComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 
 	if (!bBlocking)
 	{
+		// Blocking is the only state that needs a per-frame tick indefinitely;
+		// the cooldown and empowered timers above run down and stop.
+		RefreshTickState();
 		return;
 	}
 

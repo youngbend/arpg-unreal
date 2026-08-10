@@ -2,6 +2,7 @@
 
 #include "ARPGStatusVfxSubsystem.h"
 #include "ARPGCombat.h"
+#include "ARPGGameplayTags.h"
 #include "ARPGGeometryProbe.h"
 #include "ARPGStatusEffectComponent.h"
 #include "ARPGVfxFittable.h"
@@ -100,6 +101,12 @@ void UARPGStatusVfxSubsystem::GatherRequests()
 			continue;
 		}
 
+		// UNFILTERED, deliberately. Filtering on the Status.* owning tag would be
+		// cheaper, but it assumes every status effect also grants its own identity
+		// tag -- and what actually makes an effect a status here is carrying a
+		// UARPGStatusEffectComponent, which no FGameplayEffectQuery can express.
+		// An effect with presentation data and no tag would silently lose its
+		// visual, which is a worse trade than the array this allocates.
 		const TArray<FActiveGameplayEffectHandle> Handles =
 			ASC->GetActiveEffects(FGameplayEffectQuery());
 
@@ -123,7 +130,7 @@ void UARPGStatusVfxSubsystem::GatherRequests()
 			}
 
 			FARPGStatusVfxKey Key;
-			Key.TargetId = Target->GetUniqueID();
+			Key.TargetKey = FObjectKey(Target);
 			Key.StatusTag = Presentation->StatusTag;
 
 			const int32 Stacks = FMath::Max(1, ASC->GetCurrentStackCount(Handle));

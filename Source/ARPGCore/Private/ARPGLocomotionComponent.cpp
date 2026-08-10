@@ -1,16 +1,25 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ARPGLocomotionComponent.h"
+#include "ARPGAttributeLibrary.h"
 #include "ARPGVitalSet.h"
 #include "AbilitySystemComponent.h"
-#include "AbilitySystemGlobals.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
 
 UARPGLocomotionComponent::UARPGLocomotionComponent()
 {
 	PrimaryComponentTick.bCanEverTick = true;
+
+	// In a cooked build the only per-frame work here is the sprint's stamina
+	// drain, so the tick follows the sprint. In the editor it stays on so that
+	// WalkSpeed and friends can be tuned live in PIE and take effect immediately.
+#if WITH_EDITOR
 	PrimaryComponentTick.bStartWithTickEnabled = true;
+#else
+	PrimaryComponentTick.bStartWithTickEnabled = false;
+#endif
+
 	SetIsReplicatedByDefault(false);
 }
 
@@ -36,16 +45,25 @@ void UARPGLocomotionComponent::TickComponent(float DeltaTime, ELevelTick TickTyp
 		SetSprinting(false);
 	}
 
-	// Every frame rather than only on a tier change: the tier is not the only
-	// input to the speed. Designers tune WalkSpeed and the rest live in PIE, an
-	// attack scales the whole thing mid-swing, and a gameplay effect elsewhere
-	// can overwrite MaxWalkSpeed outright.
+	// Reasserted every frame in the editor so live tuning of WalkSpeed and the
+	// rest is visible immediately. In a cooked build every input to the speed --
+	// tier, walk-forced, attack scaling -- routes through RefreshTier, which
+	// applies it on the spot.
+	//
+	// This used to run unconditionally, and the melee ability wrote MaxWalkSpeed
+	// directly, so the two fought and the ability always lost. The ability now
+	// goes through SetAttackMovement, which makes this the single writer.
+#if WITH_EDITOR
 	ApplySpeed();
+#endif
 }
 
-UAbilitySystemComponent* UARPGLocomotionComponent::GetASC() const
+void UARPGLocomotionComponent::RefreshTickState()
 {
-	return UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(GetOwner());
+#if !WITH_EDITOR
+	// Only the sprint drain needs a per-frame tick.
+	SetComponentTickEnabled(bSprinting && SprintStaminaDrain > 0.f);
+#endif
 }
 
 UCharacterMovementComponent* UARPGLocomotionComponent::GetMovement() const
@@ -56,25 +74,10 @@ UCharacterMovementComponent* UARPGLocomotionComponent::GetMovement() const
 
 bool UARPGLocomotionComponent::TrySpendStamina(float Cost)
 {
-	if (Cost <= 0.f)
-	{
-		return true;
-	}
-
-	UAbilitySystemComponent* ASC = GetASC();
-	if (!ASC)
-	{
-		return true; // nothing to spend from; don't pin the character in place
-	}
-
-	const float Current = ASC->GetNumericAttribute(UARPGVitalSet::GetStaminaAttribute());
-	if (Current < Cost)
-	{
-		return false;
-	}
-
-	ASC->SetNumericAttributeBase(UARPGVitalSet::GetStaminaAttribute(), Current - Cost);
-	return true;
+	// Shared helper: this ran every frame of every sprint, reading the CURRENT
+	// stamina and writing it back as the BASE, so any stamina buff active during
+	// a sprint was permanently baked into the base value.
+	return UARPGAttributeLibrary::TrySpend(GetASC(), UARPGVitalSet::GetStaminaAttribute(), Cost);
 }
 
 // ---------------------------------------------------------------------------
@@ -188,4 +191,5 @@ void UARPGLocomotionComponent::RefreshTier()
 	}
 
 	ApplySpeed();
+	RefreshTickState();
 }

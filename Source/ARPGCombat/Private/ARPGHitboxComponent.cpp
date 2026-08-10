@@ -18,8 +18,10 @@
 
 UARPGHitboxComponent::UARPGHitboxComponent()
 {
+	// Only while armed. A hitbox spends almost all of its life disarmed, and the
+	// tick's first act was to return on exactly that check.
 	PrimaryComponentTick.bCanEverTick = true;
-	PrimaryComponentTick.bStartWithTickEnabled = true;
+	PrimaryComponentTick.bStartWithTickEnabled = false;
 
 	DamageEffectClass = UARPGDamageGameplayEffect::StaticClass();
 
@@ -28,12 +30,35 @@ UARPGHitboxComponent::UARPGHitboxComponent()
 	TraceObjectTypes.Add(UEngineTypes::ConvertToObjectType(ECC_Pawn));
 }
 
+UARPGHitboxComponent* UARPGHitboxComponent::FindOnActor(const AActor* Actor,
+	EARPGHitboxSource Source, bool bAllowFallback)
+{
+	if (!Actor)
+	{
+		return nullptr;
+	}
+
+	TArray<UARPGHitboxComponent*> Hitboxes;
+	Actor->GetComponents<UARPGHitboxComponent>(Hitboxes);
+
+	for (UARPGHitboxComponent* Hitbox : Hitboxes)
+	{
+		if (Hitbox->HitboxSource == Source)
+		{
+			return Hitbox;
+		}
+	}
+
+	return (bAllowFallback && Hitboxes.Num() > 0) ? Hitboxes[0] : nullptr;
+}
+
 void UARPGHitboxComponent::ActivateHitbox()
 {
 	bArmed = true;
 	TickAccumulator = 0.f;
 	HitTargets.Reset();
 	DeferredSelfTargets.Reset();
+	SetComponentTickEnabled(true);
 
 	PreviousLocation = GetComponentLocation();
 
@@ -77,6 +102,7 @@ void UARPGHitboxComponent::ActivateHitbox()
 void UARPGHitboxComponent::DeactivateHitbox()
 {
 	bArmed = false;
+	SetComponentTickEnabled(false);
 }
 
 void UARPGHitboxComponent::TickComponent(float DeltaTime, ELevelTick TickType,
@@ -162,15 +188,18 @@ void UARPGHitboxComponent::PerformSweep()
 			continue;
 		}
 
-		UARPGHurtboxComponent* Hurtbox = HitActor->FindComponentByClass<UARPGHurtboxComponent>();
-		if (!Hurtbox)
-		{
-			continue; // not a damageable thing
-		}
-
 		if (HitTargets.Contains(HitActor))
 		{
 			continue; // already hit this activation
+		}
+
+		// Registry lookup rather than a component walk -- this runs for every
+		// sweep result on every armed frame. Ordered after the cheap set test
+		// above so a re-hit of the same target costs nothing at all.
+		UARPGHurtboxComponent* Hurtbox = UARPGHurtboxComponent::FindFor(HitActor);
+		if (!Hurtbox)
+		{
+			continue; // not a damageable thing
 		}
 
 		// A deferred self-target stays suppressed only while it keeps
@@ -230,7 +259,7 @@ void UARPGHitboxComponent::DeliverHit(UARPGHurtboxComponent* Hurtbox, const FHit
 	ContextHandle.AddHitResult(Hit);
 
 	if (FARPGGameplayEffectContext* Context =
-			static_cast<FARPGGameplayEffectContext*>(ContextHandle.Get()))
+			FARPGGameplayEffectContext::ExtractFrom(ContextHandle))
 	{
 		Context->SourceHitbox = this;
 		Context->DamageType = DamageType;

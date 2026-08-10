@@ -28,51 +28,63 @@
 // Subject and component lookup
 // ---------------------------------------------------------------------------
 
-AActor* UARPGHudWidget::GetSubject() const
+void UARPGHudWidget::RefreshSubject() const
 {
 	const APlayerController* PC = GetOwningPlayer();
-	return PC ? PC->GetPawn() : nullptr;
+	AActor* Pawn = PC ? PC->GetPawn() : nullptr;
+
+	if (CachedSubject.Get() == Pawn)
+	{
+		return; // unchanged, which is the overwhelmingly common case
+	}
+
+	CachedSubject = Pawn;
+
+	// One walk of the component array per possession change, rather than one per
+	// bound widget per frame.
+	CachedASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(Pawn);
+	CachedMagic = Pawn ? Pawn->FindComponentByClass<UARPGMagicComponent>() : nullptr;
+	CachedCombo = Pawn ? Pawn->FindComponentByClass<UARPGComboComponent>() : nullptr;
+	CachedWeapon = Pawn ? Pawn->FindComponentByClass<UARPGWeaponComponent>() : nullptr;
+	CachedParry = Pawn ? Pawn->FindComponentByClass<UARPGParryComponent>() : nullptr;
+	CachedQuickSlots = Pawn ? Pawn->FindComponentByClass<UARPGQuickSlotComponent>() : nullptr;
+	CachedLocomotion = Pawn ? Pawn->FindComponentByClass<UARPGLocomotionComponent>() : nullptr;
+}
+
+AActor* UARPGHudWidget::GetSubject() const
+{
+	RefreshSubject();
+	return CachedSubject.Get();
 }
 
 UAbilitySystemComponent* UARPGHudWidget::GetASC() const
 {
-	return UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(GetSubject());
+	RefreshSubject();
+
+	// The ability system lives on the PlayerState, which for a client can arrive
+	// after the pawn does -- so a null result is retried rather than cached.
+	if (!CachedASC)
+	{
+		CachedASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(CachedSubject.Get());
+	}
+	return CachedASC;
 }
 
-UARPGMagicComponent* UARPGHudWidget::GetMagic() const
-{
-	AActor* Subject = GetSubject();
-	return Subject ? Subject->FindComponentByClass<UARPGMagicComponent>() : nullptr;
-}
-
-UARPGComboComponent* UARPGHudWidget::GetCombo() const
-{
-	AActor* Subject = GetSubject();
-	return Subject ? Subject->FindComponentByClass<UARPGComboComponent>() : nullptr;
-}
-
-UARPGWeaponComponent* UARPGHudWidget::GetWeapon() const
-{
-	AActor* Subject = GetSubject();
-	return Subject ? Subject->FindComponentByClass<UARPGWeaponComponent>() : nullptr;
-}
-
-UARPGParryComponent* UARPGHudWidget::GetParry() const
-{
-	AActor* Subject = GetSubject();
-	return Subject ? Subject->FindComponentByClass<UARPGParryComponent>() : nullptr;
-}
+UARPGMagicComponent* UARPGHudWidget::GetMagic() const { RefreshSubject(); return CachedMagic; }
+UARPGComboComponent* UARPGHudWidget::GetCombo() const { RefreshSubject(); return CachedCombo; }
+UARPGWeaponComponent* UARPGHudWidget::GetWeapon() const { RefreshSubject(); return CachedWeapon; }
+UARPGParryComponent* UARPGHudWidget::GetParry() const { RefreshSubject(); return CachedParry; }
 
 UARPGQuickSlotComponent* UARPGHudWidget::GetQuickSlots() const
 {
-	AActor* Subject = GetSubject();
-	return Subject ? Subject->FindComponentByClass<UARPGQuickSlotComponent>() : nullptr;
+	RefreshSubject();
+	return CachedQuickSlots;
 }
 
 UARPGLocomotionComponent* UARPGHudWidget::GetLocomotion() const
 {
-	AActor* Subject = GetSubject();
-	return Subject ? Subject->FindComponentByClass<UARPGLocomotionComponent>() : nullptr;
+	RefreshSubject();
+	return CachedLocomotion;
 }
 
 // ---------------------------------------------------------------------------
@@ -273,6 +285,9 @@ TArray<FARPGHudStatus> UARPGHudWidget::GetStatuses() const
 		return Result;
 	}
 
+	// Unfiltered, for the reason given in UARPGStatusVfxSubsystem: what makes an
+	// effect a status here is carrying a UARPGStatusEffectComponent, and no
+	// FGameplayEffectQuery can ask that.
 	const TArray<FActiveGameplayEffectHandle> Handles = ASC->GetActiveEffects(FGameplayEffectQuery());
 	const float WorldTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
 
@@ -485,6 +500,22 @@ namespace
 		Bar->SetWidgetStyle(Style);
 		Bar->SetPercent(0.f);
 	}
+}
+
+void UARPGHudWidget::NativeOnInitialized()
+{
+	Super::NativeOnInitialized();
+
+	// A HUD MUST NOT TAKE FOCUS, and this is not a nicety. Slate treats gamepad
+	// face buttons and the D-pad as UI NAVIGATION and consumes them before they
+	// reach player input, so a focusable widget on screen makes the entire pad
+	// appear dead while the keyboard carries on working -- the two behave
+	// differently because letters are not navigation keys.
+	//
+	// SelfHitTestInvisible rather than HitTestInvisible so a child that genuinely
+	// wants clicks later can still opt in; it is only this root that steps back.
+	SetIsFocusable(false);
+	SetVisibility(ESlateVisibility::SelfHitTestInvisible);
 }
 
 TSharedRef<SWidget> UARPGHudWidget::RebuildWidget()

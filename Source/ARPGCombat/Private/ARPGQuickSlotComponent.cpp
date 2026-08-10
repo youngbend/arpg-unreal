@@ -227,6 +227,7 @@ bool UARPGQuickSlotComponent::UseSelected()
 	}
 
 	CooldownRemaining = Consumable->UseCooldown;
+	SetComponentTickEnabled(CooldownRemaining > 0.f);
 	OnConsumableUsed.Broadcast(Item);
 
 	UE_LOG(LogARPGCombat, Log, TEXT("%s used '%s' (%d left)"),
@@ -244,5 +245,12 @@ void UARPGQuickSlotComponent::TickComponent(float DeltaTime, ELevelTick TickType
 	if (CooldownRemaining > 0.f)
 	{
 		CooldownRemaining = FMath::Max(0.f, CooldownRemaining - DeltaTime);
+	}
+
+	// Nothing else here needs a frame. Switched back on by whatever starts a
+	// cooldown; see SetComponentTickEnabled below.
+	if (CooldownRemaining <= 0.f)
+	{
+		SetComponentTickEnabled(false);
 	}
 }

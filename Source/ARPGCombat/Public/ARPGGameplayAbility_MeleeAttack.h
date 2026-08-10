@@ -8,6 +8,7 @@
 
 class UARPGAttackDefinition;
 class UARPGComboComponent;
+class UARPGDamageTypeAsset;
 class UARPGHitboxComponent;
 
 /**
@@ -84,6 +85,18 @@ private:
 	UARPGHitboxComponent* ResolveHitbox() const;
 	UARPGComboComponent* ResolveCombo() const;
 
+	/**
+	 * Applies the attack's movement scaling, and puts it back on end.
+	 *
+	 * Goes through UARPGLocomotionComponent where the character has one. Writing
+	 * MaxWalkSpeed directly -- which this used to do -- is silently undone on the
+	 * very next frame, because that component reapplies its own tier every tick.
+	 * A rooted attack therefore ran at full speed on exactly the characters that
+	 * matter most. The direct write survives only as the fallback for a character
+	 * with no locomotion component, which is every NPC.
+	 */
+	void ApplyMovementScaling();
+
 	/** Stamps the swing's payload onto the hitbox and arms it. */
 	void ArmHitbox(int32 WindowIndex, bool bLandingWindow);
 	void DisarmHitbox();
@@ -109,10 +122,31 @@ private:
 	/** Restored on end, so a rooted attack does not leave the character slowed. */
 	float CachedMaxWalkSpeed = 0.f;
 	bool bAppliedSpeedFactor = false;
+	bool bScaledViaLocomotion = false;
 	bool bGrantedHyperarmor = false;
+
+	/**
+	 * The hitbox's own damage type, put back when the attack ends.
+	 *
+	 * An attack that overrides the type used to leave the override in place --
+	 * there was no else branch -- so the first fire swing in a tree converted the
+	 * weapon to fire permanently.
+	 */
+	UPROPERTY(Transient)
+	TObjectPtr<UARPGDamageTypeAsset> CachedHitboxDamageType;
+	bool bOverrodeDamageType = false;
 
 	/** Guards against the combo window notify firing twice on a looping montage. */
 	bool bComboWindowOpened = false;
+
+	/** OnBlendOut and OnCompleted both fire on a normal end; only the first counts. */
+	bool bMontageFinishHandled = false;
+
+	/**
+	 * The hitbox-fallback warning is worth saying once per swing, not once per
+	 * window. Mutable because ResolveHitbox is const and this is pure bookkeeping.
+	 */
+	mutable bool bWarnedHitboxFallback = false;
 
 	/**
 	 * How far the charge got, 0-1. Drives GetChargedMotionValue when the hitbox

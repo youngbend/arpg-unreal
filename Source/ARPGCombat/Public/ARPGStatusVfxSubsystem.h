@@ -5,7 +5,10 @@
 #include "CoreMinimal.h"
 #include "GameplayTagContainer.h"
 #include "Subsystems/WorldSubsystem.h"
+#include "UObject/ObjectKey.h"
 #include "ARPGStatusVfxSubsystem.generated.h"
+
+struct FGameplayEffectQuery;
 
 class UAbilitySystemComponent;
 class UARPGStatusEffectComponent;
@@ -39,21 +42,28 @@ struct FARPGStatusVfxRequest
 	bool bSeen = false;
 };
 
-/** Keyed per target AND per status, so one burning thing can also be shocked. */
+/**
+ * Keyed per target AND per status, so one burning thing can also be shocked.
+ *
+ * FObjectKey, not GetUniqueID(). That returns the object's internal index, which
+ * the engine RECYCLES after garbage collection -- so a request left behind by a
+ * destroyed actor could collide with a freshly spawned one and hand it somebody
+ * else's visual. FObjectKey pairs the index with a serial number precisely to
+ * make that impossible.
+ */
 USTRUCT()
 struct FARPGStatusVfxKey
 {
 	GENERATED_BODY()
 
-	UPROPERTY()
-	uint32 TargetId = 0;
+	FObjectKey TargetKey;
 
 	UPROPERTY()
 	FGameplayTag StatusTag;
 
 	bool operator==(const FARPGStatusVfxKey& Other) const
 	{
-		return TargetId == Other.TargetId && StatusTag == Other.StatusTag;
+		return TargetKey == Other.TargetKey && StatusTag == Other.StatusTag;
 	}
 };
 
@@ -61,7 +71,7 @@ FORCEINLINE uint32 GetTypeHash(const FARPGStatusVfxKey& Key)
 {
 	// Unqualified on purpose. FGameplayTag declares its hash as a hidden friend,
 	// which qualified lookup cannot see -- only argument-dependent lookup can.
-	return HashCombine(GetTypeHash(Key.TargetId), GetTypeHash(Key.StatusTag));
+	return HashCombine(GetTypeHash(Key.TargetKey), GetTypeHash(Key.StatusTag));
 }
 
 /** Counts for tests and the debug overlay. */

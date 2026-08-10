@@ -48,6 +48,7 @@ void UARPGCloakComponent::ApplyCloak(const FARPGDischargeContext& Context)
 		? Element->CloakBaseDuration
 		: DefaultDuration;
 	CloakTimer = BaseDuration + Element->CloakChargeBonus * Context.Charge;
+	SetComponentTickEnabled(true);
 
 	// Shield capacity is the same number the spell would have dealt as damage --
 	// see the class comment.
@@ -117,7 +118,15 @@ void UARPGCloakComponent::ApplySelfEffect()
 
 void UARPGCloakComponent::BreakCloak()
 {
-	if (!IsCloaked() || !GetOwner() || !GetOwner()->HasAuthority())
+	if (!IsCloaked())
+	{
+		// A cloak is a short, rare state; the rest of the time this component has
+		// nothing to count down.
+		SetComponentTickEnabled(false);
+		return;
+	}
+
+	if (!GetOwner() || !GetOwner()->HasAuthority())
 	{
 		return;
 	}

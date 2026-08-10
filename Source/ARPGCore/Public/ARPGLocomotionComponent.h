@@ -3,7 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Components/ActorComponent.h"
+#include "ARPGGameplayComponentBase.h"
 #include "ARPGLocomotionComponent.generated.h"
 
 class UAbilitySystemComponent;
@@ -49,7 +49,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FARPGOnSpeedTierChanged, EARPGSpeedT
  * centre, so it never survives into a state the player did not ask for.
  */
 UCLASS(ClassGroup = (ARPG), meta = (BlueprintSpawnableComponent))
-class ARPGCORE_API UARPGLocomotionComponent : public UActorComponent
+class ARPGCORE_API UARPGLocomotionComponent : public UARPGGameplayComponentBase
 {
 	GENERATED_BODY()
 
@@ -146,7 +146,6 @@ public:
 	float SprintStaminaDrain = 12.f;
 
 protected:
-	UAbilitySystemComponent* GetASC() const;
 	UCharacterMovementComponent* GetMovement() const;
 
 	/**
@@ -160,6 +159,9 @@ protected:
 
 	/** Broadcasts OnSpeedTierChanged if the tier moved, then reapplies the speed. */
 	void RefreshTier();
+
+	/** Follows the sprint outside the editor -- nothing else here needs a tick. */
+	void RefreshTickState();
 
 private:
 	bool bSprinting = false;

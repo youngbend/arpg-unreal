@@ -7,17 +7,31 @@
 #include "ARPGWeaponDefinition.h"
 #include "Animation/AnimInstance.h"
 #include "GameFramework/Character.h"
+#include "ARPGAttributeLibrary.h"
 #include "ARPGGameplayTags.h"
 #include "ARPGVitalSet.h"
 #include "AbilitySystemComponent.h"
-#include "AbilitySystemGlobals.h"
 #include "GameplayEffectTypes.h"
 
 UARPGPoiseComponent::UARPGPoiseComponent()
 {
 	PrimaryComponentTick.bCanEverTick = true;
+
+	// Starts enabled ONLY to let EnsureSubscribed retry for a late PlayerState;
+	// once the meter is empty and the subscription is live, RefreshTickState
+	// switches it off and a hit switches it back on.
 	PrimaryComponentTick.bStartWithTickEnabled = true;
 	SetIsReplicatedByDefault(false); // resolved server-side; the Poise attribute replicates
+}
+
+void UARPGPoiseComponent::RefreshTickState()
+{
+	const bool bNeedsTick = !PoiseDamageHandle.IsValid()   // still waiting on an ASC
+		|| BreakImmunityTimer > 0.f
+		|| HoldTimer > 0.f
+		|| GetCurrentPoise() > 0.f;
+
+	SetComponentTickEnabled(bNeedsTick);
 }
 
 void UARPGPoiseComponent::BeginPlay()
@@ -49,6 +63,9 @@ void UARPGPoiseComponent::EnsureSubscribed()
 	{
 		PoiseDamageHandle = const_cast<UARPGVitalSet*>(VitalSet)->OnPoiseDamageReceived
 			.AddUObject(this, &UARPGPoiseComponent::HandlePoiseDamageReceived);
+
+		// Bound at last: nothing else needs a tick until a hit lands.
+		RefreshTickState();
 	}
 }
 
@@ -70,36 +87,36 @@ void UARPGPoiseComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	Super::EndPlay(EndPlayReason);
 }
 
-UAbilitySystemComponent* UARPGPoiseComponent::GetASC() const
-{
-	if (!CachedASC)
-	{
-		CachedASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(GetOwner());
-	}
-	return CachedASC;
-}
-
 float UARPGPoiseComponent::GetCurrentPoise() const
 {
-	const UAbilitySystemComponent* ASC = GetASC();
-	return ASC ? ASC->GetNumericAttribute(UARPGVitalSet::GetPoiseAttribute()) : 0.f;
+	// The BASE value, to match SetPoise's write. Reading the current value and
+	// writing the base is what folds any active poise modifier into the base --
+	// see UARPGAttributeLibrary.
+	return UARPGAttributeLibrary::GetBase(GetASC(), UARPGVitalSet::GetPoiseAttribute());
 }
 
 float UARPGPoiseComponent::GetMaxPoise() const
 {
-	const UAbilitySystemComponent* ASC = GetASC();
-	const float Max = ASC ? ASC->GetNumericAttribute(UARPGVitalSet::GetMaxPoiseAttribute()) : 0.f;
+	// The maximum is a ceiling that buffs legitimately raise, so the CURRENT
+	// value is the right one here -- the asymmetry with GetCurrentPoise above is
+	// deliberate.
+	const float Max = UARPGAttributeLibrary::GetCurrent(GetASC(), UARPGVitalSet::GetMaxPoiseAttribute());
 	return Max > 0.f ? Max : 100.f;
 }
 
 void UARPGPoiseComponent::SetPoise(float NewValue)
 {
-	if (UAbilitySystemComponent* ASC = GetASC())
+	UAbilitySystemComponent* ASC = GetASC();
+	if (!ASC)
 	{
-		ASC->SetNumericAttributeBase(UARPGVitalSet::GetPoiseAttribute(),
-			FMath::Clamp(NewValue, 0.f, GetMaxPoise()));
-		OnPoiseChanged.Broadcast(GetCurrentPoise(), GetMaxPoise());
+		return;
 	}
+
+	UARPGAttributeLibrary::SetBase(ASC, UARPGVitalSet::GetPoiseAttribute(),
+		FMath::Clamp(NewValue, 0.f, GetMaxPoise()));
+
+	OnPoiseChanged.Broadcast(GetCurrentPoise(), GetMaxPoise());
+	RefreshTickState();
 }
 
 void UARPGPoiseComponent::HandlePoiseDamageReceived(float Amount)
@@ -137,6 +154,7 @@ EARPGPoiseResult UARPGPoiseComponent::ApplyPoiseDamage(float Amount)
 		SetPoise(0.f);
 		BreakImmunityTimer = BreakImmunityTime;
 		HoldTimer = 0.f;
+		RefreshTickState();
 
 		OnPoiseResult.Broadcast(EARPGPoiseResult::StanceBreak);
 		SendPoiseEvent(EARPGPoiseResult::StanceBreak);
@@ -213,8 +231,19 @@ void UARPGPoiseComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
-	// Cheap no-op once bound; covers the ASC arriving after BeginPlay.
-	EnsureSubscribed();
+	// Covers the ASC arriving after BeginPlay -- a player's lives on the
+	// PlayerState. Retried on a slow cadence rather than every frame: it is a
+	// global lookup plus an attribute-set search, and on an actor that will never
+	// have an ability system it would otherwise run forever.
+	if (!PoiseDamageHandle.IsValid())
+	{
+		SubscribeRetryTimer -= DeltaTime;
+		if (SubscribeRetryTimer <= 0.f)
+		{
+			SubscribeRetryTimer = 0.5f;
+			EnsureSubscribed();
+		}
+	}
 
 	if (BreakImmunityTimer > 0.f)
 	{
@@ -224,6 +253,7 @@ void UARPGPoiseComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 	const float Current = GetCurrentPoise();
 	if (Current <= 0.f)
 	{
+		RefreshTickState();
 		return;
 	}
 
@@ -269,8 +299,27 @@ void UARPGPoiseComponent::PlayReactionMontage(EARPGPoiseResult Result) const
 		return;
 	}
 
-	if (UAnimInstance* Anim = Character->GetMesh() ? Character->GetMesh()->GetAnimInstance() : nullptr)
+	UAbilitySystemComponent* ASC = GetASC();
+	UAnimInstance* Anim = Character->GetMesh() ? Character->GetMesh()->GetAnimInstance() : nullptr;
+	if (!Anim)
 	{
-		Anim->Montage_Play(Montage);
+		return;
 	}
+
+	// Through the ability system, which replicates the montage to every client
+	// via its own RepAnimMontageInfo. A bare Anim->Montage_Play here plays only
+	// on the machine that called it -- and poise resolves inside
+	// PostGameplayEffectExecute, which for a hitbox-applied hit is the server
+	// alone. Every flinch and stance break in the game was server-only.
+	//
+	// PlayMontage needs the actor info wired up, which is true for anything with
+	// an initialised ASC; the direct call remains the fallback for a fixture that
+	// has an anim instance but no ability system.
+	if (ASC && ASC->AbilityActorInfo.IsValid() && ASC->AbilityActorInfo->AnimInstance.IsValid())
+	{
+		ASC->PlayMontage(nullptr, FGameplayAbilityActivationInfo(), Montage, 1.f);
+		return;
+	}
+
+	Anim->Montage_Play(Montage);
 }

@@ -16,7 +16,13 @@ UARPGGameplayAbility_Imbue::UARPGGameplayAbility_Imbue()
 	InstancingPolicy = EGameplayAbilityInstancingPolicy::InstancedPerActor;
 	NetExecutionPolicy = EGameplayAbilityNetExecutionPolicy::LocalPredicted;
 
-	AbilityTags.AddTag(TAG_Ability_Imbue);
+	{
+		// SetAssetTags replaces rather than appends, and it is protected --
+		// so a subclass carries the base class's tags forward itself.
+		FGameplayTagContainer Tags = GetAssetTags();
+		Tags.AddTag(TAG_Ability_Imbue);
+		SetAssetTags(Tags);
+	}
 
 	ActivationBlockedTags.AddTag(TAG_State_Flinching);
 	ActivationBlockedTags.AddTag(TAG_State_StanceBroken);

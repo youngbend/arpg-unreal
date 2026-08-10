@@ -323,4 +323,137 @@ bool FARPGArmorUnmappedResistanceTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGEquipmentBuffDriftTest,
+	"ARPG.Combat.Equipment.GrantsDoNotAbsorbLiveBuffs",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+/**
+ * A worn piece must not swallow a buff that happens to be live when it is
+ * equipped.
+ *
+ * THE BUG THIS PINS DOWN. Both equipment components used to read the CURRENT
+ * value of an attribute -- base plus every active modifier -- and write it back
+ * as the BASE. Equipping armour while any resistance buff was running therefore
+ * folded that buff permanently into the base, and it stayed after the buff
+ * expired and after the armour came off. Repeat the cycle and a character
+ * ratchets upward without limit.
+ *
+ * The grant is a GameplayEffect now, so the aggregator owns it and removal is
+ * exact. This asserts the property the old shape could not have: the base is
+ * untouched throughout, and every combination of buff-on/off and armour-on/off
+ * lands on the arithmetic sum.
+ */
+bool FARPGEquipmentBuffDriftTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGEquipmentTestUtils;
+	FTestWorld Scope;
+	FRig Rig = BuildRig(Scope.World);
+
+	UAbilitySystemComponent* ASC = Rig.Actor->GetAbilitySystemComponent();
+	const FGameplayAttribute FireAttr = UARPGResistanceSet::GetFireResistanceAttribute();
+
+	ASC->SetNumericAttributeBase(FireAttr, 0.1f);
+	TestEqual(TEXT("Setup: innate fire resistance"), Rig.FireRes(), 0.1f);
+
+	// A live buff, exactly as a Wet status would apply one.
+	UGameplayEffect* Buff = NewObject<UGameplayEffect>(GetTransientPackage(), TEXT("FireResBuff"));
+	Buff->DurationPolicy = EGameplayEffectDurationType::Infinite;
+	{
+		FGameplayModifierInfo Mod;
+		Mod.Attribute = FireAttr;
+		Mod.ModifierOp = EGameplayModOp::Additive;
+		Mod.ModifierMagnitude = FGameplayEffectModifierMagnitude(FScalableFloat(0.2f));
+		Buff->Modifiers.Add(Mod);
+	}
+
+	const FActiveGameplayEffectHandle BuffHandle =
+		ASC->ApplyGameplayEffectToSelf(Buff, 1.f, ASC->MakeEffectContext());
+
+	TestEqual(TEXT("Buff raises the current value"), Rig.FireRes(), 0.3f);
+
+	UARPGDamageTypeAsset* Fire = MakeDamageType(FireAttr);
+
+	FARPGArmorModifier Warded;
+	Warded.ResistanceBonuses.Add(Fire, 0.25f);
+
+	UARPGArmorDefinition* Piece = NewObject<UARPGArmorDefinition>();
+	Piece->ArmorId = TEXT("warded");
+	Piece->Modifiers.Add(Warded);
+
+	// Equipped WHILE the buff is live -- the moment the old shape went wrong.
+	Rig.ArmorComp->EquipArmor(Piece);
+	TestEqual(TEXT("Armour composes with the buff"), Rig.FireRes(), 0.55f);
+	TestEqual(TEXT("And the BASE is untouched"),
+		ASC->GetNumericAttributeBase(FireAttr), 0.1f);
+
+	// The buff ends. What is left must be innate plus armour, with none of the
+	// buff baked in.
+	ASC->RemoveActiveGameplayEffect(BuffHandle);
+	TestEqual(TEXT("Buff expiring leaves innate + armour only"), Rig.FireRes(), 0.35f);
+
+	Rig.ArmorComp->UnequipArmor();
+	TestEqual(TEXT("Unequipping returns exactly to innate"), Rig.FireRes(), 0.1f);
+	TestEqual(TEXT("Base never moved at all"),
+		ASC->GetNumericAttributeBase(FireAttr), 0.1f);
+
+	// The ratchet: repeating the cycle must not accumulate anything.
+	for (int32 Cycle = 0; Cycle < 3; ++Cycle)
+	{
+		Rig.ArmorComp->EquipArmor(Piece);
+		Rig.ArmorComp->UnequipArmor();
+	}
+	TestEqual(TEXT("Three equip/unequip cycles leave no drift"), Rig.FireRes(), 0.1f);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGWeaponCritDriftTest,
+	"ARPG.Combat.Equipment.WeaponCritGrantDoesNotDrift",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+/** The same property for the weapon's crit bonus, which had the same shape. */
+bool FARPGWeaponCritDriftTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGEquipmentTestUtils;
+	FTestWorld Scope;
+	FRig Rig = BuildRig(Scope.World);
+
+	UAbilitySystemComponent* ASC = Rig.Actor->GetAbilitySystemComponent();
+	const FGameplayAttribute CritAttr = UARPGOffenseSet::GetCritChanceAttribute();
+
+	ASC->SetNumericAttributeBase(CritAttr, 0.05f);
+
+	UGameplayEffect* Buff = NewObject<UGameplayEffect>(GetTransientPackage(), TEXT("CritBuff"));
+	Buff->DurationPolicy = EGameplayEffectDurationType::Infinite;
+	{
+		FGameplayModifierInfo Mod;
+		Mod.Attribute = CritAttr;
+		Mod.ModifierOp = EGameplayModOp::Additive;
+		Mod.ModifierMagnitude = FGameplayEffectModifierMagnitude(FScalableFloat(0.1f));
+		Buff->Modifiers.Add(Mod);
+	}
+	const FActiveGameplayEffectHandle BuffHandle =
+		ASC->ApplyGameplayEffectToSelf(Buff, 1.f, ASC->MakeEffectContext());
+
+	FARPGWeaponModifier Keen;
+	Keen.CritChanceBonus = 0.2f;
+
+	UARPGWeaponDefinition* Dagger = NewObject<UARPGWeaponDefinition>();
+	Dagger->WeaponId = TEXT("keen_dagger");
+	Dagger->AttackTree = MakeTree(Dagger, TEXT("dagger_light"));
+	Dagger->Modifiers.Add(Keen);
+
+	Rig.WeaponComp->EquipWeapon(Dagger);
+	TestEqual(TEXT("Weapon crit composes with the buff"), Rig.Crit(), 0.35f);
+
+	ASC->RemoveActiveGameplayEffect(BuffHandle);
+	TestEqual(TEXT("Buff expiring leaves innate + weapon"), Rig.Crit(), 0.25f);
+
+	Rig.WeaponComp->UnequipWeapon();
+	TestEqual(TEXT("Unequipping returns exactly to innate"), Rig.Crit(), 0.05f);
+	TestEqual(TEXT("Base never moved"), ASC->GetNumericAttributeBase(CritAttr), 0.05f);
+
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

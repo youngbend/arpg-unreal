@@ -19,6 +19,14 @@ UARPGElementalVolumeComponent::UARPGElementalVolumeComponent()
 {
 	PrimaryComponentTick.bCanEverTick = true;
 	PrimaryComponentTick.bStartWithTickEnabled = true;
+
+	// Neither of the two things this ticks for is frame-critical: an ambient
+	// application is already interval-gated, and immersion polling is asking
+	// whether a projectile has finished falling into a reservoir. The engine's
+	// own interval skips the dispatch entirely rather than entering the function
+	// and returning, which is what a hand-rolled accumulator does.
+	PrimaryComponentTick.TickInterval = 0.1f;
+
 	SetIsReplicatedByDefault(false); // resolved server-side; effects replicate
 }
 
@@ -317,7 +325,9 @@ void UARPGElementalVolumeComponent::ApplyAmbient()
 			continue;
 		}
 
-		UARPGHurtboxComponent* Hurtbox = OtherActor->FindComponentByClass<UARPGHurtboxComponent>();
+		// Registry lookup: this runs for every overlapping component of every
+		// ambient volume, and most of them are not damageable at all.
+		UARPGHurtboxComponent* Hurtbox = UARPGHurtboxComponent::FindFor(OtherActor);
 		if (!Hurtbox)
 		{
 			continue;
@@ -366,6 +376,11 @@ void UARPGElementalVolumeComponent::PollImmersion()
 		return;
 	}
 
+	// GetOverlappingVolumes runs a four-channel physics overlap against this
+	// body's whole shape. Its own comment justifies that cost on the grounds
+	// that conduction is rare -- but this called it every single frame for every
+	// reservoir in the level, which is the opposite of rare. The interval on the
+	// component tick is what makes the comment true again.
 	for (UARPGElementalVolumeComponent* Other : GetOverlappingVolumes())
 	{
 		if (!Other || Other->bReservoir || Other->GetEnergy() <= 0.f)

@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ARPGMagicComponent.h"
+#include "ARPGAttributeLibrary.h"
 #include "ARPGMagic.h"
 #include "ARPGMagicCombinationTable.h"
 #include "ARPGMagicElement.h"
@@ -8,7 +9,6 @@
 #include "ARPGOffenseSet.h"
 #include "ARPGVitalSet.h"
 #include "AbilitySystemComponent.h"
-#include "AbilitySystemGlobals.h"
 #include "Net/UnrealNetwork.h"
 
 UARPGMagicComponent::UARPGMagicComponent()
@@ -38,15 +38,6 @@ void UARPGMagicComponent::BeginPlay()
 	}
 }
 
-UAbilitySystemComponent* UARPGMagicComponent::GetASC() const
-{
-	if (!CachedASC)
-	{
-		CachedASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(GetOwner());
-	}
-	return CachedASC;
-}
-
 float UARPGMagicComponent::GetAvailableMana() const
 {
 	const UAbilitySystemComponent* ASC = GetASC();
@@ -60,28 +51,11 @@ float UARPGMagicComponent::GetAvailableMana() const
 
 bool UARPGMagicComponent::TrySpendMana(float Cost)
 {
-	if (Cost <= 0.f)
-	{
-		return true;
-	}
-
-	UAbilitySystemComponent* ASC = GetASC();
-	if (!ASC)
-	{
-		// No ability system means no mana pool to check. Treating that as
-		// infinite rather than as zero is what lets the magic system be driven
-		// in isolation -- a test fixture, or an NPC with no resources wired up.
-		return true;
-	}
-
-	const float Current = ASC->GetNumericAttribute(UARPGVitalSet::GetManaAttribute());
-	if (Current < Cost)
-	{
-		return false;
-	}
-
-	ASC->SetNumericAttributeBase(UARPGVitalSet::GetManaAttribute(), Current - Cost);
-	return true;
+	// Shared helper. No ability system means no mana pool, which it treats as
+	// infinite rather than as zero -- that is what lets the magic system be
+	// driven in isolation by a fixture or an NPC with no resources wired up, and
+	// it must agree with GetAvailableMana above.
+	return UARPGAttributeLibrary::TrySpend(GetASC(), UARPGVitalSet::GetManaAttribute(), Cost);
 }
 
 float UARPGMagicComponent::GetDamageAmpMultiplier() const
@@ -98,25 +72,35 @@ float UARPGMagicComponent::GetDamageAmpMultiplier() const
 
 UObject* UARPGMagicComponent::GetProgressionProvider() const
 {
+	if (bSearchedProgressionProvider)
+	{
+		return CachedProgressionProvider;
+	}
+
 	AActor* Owner = GetOwner();
 	if (!Owner)
 	{
-		return nullptr;
+		return nullptr; // not searched: retry once there is an owner
 	}
+
+	bSearchedProgressionProvider = true;
 
 	// Components first: the real tracker is one, and an actor that also happens
 	// to implement the interface (a test caster) should not shadow it.
-	TArray<UActorComponent*> Components;
-	Owner->GetComponents(Components);
-	for (UActorComponent* Component : Components)
+	//
+	// GetComponents on the templated overload avoids the intermediate array of
+	// every component the owner has.
+	for (UActorComponent* Component : Owner->GetComponents())
 	{
 		if (Component && Component->Implements<UARPGMagicProgression>())
 		{
-			return Component;
+			CachedProgressionProvider = Component;
+			return CachedProgressionProvider;
 		}
 	}
 
-	return Owner->Implements<UARPGMagicProgression>() ? Owner : nullptr;
+	CachedProgressionProvider = Owner->Implements<UARPGMagicProgression>() ? Owner : nullptr;
+	return CachedProgressionProvider;
 }
 
 float UARPGMagicComponent::GetEffectiveLevel(const UARPGMagicElement* Element) const
@@ -165,6 +149,14 @@ FGameplayTagContainer UARPGMagicComponent::GetActiveElementTags() const
 
 UARPGMagicElement* UARPGMagicComponent::GetResolvedCombination() const
 {
+	if (bCombinationCacheValid)
+	{
+		return CachedCombination.Get();
+	}
+
+	bCombinationCacheValid = true;
+	CachedCombination = nullptr;
+
 	// One element is not a combination -- resolving it would let a single-tag row
 	// fire the moment that element is readied on its own.
 	if (!CombinationTable || GetActiveCount() < 2)
@@ -172,7 +164,11 @@ UARPGMagicElement* UARPGMagicComponent::GetResolvedCombination() const
 		return nullptr;
 	}
 
-	return CombinationTable->Resolve(GetActiveElementTags(), EARPGCombinationScope::Hand);
+	// The expensive part: a tag-container comparison against every row in the
+	// table, plus the temporary container GetActiveElementTags builds. Cached
+	// until the mask or the page moves.
+	CachedCombination = CombinationTable->Resolve(GetActiveElementTags(), EARPGCombinationScope::Hand);
+	return CachedCombination.Get();
 }
 
 UARPGMagicElement* UARPGMagicComponent::GetDisplayElement() const
@@ -308,6 +304,8 @@ void UARPGMagicComponent::ActivateSlot(EARPGElementSlot Slot, bool bFromPlayer)
 
 	ActiveMask |= Bit;
 	SelectionCooldown = SelectionInterval;
+	InvalidateCombinationCache();
+	SetComponentTickEnabled(true);
 
 	OnSelectionChanged.Broadcast(ActiveMask);
 
@@ -336,6 +334,7 @@ void UARPGMagicComponent::ClearSelection()
 
 	ActiveMask = 0;
 	SelectionCooldown = 0.f;
+	InvalidateCombinationCache();
 	OnSelectionChanged.Broadcast(ActiveMask);
 }
 
@@ -358,6 +357,7 @@ void UARPGMagicComponent::SetCurrentPage(int32 Page)
 	}
 
 	CurrentPage = Page;
+	InvalidateCombinationCache();
 
 	// The mask indexes slots on the CURRENT page, so carrying it across would
 	// silently re-point every readied element at a different element.
@@ -371,6 +371,9 @@ void UARPGMagicComponent::ServerSetCurrentPage_Implementation(int32 Page)
 
 void UARPGMagicComponent::OnRep_ActiveMask()
 {
+	// The mask arrived from the server, so anything derived from it is stale.
+	InvalidateCombinationCache();
+
 	OnSelectionChanged.Broadcast(ActiveMask);
 
 	if (UARPGMagicElement* Combination = GetResolvedCombination())
@@ -564,6 +567,7 @@ void UARPGMagicComponent::BeginAutoReady()
 
 	AutoReadyMask = LastDischargedMask;
 	AutoReadyTimer = SelectionInterval;
+	SetComponentTickEnabled(true);
 }
 
 void UARPGMagicComponent::CancelAutoReady()
@@ -609,6 +613,13 @@ void UARPGMagicComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 	if (SelectionCooldown > 0.f)
 	{
 		SelectionCooldown = FMath::Max(0.f, SelectionCooldown - DeltaTime);
+	}
+
+	// The two timers below are the only per-frame work here, and both are idle
+	// except in the moments right after a selection.
+	if (SelectionCooldown <= 0.f && AutoReadyTimer < 0.f)
+	{
+		SetComponentTickEnabled(false);
 	}
 
 	// Server-only: each step spends mana and mutates the replicated mask.

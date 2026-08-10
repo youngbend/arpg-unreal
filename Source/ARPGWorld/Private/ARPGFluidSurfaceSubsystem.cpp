@@ -8,11 +8,54 @@
 #include "ARPGMagicCombinationTable.h"
 #include "ARPGMagicElement.h"
 #include "ARPGWorld.h"
+#include "ARPGWorldSettings.h"
 #include "Engine/World.h"
+
+void UARPGFluidSurfaceSubsystem::Initialize(FSubsystemCollectionBase& Collection)
+{
+	Super::Initialize(Collection);
+
+	// Project settings fill in anything a test has not already assigned. These
+	// fields are EditAnywhere on a UWorldSubsystem, which has no editing surface,
+	// so outside the tests every one of them was null: no fluid definitions meant
+	// no pool ever formed.
+	const UARPGWorldSettings& Settings = UARPGWorldSettings::Get();
+
+	if (Definitions.Num() == 0)
+	{
+		for (const TSoftObjectPtr<UARPGFluidDefinition>& Soft : Settings.FluidDefinitions)
+		{
+			if (UARPGFluidDefinition* Definition = Soft.LoadSynchronous())
+			{
+				Definitions.Add(Definition);
+			}
+			else if (!Soft.IsNull())
+			{
+				UE_LOG(LogARPGWorld, Warning,
+					TEXT("Fluid definition '%s' from project settings failed to load."),
+					*Soft.ToString());
+			}
+		}
+	}
+
+	if (!CombinationTable)
+	{
+		CombinationTable = Settings.CombinationTable.LoadSynchronous();
+	}
+}
 
 bool UARPGFluidSurfaceSubsystem::DoesSupportWorldType(const EWorldType::Type WorldType) const
 {
 	return WorldType == EWorldType::Game || WorldType == EWorldType::PIE;
+}
+
+bool UARPGFluidSurfaceSubsystem::HasAuthority() const
+{
+	const UWorld* World = GetWorld();
+
+	// Pools and solids are replicated actors owned by the server. A client
+	// spawning its own would leave every puddle in the level doubled.
+	return !World || World->GetNetMode() != NM_Client;
 }
 
 TStatId UARPGFluidSurfaceSubsystem::GetStatId() const
@@ -309,6 +352,11 @@ void UARPGFluidSurfaceSubsystem::StepSimulation(float DeltaTime)
 void UARPGFluidSurfaceSubsystem::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
+
+	if (!HasAuthority())
+	{
+		return;
+	}
 
 	const float Interval = 1.f / FMath::Max(0.5f, TickRate);
 

@@ -48,6 +48,8 @@ class ARPGAI_API UARPGPerceptionComponent : public UActorComponent
 public:
 	UARPGPerceptionComponent();
 
+	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType,
 		FActorComponentTickFunction* ThisTickFunction) override;
 
@@ -75,7 +77,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Perception")
 	EARPGDamageReaction DamageReaction = EARPGDamageReaction::Investigate;
 
-	/** Seconds between scans. Perception does not need to run every frame. */
+	/**
+	 * Seconds between scans. Perception does not need to run every frame.
+	 *
+	 * Drives the component's own tick interval, so the engine skips the dispatch
+	 * rather than this entering the function to find nothing to do.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Perception",
 		meta = (ClampMin = "0.0"))
 	float ScanInterval = 0.2f;
@@ -134,6 +141,17 @@ private:
 	/** Everything hostile and alive within the detection radius. */
 	void GatherCandidates(TArray<AActor*>& OutCandidates) const;
 
+	/** False once a candidate carries State.Dead. No ability system means alive. */
+	static bool IsAlive(const AActor* Candidate);
+
+	/**
+	 * Tells the world's threat registry this NPC moved its attention.
+	 *
+	 * Pushed rather than polled: the player's auto-sheathe used to answer "is
+	 * anything targeting me" by iterating every actor in the level.
+	 */
+	void PublishTargetChange(AActor* OldTarget, AActor* NewTarget) const;
+
 	UPROPERTY(Transient)
 	TObjectPtr<AActor> Target;
 
@@ -142,6 +160,4 @@ private:
 
 	/** Counts down once the target stops being perceived. */
 	float MemoryTimer = 0.f;
-
-	float ScanAccumulator = 0.f;
 };

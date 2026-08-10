@@ -2,10 +2,42 @@
 
 #include "ARPGGameplayEffectContext.h"
 
+namespace
+{
+	/**
+	 * The shared type test.
+	 *
+	 * IsChildOf rather than an exact struct comparison, so a future subclass of
+	 * ours still resolves. A null handle resolves to null, which every caller
+	 * already treats as "no payload".
+	 */
+	FARPGGameplayEffectContext* ExtractChecked(FGameplayEffectContext* Raw)
+	{
+		if (!Raw)
+		{
+			return nullptr;
+		}
+
+		const UScriptStruct* Struct = Raw->GetScriptStruct();
+		if (!Struct || !Struct->IsChildOf(FARPGGameplayEffectContext::StaticStruct()))
+		{
+			return nullptr;
+		}
+
+		return static_cast<FARPGGameplayEffectContext*>(Raw);
+	}
+}
+
 const FARPGGameplayEffectContext* FARPGGameplayEffectContext::ExtractFrom(
 	const FGameplayEffectContextHandle& Handle)
 {
-	return static_cast<const FARPGGameplayEffectContext*>(Handle.Get());
+	return ExtractChecked(const_cast<FGameplayEffectContextHandle&>(Handle).Get());
+}
+
+FARPGGameplayEffectContext* FARPGGameplayEffectContext::ExtractFrom(
+	FGameplayEffectContextHandle& Handle)
+{
+	return ExtractChecked(Handle.Get());
 }
 
 bool FARPGGameplayEffectContext::NetSerialize(FArchive& Ar, UPackageMap* Map, bool& bOutSuccess)

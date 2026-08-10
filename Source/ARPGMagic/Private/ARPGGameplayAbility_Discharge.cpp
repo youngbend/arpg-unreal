@@ -22,7 +22,13 @@ UARPGGameplayAbility_Discharge::UARPGGameplayAbility_Discharge()
 	// it cost and whether it went off.
 	NetExecutionPolicy = EGameplayAbilityNetExecutionPolicy::LocalPredicted;
 
-	AbilityTags.AddTag(TAG_Ability_Discharge);
+	{
+		// SetAssetTags replaces rather than appends, and it is protected --
+		// so a subclass carries the base class's tags forward itself.
+		FGameplayTagContainer Tags = GetAssetTags();
+		Tags.AddTag(TAG_Ability_Discharge);
+		SetAssetTags(Tags);
+	}
 
 	ActivationBlockedTags.AddTag(TAG_State_Flinching);
 	ActivationBlockedTags.AddTag(TAG_State_StanceBroken);
@@ -220,13 +226,25 @@ void UARPGGameplayAbility_Discharge::PerformDischarge(const FARPGDischargeContex
 UARPGGameplayAbility_DischargeBurst::UARPGGameplayAbility_DischargeBurst()
 {
 	DischargeType = EARPGDischargeType::Burst;
-	AbilityTags.AddTag(TAG_Ability_Discharge_Burst);
+	{
+		// SetAssetTags replaces rather than appends, and it is protected --
+		// so a subclass carries the base class's tags forward itself.
+		FGameplayTagContainer Tags = GetAssetTags();
+		Tags.AddTag(TAG_Ability_Discharge_Burst);
+		SetAssetTags(Tags);
+	}
 }
 
 UARPGGameplayAbility_DischargeEmanate::UARPGGameplayAbility_DischargeEmanate()
 {
 	DischargeType = EARPGDischargeType::Emanate;
-	AbilityTags.AddTag(TAG_Ability_Discharge_Emanate);
+	{
+		// SetAssetTags replaces rather than appends, and it is protected --
+		// so a subclass carries the base class's tags forward itself.
+		FGameplayTagContainer Tags = GetAssetTags();
+		Tags.AddTag(TAG_Ability_Discharge_Emanate);
+		SetAssetTags(Tags);
+	}
 
 	// Around the caster, not in front of them.
 	SpawnForwardOffset = 0.f;
@@ -236,13 +254,25 @@ UARPGGameplayAbility_DischargeEmanate::UARPGGameplayAbility_DischargeEmanate()
 UARPGGameplayAbility_DischargeProject::UARPGGameplayAbility_DischargeProject()
 {
 	DischargeType = EARPGDischargeType::Project;
-	AbilityTags.AddTag(TAG_Ability_Discharge_Project);
+	{
+		// SetAssetTags replaces rather than appends, and it is protected --
+		// so a subclass carries the base class's tags forward itself.
+		FGameplayTagContainer Tags = GetAssetTags();
+		Tags.AddTag(TAG_Ability_Discharge_Project);
+		SetAssetTags(Tags);
+	}
 }
 
 UARPGGameplayAbility_DischargeCloak::UARPGGameplayAbility_DischargeCloak()
 {
 	DischargeType = EARPGDischargeType::Cloak;
-	AbilityTags.AddTag(TAG_Ability_Discharge_Cloak);
+	{
+		// SetAssetTags replaces rather than appends, and it is protected --
+		// so a subclass carries the base class's tags forward itself.
+		FGameplayTagContainer Tags = GetAssetTags();
+		Tags.AddTag(TAG_Ability_Discharge_Cloak);
+		SetAssetTags(Tags);
+	}
 }
 
 void UARPGGameplayAbility_DischargeCloak::PerformDischarge(const FARPGDischargeContext& Context)

@@ -21,12 +21,15 @@ public class ARPGMagic : ModuleRules
 			"Engine",
 			"GameplayAbilities",
 			"GameplayTags",
-			"GameplayTasks",
-			"DeveloperSettings",
+			"GameplayTasks",   // UARPGAbilityTask_ChargeDischarge is a public header
 			"ARPGCore",
 			"ARPGCombat"
 		});
 
-		PrivateDependencyModuleNames.AddRange(new string[] { });
+		// PRIVATE: only UARPGMagicSettings derives from UDeveloperSettings, and it
+		// is never included by anything downstream.
+		PrivateDependencyModuleNames.AddRange(new string[] {
+			"DeveloperSettings"
+		});
 	}
 }

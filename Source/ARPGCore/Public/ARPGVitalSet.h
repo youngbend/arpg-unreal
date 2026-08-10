@@ -16,6 +16,14 @@
 DECLARE_MULTICAST_DELEGATE_OneParam(FARPGOnPoiseDamageReceived, float /*Amount*/);
 
 /**
+ * Health crossed zero (true) or came back above it (false).
+ *
+ * Fired only on the transition, never on a repeat: a corpse taking three more
+ * hits from a swing already in flight is one death, not four.
+ */
+DECLARE_MULTICAST_DELEGATE_OneParam(FARPGOnDeathStateChanged, bool /*bDead*/);
+
+/**
  * Health, stamina, mana and poise.
  *
  * Replaces Godot's CombatComponent (health) and ResourceComponent (stamina/mana)
@@ -119,6 +127,25 @@ public:
 	 */
 	FARPGOnPoiseDamageReceived OnPoiseDamageReceived;
 
+	/**
+	 * Health reached zero, or recovered from it.
+	 *
+	 * Raised alongside -- not instead of -- the State.Dead tag and the
+	 * Event.Death gameplay event, both of which this set applies itself. The tag
+	 * is what every ActivationBlockedTags entry and every IsDead() guard in the
+	 * project already reads; the event is what a death ability triggers on. They
+	 * were declared in phase 0 and granted by nothing until now, which meant all
+	 * of that gating was inert.
+	 *
+	 * Applied HERE rather than in a component because this is the only place that
+	 * sees the crossing at the moment it happens, and because a character with no
+	 * death component should still stop fighting when it dies.
+	 */
+	FARPGOnDeathStateChanged OnDeathStateChanged;
+
+	/** True once health has reached zero, until it is restored above zero. */
+	bool IsDead() const { return bDead; }
+
 protected:
 	UFUNCTION() void OnRep_Health(const FGameplayAttributeData& OldValue);
 	UFUNCTION() void OnRep_MaxHealth(const FGameplayAttributeData& OldValue);
@@ -142,4 +169,16 @@ private:
 		const FGameplayAttributeData& MaxAttribute,
 		float NewMaxValue,
 		const FGameplayAttribute& AffectedAttributeProperty) const;
+
+	/**
+	 * Applies or lifts State.Dead when health crosses zero, and raises
+	 * Event.Death on the way down.
+	 *
+	 * Idempotent: called after every change to Health from any direction, and a
+	 * no-op unless the dead/alive answer actually moved.
+	 */
+	void RefreshDeathState();
+
+	/** Latched, so the transition can be distinguished from the state. */
+	bool bDead = false;
 };

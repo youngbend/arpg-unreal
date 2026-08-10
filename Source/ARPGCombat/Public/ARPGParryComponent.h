@@ -3,7 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Components/ActorComponent.h"
+#include "ARPGGameplayComponentBase.h"
 #include "ARPGParryComponent.generated.h"
 
 class UAbilitySystemComponent;
@@ -41,7 +41,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FARPGOnIntercept, EARPGInterceptResu
  * ParryCooldown stops mashing the guard key producing a continuous parry window.
  */
 UCLASS(ClassGroup = (ARPG), meta = (BlueprintSpawnableComponent))
-class ARPGCOMBAT_API UARPGParryComponent : public UActorComponent
+class ARPGCOMBAT_API UARPGParryComponent : public UARPGGameplayComponentBase
 {
 	GENERATED_BODY()
 
@@ -112,6 +112,16 @@ public:
 	 */
 	EARPGInterceptResult TryIntercept();
 
+	/**
+	 * The answer TryIntercept would give, without spending anything.
+	 *
+	 * For a client predicting a hit: it needs the same damage number the server
+	 * will produce, but must not burn the parry window on a swing the server may
+	 * never have seen land.
+	 */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Parry")
+	EARPGInterceptResult PeekIntercept() const;
+
 	/** Consume the empowered flag. Returns true once. */
 	UFUNCTION(BlueprintCallable, Category = "ARPG|Parry")
 	bool ConsumeEmpowered();
@@ -136,10 +146,12 @@ public:
 	FARPGOnIntercept OnIntercepted;
 
 private:
-	UAbilitySystemComponent* GetASC() const;
-
-	UPROPERTY(Transient)
-	mutable TObjectPtr<UAbilitySystemComponent> CachedASC;
+	/**
+	 * Switches ticking on while any timer is running, and off when they all
+	 * expire. Guard state is idle almost all the time, and the tick body's first
+	 * act was to check exactly that.
+	 */
+	void RefreshTickState();
 
 	bool bBlocking = false;
 	bool bEmpowered = false;

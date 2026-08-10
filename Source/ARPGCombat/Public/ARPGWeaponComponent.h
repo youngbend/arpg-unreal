@@ -3,7 +3,8 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Components/ActorComponent.h"
+#include "ARPGGameplayComponentBase.h"
+#include "GameplayEffectTypes.h"
 #include "ARPGWeaponComponent.generated.h"
 
 class UARPGWeaponDefinition;
@@ -28,7 +29,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FARPGOnWeaponDrawnChanged, bool, bDr
  * to OnWeaponDrawnChanged.
  */
 UCLASS(ClassGroup = (ARPG), meta = (BlueprintSpawnableComponent))
-class ARPGCOMBAT_API UARPGWeaponComponent : public UActorComponent
+class ARPGCOMBAT_API UARPGWeaponComponent : public UARPGGameplayComponentBase
 {
 	GENERATED_BODY()
 
@@ -131,18 +132,22 @@ private:
 	void ApplyWeaponToOwner();
 
 	/**
-	 * Server-only. Moves the weapon's crit bonus onto the wielder's CritChance
-	 * attribute, removing exactly what the previous weapon added.
+	 * Server-only. Grants the weapon's crit bonus on the wielder's CritChance
+	 * attribute for as long as it is wielded.
 	 *
 	 * The bonus goes on the ATTRIBUTE rather than onto the hitbox's own
 	 * CriticalChance, because the hitbox value is authored per attack -- an
 	 * execution-style finisher may be flatly more likely to crit -- and writing
 	 * the weapon's bonus there would overwrite that authored intent. As an
 	 * attribute it also composes with buffs through the usual aggregator.
+	 *
+	 * A GameplayEffect rather than a write to the base value, for the reasons in
+	 * UARPGEquipmentGameplayEffect: the previous version read the CURRENT crit
+	 * chance and wrote it back as the BASE, so swapping weapons while any crit
+	 * buff was live baked that buff in permanently.
 	 */
 	void RefreshCritChance();
 
-	UAbilitySystemComponent* GetASC() const;
 	UARPGComboComponent* GetCombo() const;
 	UARPGHitboxComponent* GetWeaponHitbox() const;
 
@@ -152,15 +157,12 @@ private:
 	UPROPERTY(ReplicatedUsing = OnRep_Drawn)
 	bool bDrawn = false;
 
-	/** What this component last added to CritChance, so swapping reverses it exactly. */
-	float AppliedCritChance = 0.f;
+	/** The live crit grant, removed exactly on swap or unequip. */
+	FActiveGameplayEffectHandle CritGrantHandle;
 
 	/** Server-authoritative: bDrawn replicates, so only authority may run the countdown. */
 	void TickAutoSheathe(float DeltaTime);
 
 	float TimeSinceCombatActivity = 0.f;
 	bool bAutoSheatheSuppressed = false;
-
-	UPROPERTY(Transient)
-	mutable TObjectPtr<UAbilitySystemComponent> CachedASC;
 };

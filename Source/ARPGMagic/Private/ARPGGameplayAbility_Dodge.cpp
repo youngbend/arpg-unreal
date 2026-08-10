@@ -18,7 +18,13 @@ UARPGGameplayAbility_Dodge::UARPGGameplayAbility_Dodge()
 	InstancingPolicy = EGameplayAbilityInstancingPolicy::InstancedPerActor;
 	NetExecutionPolicy = EGameplayAbilityNetExecutionPolicy::LocalPredicted;
 
-	AbilityTags.AddTag(TAG_Ability_Dodge);
+	{
+		// SetAssetTags replaces rather than appends, and it is protected --
+		// so a subclass carries the base class's tags forward itself.
+		FGameplayTagContainer Tags = GetAssetTags();
+		Tags.AddTag(TAG_Ability_Dodge);
+		SetAssetTags(Tags);
+	}
 	ActivationOwnedTags.AddTag(TAG_State_Dodging);
 
 	ActivationBlockedTags.AddTag(TAG_State_StanceBroken);

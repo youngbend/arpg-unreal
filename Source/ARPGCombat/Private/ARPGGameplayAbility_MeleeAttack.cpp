@@ -4,8 +4,10 @@
 #include "ARPGAttackDefinition.h"
 #include "ARPGCombat.h"
 #include "ARPGComboComponent.h"
+#include "ARPGDamageTypeAsset.h"
 #include "ARPGGameplayTags.h"
 #include "ARPGHitboxComponent.h"
+#include "ARPGLocomotionComponent.h"
 #include "AbilitySystemComponent.h"
 #include "ARPGCombatTypes.h"
 #include "Abilities/Tasks/AbilityTask_PlayMontageAndWait.h"
@@ -20,8 +22,16 @@ UARPGGameplayAbility_MeleeAttack::UARPGGameplayAbility_MeleeAttack()
 	InstancingPolicy = EGameplayAbilityInstancingPolicy::InstancedPerActor;
 	NetExecutionPolicy = EGameplayAbilityNetExecutionPolicy::LocalPredicted;
 
-	AbilityTags.AddTag(TAG_Ability_Attack);
-	AbilityTags.AddTag(TAG_Ability_Attack_Melee);
+	{
+		// SetAssetTags rather than writing AbilityTags: the member was made
+		// private and deprecated in 5.5, and the project already reads it through
+		// GetAssetTags() elsewhere.
+		FGameplayTagContainer Tags;
+		Tags.AddTag(TAG_Ability_Attack);
+		Tags.AddTag(TAG_Ability_Attack_Melee);
+		SetAssetTags(Tags);
+	}
+
 	ActivationOwnedTags.AddTag(TAG_State_Attacking);
 
 	// Declarative replacements for plumbing the Godot version did by hand:
@@ -70,6 +80,8 @@ void UARPGGameplayAbility_MeleeAttack::ActivateAbility(
 	}
 
 	bComboWindowOpened = false;
+	bMontageFinishHandled = false;
+	bWarnedHitboxFallback = false;
 	ChargeFraction = 1.f;
 	bCharging = CurrentAttack->bChargeable;
 	bChanneling = CurrentAttack->bChannel;
@@ -97,15 +109,7 @@ void UARPGGameplayAbility_MeleeAttack::ActivateAbility(
 
 	// Rooting and slowing are part of an attack's weight, and the Godot version
 	// applied MovementSpeedFactor for exactly the attack's duration.
-	if (ACharacter* Character = Cast<ACharacter>(GetAvatarActorFromActorInfo()))
-	{
-		if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
-		{
-			CachedMaxWalkSpeed = Movement->MaxWalkSpeed;
-			Movement->MaxWalkSpeed *= CurrentAttack->MovementSpeedFactor;
-			bAppliedSpeedFactor = true;
-		}
-	}
+	ApplyMovementScaling();
 
 	// The notifies drive everything from here. Bound before the montage starts,
 	// so a hitbox notify sitting on the first frame is not missed.
@@ -274,29 +278,23 @@ UARPGHitboxComponent* UARPGGameplayAbility_MeleeAttack::ResolveHitbox() const
 		return nullptr;
 	}
 
-	TArray<UARPGHitboxComponent*> Hitboxes;
-	Avatar->GetComponents<UARPGHitboxComponent>(Hitboxes);
-
-	for (UARPGHitboxComponent* Hitbox : Hitboxes)
-	{
-		if (Hitbox->HitboxSource == CurrentAttack->HitboxSource)
-		{
-			return Hitbox;
-		}
-	}
-
 	// A kick authored for the body hitbox on a character that only has a weapon
-	// one would otherwise silently deal no damage.
-	if (Hitboxes.Num() > 0)
+	// one would otherwise silently deal no damage, so the fallback is allowed.
+	UARPGHitboxComponent* Hitbox = UARPGHitboxComponent::FindOnActor(
+		Avatar, CurrentAttack->HitboxSource, /*bAllowFallback=*/true);
+
+	// Warned once per activation rather than on every arm: a two-window swing on
+	// a mis-authored character used to log this on each notify.
+	if (Hitbox && Hitbox->HitboxSource != CurrentAttack->HitboxSource && !bWarnedHitboxFallback)
 	{
+		bWarnedHitboxFallback = true;
 		UE_LOG(LogARPGCombat, Warning,
 			TEXT("Attack '%s' wants hitbox source %d but %s has none; using the first available."),
 			*CurrentAttack->AttackId.ToString(),
 			static_cast<int32>(CurrentAttack->HitboxSource), *Avatar->GetName());
-		return Hitboxes[0];
 	}
 
-	return nullptr;
+	return Hitbox;
 }
 
 UARPGComboComponent* UARPGGameplayAbility_MeleeAttack::ResolveCombo() const
@@ -350,8 +348,17 @@ void UARPGGameplayAbility_MeleeAttack::ArmHitbox(int32 WindowIndex, bool bLandin
 	// the hitbox grew somewhere to put them.
 	Hitbox->OnHitEffects = CurrentAttack->OnHitEffects;
 
+	// Snapshotted before the first override of this activation, and put back in
+	// DisarmHitbox. Without the restore the override is permanent: the first
+	// elemental beat in a tree converts the weapon's hitbox for the rest of the
+	// session, so every later swing deals that element.
 	if (CurrentAttack->DamageTypeOverride)
 	{
+		if (!bOverrodeDamageType)
+		{
+			CachedHitboxDamageType = Hitbox->DamageType;
+			bOverrodeDamageType = true;
+		}
 		Hitbox->DamageType = CurrentAttack->DamageTypeOverride;
 	}
 
@@ -368,8 +375,19 @@ void UARPGGameplayAbility_MeleeAttack::DisarmHitbox()
 	if (ArmedHitbox)
 	{
 		ArmedHitbox->DeactivateHitbox();
+
+		if (bOverrodeDamageType)
+		{
+			ArmedHitbox->DamageType = CachedHitboxDamageType;
+		}
+
 		ArmedHitbox = nullptr;
 	}
+
+	// Cleared even when nothing was armed, so a cancelled activation cannot leave
+	// a stale snapshot for the next one to restore.
+	CachedHitboxDamageType = nullptr;
+	bOverrodeDamageType = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -466,6 +484,16 @@ void UARPGGameplayAbility_MeleeAttack::OnChannelWindupFinished()
 
 void UARPGGameplayAbility_MeleeAttack::OnMontageFinished()
 {
+	// OnBlendOut and OnCompleted BOTH fire for a montage that ends normally, and
+	// both are bound here on purpose: which one arrives first depends on the
+	// blend, and the chain should be released at the earlier of the two. Only the
+	// first is acted on.
+	if (bMontageFinishHandled)
+	{
+		return;
+	}
+	bMontageFinishHandled = true;
+
 	if (bChanneling)
 	{
 		// Closes the channel out: latches the finisher lockout, fires a buffered
@@ -509,18 +537,64 @@ void UARPGGameplayAbility_MeleeAttack::OnMontageCancelled()
 
 // ---------------------------------------------------------------------------
 
+void UARPGGameplayAbility_MeleeAttack::ApplyMovementScaling()
+{
+	AActor* Avatar = GetAvatarActorFromActorInfo();
+	if (!Avatar || !CurrentAttack)
+	{
+		return;
+	}
+
+	// The locomotion component folds the factor into the speed it drives every
+	// tick, so the two no longer fight over MaxWalkSpeed. bAllowSprint is false:
+	// sprinting out of a committed swing is the thing MovementSpeedFactor exists
+	// to prevent.
+	if (UARPGLocomotionComponent* Locomotion = Avatar->FindComponentByClass<UARPGLocomotionComponent>())
+	{
+		Locomotion->SetAttackMovement(CurrentAttack->MovementSpeedFactor, /*bAllowSprint=*/false);
+		bScaledViaLocomotion = true;
+		bAppliedSpeedFactor = true;
+		return;
+	}
+
+	// No locomotion component -- an NPC, whose walk speed is set once from its
+	// definition and never reasserted. Writing it directly is safe there.
+	if (ACharacter* Character = Cast<ACharacter>(Avatar))
+	{
+		if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
+		{
+			CachedMaxWalkSpeed = Movement->MaxWalkSpeed;
+			Movement->MaxWalkSpeed *= CurrentAttack->MovementSpeedFactor;
+			bScaledViaLocomotion = false;
+			bAppliedSpeedFactor = true;
+		}
+	}
+}
+
 void UARPGGameplayAbility_MeleeAttack::RestoreCharacter()
 {
 	if (bAppliedSpeedFactor)
 	{
-		if (ACharacter* Character = Cast<ACharacter>(GetAvatarActorFromActorInfo()))
+		AActor* Avatar = GetAvatarActorFromActorInfo();
+
+		if (bScaledViaLocomotion)
+		{
+			if (UARPGLocomotionComponent* Locomotion =
+					Avatar ? Avatar->FindComponentByClass<UARPGLocomotionComponent>() : nullptr)
+			{
+				Locomotion->ClearAttackMovement();
+			}
+		}
+		else if (ACharacter* Character = Cast<ACharacter>(Avatar))
 		{
 			if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
 			{
 				Movement->MaxWalkSpeed = CachedMaxWalkSpeed;
 			}
 		}
+
 		bAppliedSpeedFactor = false;
+		bScaledViaLocomotion = false;
 	}
 
 	if (bGrantedHyperarmor)

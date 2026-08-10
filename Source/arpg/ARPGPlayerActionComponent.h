@@ -153,15 +153,48 @@ private:
 	void SyncWalkForced();
 
 	/** Holds off auto-sheathe while any NPC still has this actor as its target. */
-	void SyncAutoSheatheSuppression(float DeltaTime);
+	void SyncAutoSheatheSuppression();
 
-	/** Seconds between aggro scans. Coarse on purpose -- see the implementation. */
-	static constexpr float AggroScanInterval = 0.5f;
-
-	float AggroScanTimer = 0.f;
+	/**
+	 * Resolves and caches every sibling this component drives.
+	 *
+	 * The six accessors below each ran FindComponentByClass -- a walk of the
+	 * owner's whole component array -- and the tick alone triggered several per
+	 * frame. Sibling components do not come and go on a possessed pawn, so they
+	 * are resolved once.
+	 *
+	 * ON FIRST USE, not only at BeginPlay. An input event can arrive before begin
+	 * play in a world that has not started one -- an automation fixture, a tools
+	 * harness -- and caching at BeginPlay alone left every accessor returning null
+	 * there, so nothing this component drives did anything at all.
+	 */
+	void EnsureSiblings() const;
 
 	UPROPERTY(Transient)
 	TObjectPtr<UARPGModalInputComponent> BoundInput;
+
+	mutable bool bSiblingsCached = false;
+
+	UPROPERTY(Transient)
+	mutable TObjectPtr<UARPGComboComponent> CachedCombo;
+
+	UPROPERTY(Transient)
+	mutable TObjectPtr<UARPGWeaponComponent> CachedWeapon;
+
+	UPROPERTY(Transient)
+	mutable TObjectPtr<UARPGParryComponent> CachedParry;
+
+	UPROPERTY(Transient)
+	mutable TObjectPtr<UARPGMagicComponent> CachedMagic;
+
+	UPROPERTY(Transient)
+	mutable TObjectPtr<UARPGQuickSlotComponent> CachedQuickSlots;
+
+	UPROPERTY(Transient)
+	mutable TObjectPtr<UARPGLocomotionComponent> CachedLocomotion;
+
+	UPROPERTY(Transient)
+	mutable TObjectPtr<UAbilitySystemComponent> CachedASC;
 
 	/** LB is held. Distinct from "blocking": the guard may not be up yet. */
 	bool bParryHeld = false;

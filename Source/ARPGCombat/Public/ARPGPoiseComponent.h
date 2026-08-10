@@ -3,7 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Components/ActorComponent.h"
+#include "ARPGGameplayComponentBase.h"
 #include "ARPGPoiseComponent.generated.h"
 
 class UAbilitySystemComponent;
@@ -49,7 +49,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FARPGOnPoiseResult, EARPGPoiseResult
  * happens BEFORE the hyperarmor gate, deliberately.
  */
 UCLASS(ClassGroup = (ARPG), meta = (BlueprintSpawnableComponent))
-class ARPGCOMBAT_API UARPGPoiseComponent : public UActorComponent
+class ARPGCOMBAT_API UARPGPoiseComponent : public UARPGGameplayComponentBase
 {
 	GENERATED_BODY()
 
@@ -132,6 +132,11 @@ public:
 	 *
 	 * The clips are the WEAPON's, not the character's; see UARPGFlinchDefinition
 	 * for why staggering is a thing you do with something in your hands.
+	 *
+	 * Played through the ABILITY SYSTEM, not the anim instance. Poise resolves
+	 * inside PostGameplayEffectExecute, which for a hitbox-applied hit runs on
+	 * the server alone -- a raw Montage_Play there is seen by nobody else, so
+	 * every stagger in the game was invisible to clients.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Poise|Presentation")
 	bool bPlayReactionMontages = true;
@@ -149,9 +154,14 @@ public:
 	void EnsureSubscribed();
 
 private:
-	UAbilitySystemComponent* GetASC() const;
 	void SetPoise(float NewValue);
 	void HandlePoiseDamageReceived(float Amount);
+
+	/**
+	 * Ticking is needed only while the meter is above zero or an immunity window
+	 * is open -- which for most characters, most of the time, is neither.
+	 */
+	void RefreshTickState();
 
 	/** Raises the matching Event.Poise.* so an ability can react to it. */
 	void SendPoiseEvent(EARPGPoiseResult Result) const;
@@ -159,11 +169,18 @@ private:
 	/** Plays the equipped weapon's clip for this reaction, if there is one. */
 	void PlayReactionMontage(EARPGPoiseResult Result) const;
 
-	UPROPERTY(Transient)
-	mutable TObjectPtr<UAbilitySystemComponent> CachedASC;
-
 	float HoldTimer = 0.f;
 	float BreakImmunityTimer = 0.f;
 
 	FDelegateHandle PoiseDamageHandle;
+
+	/**
+	 * Retry budget for EnsureSubscribed.
+	 *
+	 * The subscribe attempt used to run on every tick forever, including on the
+	 * many actors that will never have an ability system at all. It only needs to
+	 * survive a PlayerState arriving late, so it retries on a slow cadence and
+	 * stops asking once bound.
+	 */
+	float SubscribeRetryTimer = 0.f;
 };

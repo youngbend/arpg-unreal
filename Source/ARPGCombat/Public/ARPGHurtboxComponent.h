@@ -38,8 +38,21 @@ class ARPGCOMBAT_API UARPGHurtboxComponent : public UActorComponent
 public:
 	UARPGHurtboxComponent();
 
+	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType,
 		FActorComponentTickFunction* ThisTickFunction) override;
+
+	/**
+	 * The hurtbox on an actor, or null when it is not damageable.
+	 *
+	 * Goes through a per-world registry rather than FindComponentByClass, which
+	 * is a linear walk of the actor's whole component array. Three separate hot
+	 * paths asked this question per candidate per tick -- the hitbox sweep, the
+	 * spread system's contact damage, and an elemental volume's ambient pass --
+	 * so the answer is worth having in a map.
+	 */
+	static UARPGHurtboxComponent* FindFor(const AActor* Actor);
 
 	/** Seconds of invincibility granted after each hit lands. 0 = none. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Hurtbox",
@@ -88,6 +101,13 @@ private:
 	UPROPERTY(Transient)
 	mutable TObjectPtr<UAbilitySystemComponent> CachedASC;
 
+	/**
+	 * Counts down only while a window is actually open.
+	 *
+	 * The component used to tick every frame on every damageable thing in the
+	 * world purely to decrement this, which is almost always already zero. Tick
+	 * is now switched on by TryConsumeHit and off again when the window closes.
+	 */
 	float InvincibilityTimer = 0.f;
 	bool bForceInvincible = false;
 };

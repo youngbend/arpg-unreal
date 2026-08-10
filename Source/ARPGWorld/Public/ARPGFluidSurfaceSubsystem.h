@@ -46,6 +46,7 @@ class ARPGWORLD_API UARPGFluidSurfaceSubsystem : public UTickableWorldSubsystem
 	GENERATED_BODY()
 
 public:
+	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
 	virtual bool DoesSupportWorldType(const EWorldType::Type WorldType) const override;
 	virtual void Tick(float DeltaTime) override;
 	virtual TStatId GetStatId() const override;
@@ -142,6 +143,9 @@ private:
 		UARPGFluidDefinition* Definition);
 
 	void TickWeather(float DeltaTime);
+
+	/** True where this machine owns the simulation; pools are server-spawned. */
+	bool HasAuthority() const;
 
 	UPROPERTY(Transient)
 	TArray<AARPGFluidPool*> Pools;

@@ -3,7 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Components/ActorComponent.h"
+#include "ARPGGameplayComponentBase.h"
 #include "GameplayTagContainer.h"
 #include "ARPGDischargeContext.h"
 #include "ARPGMagicLoadout.h"
@@ -79,7 +79,7 @@ struct ARPGMAGIC_API FARPGDischargeTypeSettings
  * it would be on a per-frame input.
  */
 UCLASS(ClassGroup = (ARPG), meta = (BlueprintSpawnableComponent))
-class ARPGMAGIC_API UARPGMagicComponent : public UActorComponent
+class ARPGMAGIC_API UARPGMagicComponent : public UARPGGameplayComponentBase
 {
 	GENERATED_BODY()
 
@@ -329,8 +329,6 @@ protected:
 	void OnRep_ActiveMask();
 
 private:
-	UAbilitySystemComponent* GetASC() const;
-
 	/** Mana spend, returning false without spending when it is unaffordable. */
 	bool TrySpendMana(float Cost);
 
@@ -359,6 +357,11 @@ private:
 	 * fallback exists so a simple test caster can answer without hosting a
 	 * component. Null means no progression system applies -- gating off, and
 	 * multipliers at 1.
+	 *
+	 * CACHED. Resolving it walks the owner's whole component array into a
+	 * temporary TArray, and PassesComplexityGate asks twice per already-readied
+	 * element while BuildDischargeContext asks several more times per cast. The
+	 * answer cannot change for a given owner, so it is resolved once.
 	 */
 	UObject* GetProgressionProvider() const;
 
@@ -367,8 +370,30 @@ private:
 
 	void AutoReadyStep();
 
+	/** Resolved on first use; null-but-searched is distinguished from unsearched. */
 	UPROPERTY(Transient)
-	mutable TObjectPtr<UAbilitySystemComponent> CachedASC;
+	mutable TObjectPtr<UObject> CachedProgressionProvider;
+	mutable bool bSearchedProgressionProvider = false;
+
+	/**
+	 * The combination the current mask resolves to, and whether that has been
+	 * worked out yet.
+	 *
+	 * GetResolvedCombination is a container-comparison scan of the whole
+	 * combination table, and one BuildDischargeContext used to trigger it three
+	 * times over -- once directly, once through GetDisplayElement and once
+	 * through GetUsageRate. Invalidated whenever the mask or the page moves,
+	 * which is the only thing that can change the answer.
+	 */
+	mutable TWeakObjectPtr<UARPGMagicElement> CachedCombination;
+	mutable bool bCombinationCacheValid = false;
+
+	/** Drops the resolved-combination cache. Called on every mask or page change. */
+	void InvalidateCombinationCache() const
+	{
+		bCombinationCacheValid = false;
+		CachedCombination = nullptr;
+	}
 
 	UPROPERTY(ReplicatedUsing = OnRep_ActiveMask)
 	int32 ActiveMask = 0;

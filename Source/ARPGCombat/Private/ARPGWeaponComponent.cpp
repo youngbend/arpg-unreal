@@ -4,6 +4,7 @@
 #include "ARPGCombat.h"
 #include "ARPGComboComponent.h"
 #include "ARPGDamageTypeAsset.h"
+#include "ARPGEquipmentEffect.h"
 #include "ARPGGameplayTags.h"
 #include "ARPGHitboxComponent.h"
 #include "ARPGOffenseSet.h"
@@ -11,7 +12,6 @@
 #include "ARPGWeaponAttackTree.h"
 #include "ARPGWeaponDefinition.h"
 #include "AbilitySystemComponent.h"
-#include "AbilitySystemGlobals.h"
 #include "Net/UnrealNetwork.h"
 
 UARPGWeaponComponent::UARPGWeaponComponent()
@@ -40,7 +40,7 @@ void UARPGWeaponComponent::BeginPlay()
 {
 	Super::BeginPlay();
 
-	if (GetOwner() && GetOwner()->HasAuthority() && DefaultWeapon && !Weapon)
+	if (HasAuthority() && DefaultWeapon && !Weapon)
 	{
 		EquipWeapon(DefaultWeapon);
 	}
@@ -52,15 +52,6 @@ void UARPGWeaponComponent::BeginPlay()
 	}
 }
 
-UAbilitySystemComponent* UARPGWeaponComponent::GetASC() const
-{
-	if (!CachedASC)
-	{
-		CachedASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(GetOwner());
-	}
-	return CachedASC;
-}
-
 UARPGComboComponent* UARPGWeaponComponent::GetCombo() const
 {
 	return GetOwner() ? GetOwner()->FindComponentByClass<UARPGComboComponent>() : nullptr;
@@ -68,21 +59,10 @@ UARPGComboComponent* UARPGWeaponComponent::GetCombo() const
 
 UARPGHitboxComponent* UARPGWeaponComponent::GetWeaponHitbox() const
 {
-	if (!GetOwner())
-	{
-		return nullptr;
-	}
-
-	TArray<UARPGHitboxComponent*> Hitboxes;
-	GetOwner()->GetComponents<UARPGHitboxComponent>(Hitboxes);
-	for (UARPGHitboxComponent* Hitbox : Hitboxes)
-	{
-		if (Hitbox->HitboxSource == EARPGHitboxSource::Weapon)
-		{
-			return Hitbox;
-		}
-	}
-	return nullptr;
+	// Shared with the melee ability's own lookup, which used to be a second copy
+	// of this loop with a different fallback rule.
+	return UARPGHitboxComponent::FindOnActor(GetOwner(), EARPGHitboxSource::Weapon,
+		/*bAllowFallback=*/false);
 }
 
 void UARPGWeaponComponent::EquipWeapon(UARPGWeaponDefinition* NewWeapon)
@@ -145,27 +125,23 @@ void UARPGWeaponComponent::ApplyWeaponToOwner()
 void UARPGWeaponComponent::RefreshCritChance()
 {
 	UAbilitySystemComponent* ASC = GetASC();
-	if (!ASC || !GetOwner() || !GetOwner()->HasAuthority())
+	if (!ASC || !HasAuthority())
 	{
 		return;
 	}
 
-	const FGameplayAttribute CritAttr = UARPGOffenseSet::GetCritChanceAttribute();
-
-	if (AppliedCritChance != 0.f)
-	{
-		const float Current = ASC->GetNumericAttribute(CritAttr);
-		ASC->SetNumericAttributeBase(CritAttr, FMath::Max(0.f, Current - AppliedCritChance));
-		AppliedCritChance = 0.f;
-	}
-
 	const float Bonus = Weapon ? Weapon->GetTotalCritChanceBonus() : 0.f;
+
+	TArray<TPair<FGameplayAttribute, float>> Grants;
 	if (Bonus != 0.f)
 	{
-		const float Current = ASC->GetNumericAttribute(CritAttr);
-		ASC->SetNumericAttributeBase(CritAttr, FMath::Clamp(Current + Bonus, 0.f, 1.f));
-		AppliedCritChance = Bonus;
+		Grants.Emplace(UARPGOffenseSet::GetCritChanceAttribute(), Bonus);
 	}
+
+	// No clamp to [0,1] here any more: the hitbox already clamps the TOTAL roll
+	// when it makes one, and clamping the contribution would silently discard
+	// part of a bonus that a later debuff would have made room for.
+	UARPGEquipmentEffectLibrary::ApplyGrant(ASC, Grants, CritGrantHandle);
 }
 
 void UARPGWeaponComponent::SetDrawn(bool bNewDrawn)

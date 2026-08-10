@@ -9,11 +9,36 @@
 #include "ARPGMagicCombinationTable.h"
 #include "ARPGMagicElement.h"
 #include "ARPGWorld.h"
+#include "ARPGWorldSettings.h"
 #include "Engine/World.h"
+
+namespace
+{
+	/**
+	 * True where this machine owns the simulation.
+	 *
+	 * A world subsystem ticks and receives calls on clients as well as the
+	 * server, and none of the solvers were gated: each client ran its own copy
+	 * of world state that nothing replicates, and applied gameplay effects from
+	 * it. A world with no net driver -- an automation fixture -- counts as
+	 * authoritative, because there is nobody else to be.
+	 */
+	bool WorldHasAuthority(const UWorld* World)
+	{
+		return !World || World->GetNetMode() != NM_Client;
+	}
+}
 
 void UARPGElementalReactionSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
+
+	// Project settings fill in anything not already assigned, so a real session
+	// has a combination table instead of resolving every meeting to nothing.
+	if (!CombinationTable)
+	{
+		CombinationTable = UARPGWorldSettings::Get().CombinationTable.LoadSynchronous();
+	}
 
 	VolumesMetHandle = UARPGElementalVolumeComponent::OnVolumesMet.AddUObject(
 		this, &UARPGElementalReactionSubsystem::HandleVolumesMet);
@@ -48,6 +73,14 @@ void UARPGElementalReactionSubsystem::Resolve(UARPGElementalVolumeComponent* A,
 	UARPGElementalVolumeComponent* B)
 {
 	if (!A || !B)
+	{
+		return;
+	}
+
+	// Server only. A reaction spends both volumes' energy, spawns a product and
+	// deals damage -- a client resolving its own copy would double-count every
+	// collision it also receives from the server.
+	if (!WorldHasAuthority(GetWorld()))
 	{
 		return;
 	}

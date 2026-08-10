@@ -2,6 +2,7 @@
 
 #include "ARPGVitalSet.h"
 #include "ARPGCore.h"
+#include "ARPGGameplayTags.h"
 #include "GameplayEffectExtension.h"
 #include "Net/UnrealNetwork.h"
 
@@ -141,6 +142,71 @@ void UARPGVitalSet::PostGameplayEffectExecute(const FGameplayEffectModCallbackDa
 	{
 		SetPoise(FMath::Clamp(GetPoise(), 0.f, GetMaxPoise()));
 	}
+
+	// After every path above that can move health -- damage, healing, and a
+	// direct set. Cheap and idempotent, so it does not need to know which one ran.
+	RefreshDeathState();
+}
+
+void UARPGVitalSet::RefreshDeathState()
+{
+	UAbilitySystemComponent* ASC = GetOwningAbilitySystemComponent();
+	if (!ASC)
+	{
+		return;
+	}
+
+	// Authority only. Death is the gate on every ability in the game, so a client
+	// deciding it independently would let a mispredicted hit lock the player out
+	// of acting until replication corrected it.
+	if (!ASC->IsOwnerActorAuthoritative())
+	{
+		return;
+	}
+
+	const bool bShouldBeDead = GetHealth() <= 0.f;
+	if (bShouldBeDead == bDead)
+	{
+		return;
+	}
+
+	bDead = bShouldBeDead;
+
+	if (bDead)
+	{
+		// Replicated, because it gates ability activation on the owning client
+		// and hit reactions on every other one.
+		ASC->AddLooseGameplayTag(TAG_State_Dead, 1, EGameplayTagReplicationState::TagOnly);
+
+		// Everything in progress stops. Doing this by tag rather than by a list
+		// means an ability added later is covered without editing this.
+		FGameplayTagContainer CancelTags;
+		CancelTags.AddTag(TAG_Ability_Attack);
+		CancelTags.AddTag(TAG_Ability_Discharge);
+		CancelTags.AddTag(TAG_Ability_Block);
+		CancelTags.AddTag(TAG_Ability_Parry);
+		CancelTags.AddTag(TAG_Ability_Imbue);
+		ASC->CancelAbilities(&CancelTags);
+
+		// Routed as an event rather than a direct call so the death REACTION is
+		// an ability: it owns the montage, the ragdoll handoff and the loot, none
+		// of which an attribute set should know about.
+		FGameplayEventData EventData;
+		EventData.EventTag = TAG_Event_Death;
+		EventData.Target = ASC->GetAvatarActor();
+		EventData.Instigator = ASC->GetAvatarActor();
+		ASC->HandleGameplayEvent(TAG_Event_Death, &EventData);
+
+		UE_LOG(LogARPGCore, Log, TEXT("%s died."), *GetNameSafe(ASC->GetAvatarActor()));
+	}
+	else
+	{
+		// Revived. The tag goes first so anything reacting to the event below
+		// already sees a living character.
+		ASC->RemoveLooseGameplayTag(TAG_State_Dead);
+	}
+
+	OnDeathStateChanged.Broadcast(bDead);
 }
 
 void UARPGVitalSet::AdjustAttributeForMaxChange(

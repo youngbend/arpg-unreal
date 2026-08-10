@@ -13,7 +13,25 @@
 #include "AbilitySystemComponent.h"
 #include "AbilitySystemGlobals.h"
 #include "Components/PrimitiveComponent.h"
+#include "ARPGWorldSettings.h"
 #include "Engine/World.h"
+
+namespace
+{
+	/**
+	 * True where this machine owns the simulation.
+	 *
+	 * A world subsystem ticks and receives calls on clients as well as the
+	 * server, and none of the solvers were gated: each client ran its own copy
+	 * of world state that nothing replicates, and applied gameplay effects from
+	 * it. A world with no net driver -- an automation fixture -- counts as
+	 * authoritative, because there is nobody else to be.
+	 */
+	bool WorldHasAuthority(const UWorld* World)
+	{
+		return !World || World->GetNetMode() != NM_Client;
+	}
+}
 #include "GameplayEffect.h"
 
 bool UARPGConductionSubsystem::DoesSupportWorldType(const EWorldType::Type WorldType) const
@@ -24,7 +42,8 @@ bool UARPGConductionSubsystem::DoesSupportWorldType(const EWorldType::Type World
 bool UARPGConductionSubsystem::Conducts(const FGameplayTag& ChargeTag,
 	const FGameplayTag& MediumTag) const
 {
-	if (!CombinationTable || !ChargeTag.IsValid() || !MediumTag.IsValid())
+	const UARPGMagicCombinationTable* Table = GetTable();
+	if (!Table || !ChargeTag.IsValid() || !MediumTag.IsValid())
 	{
 		return false;
 	}
@@ -34,11 +53,29 @@ bool UARPGConductionSubsystem::Conducts(const FGameplayTag& ChargeTag,
 	Pair.AddTag(MediumTag);
 
 	const UARPGMagicCombinationEntry* Entry =
-		CombinationTable->ResolveEntry(Pair, EARPGCombinationScope::Collision);
+		Table->ResolveEntry(Pair, EARPGCombinationScope::Collision);
 
 	// Water carries lightning; stone does not. Which is which is authored, not
 	// coded -- the row has to both exist and name this charge as what travels.
 	return Entry && Entry->GetConductedElement() == ChargeTag;
+}
+
+bool UARPGConductionSubsystem::HasAuthority() const
+{
+	return WorldHasAuthority(GetWorld());
+}
+
+const UARPGMagicCombinationTable* UARPGConductionSubsystem::GetTable() const
+{
+	// Resolved lazily from project settings the first time it is needed: a
+	// UWorldSubsystem field has no editing surface, so this used to be null in
+	// every session that was not a test.
+	if (!CombinationTable)
+	{
+		const_cast<UARPGConductionSubsystem*>(this)->CombinationTable =
+			UARPGWorldSettings::Get().CombinationTable.LoadSynchronous();
+	}
+	return CombinationTable;
 }
 
 int32 UARPGConductionSubsystem::Conduct(UARPGMagicElement* ChargeElement,
@@ -48,6 +85,13 @@ int32 UARPGConductionSubsystem::Conduct(UARPGMagicElement* ChargeElement,
 	LastDeliveredDamage = 0.f;
 
 	if (!ChargeElement || !EntryMedium || Energy < MinEnergy)
+	{
+		return 0;
+	}
+
+	// Server only: a flood damages everything standing in the chain, and a client
+	// running its own would double up on what the server already sent it.
+	if (!HasAuthority())
 	{
 		return 0;
 	}
@@ -216,7 +260,7 @@ void UARPGConductionSubsystem::StrikeTargets(UARPGElementalVolumeComponent* Medi
 		ContextHandle.AddSourceObject(Medium);
 
 		if (FARPGGameplayEffectContext* Context =
-				static_cast<FARPGGameplayEffectContext*>(ContextHandle.Get()))
+				FARPGGameplayEffectContext::ExtractFrom(ContextHandle))
 		{
 			Context->DamageType = ChargeElement->DamageType;
 			Context->MagicElementTag = ChargeElement->ElementTag;

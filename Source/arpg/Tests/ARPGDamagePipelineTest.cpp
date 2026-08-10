@@ -115,7 +115,7 @@ namespace ARPGDamageTestUtils
 
 		FGameplayEffectContextHandle ContextHandle = SourceASC->MakeEffectContext();
 		if (FARPGGameplayEffectContext* Context =
-				static_cast<FARPGGameplayEffectContext*>(ContextHandle.Get()))
+				FARPGGameplayEffectContext::ExtractFrom(ContextHandle))
 		{
 			Context->DamageType = DamageType;
 			Context->Penetration = PenetrationOverride;

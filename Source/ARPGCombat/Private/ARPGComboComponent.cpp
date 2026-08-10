@@ -2,37 +2,61 @@
 
 #include "ARPGComboComponent.h"
 #include "ARPGAttackDefinition.h"
+#include "ARPGAttributeLibrary.h"
 #include "ARPGCombat.h"
 #include "ARPGGameplayTags.h"
 #include "ARPGVitalSet.h"
 #include "AbilitySystemComponent.h"
-#include "AbilitySystemGlobals.h"
 
 UARPGComboComponent::UARPGComboComponent()
 {
 	PrimaryComponentTick.bCanEverTick = true;
-	PrimaryComponentTick.bStartWithTickEnabled = true;
+	PrimaryComponentTick.bStartWithTickEnabled = false;
 	SetIsReplicatedByDefault(false); // combo state is resolved server-side
 }
 
-UAbilitySystemComponent* UARPGComboComponent::GetASC() const
+void UARPGComboComponent::RefreshTickState()
 {
-	if (!CachedASC)
-	{
-		CachedASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(GetOwner());
-	}
-	return CachedASC;
+	const bool bNeedsTick = bCharging
+		|| bChannelLooping
+		|| BufferedInput != INDEX_NONE
+		|| RootLockoutTimer > 0.f
+		|| (!bAttacking && CurrentNode && ResetTimer > 0.f);
+
+	SetComponentTickEnabled(bNeedsTick);
 }
 
-UARPGComboAttackNode* UARPGComboComponent::ResolveNext(EARPGAttackInput Input) const
+UARPGComboAttackNode* UARPGComboComponent::ResolveNext(EARPGAttackInput Input, bool bEmpowered,
+	bool& bOutFallsBackToRoot) const
 {
-	if (!AttackTree)
+	bOutFallsBackToRoot = false;
+
+	UARPGWeaponAttackTree* Tree = GetActiveTree();
+	if (!Tree)
 	{
 		return nullptr;
 	}
 
-	UARPGComboAttackNode* Next = CurrentNode ? CurrentNode->GetFollow(Input) : nullptr;
-	return Next ? Next : AttackTree->GetRoot(Input);
+	// Empowered at root takes the parry follow-up branch when one exists. Checked
+	// FIRST, and by both callers, which is the whole reason this is one function.
+	if (bEmpowered && !CurrentNode)
+	{
+		if (UARPGComboAttackNode* Followup = Tree->GetParryFollowup(Input))
+		{
+			return Followup;
+		}
+	}
+
+	if (CurrentNode)
+	{
+		if (UARPGComboAttackNode* Follow = CurrentNode->GetFollow(Input))
+		{
+			return Follow;
+		}
+	}
+
+	bOutFallsBackToRoot = true;
+	return Tree->GetRoot(Input);
 }
 
 float UARPGComboComponent::NodeResetTimeout() const
@@ -41,30 +65,15 @@ float UARPGComboComponent::NodeResetTimeout() const
 	{
 		return CurrentNode->ResetTimeoutOverride;
 	}
-	return AttackTree ? AttackTree->ResetTimeout : 0.f;
+	const UARPGWeaponAttackTree* Tree = GetActiveTree();
+	return Tree ? Tree->ResetTimeout : 0.f;
 }
 
 bool UARPGComboComponent::TrySpendStamina(float Cost)
 {
-	if (Cost <= 0.f)
-	{
-		return true;
-	}
-
-	UAbilitySystemComponent* ASC = GetASC();
-	if (!ASC)
-	{
-		return true; // nothing to spend from; don't block the attack
-	}
-
-	const float Current = ASC->GetNumericAttribute(UARPGVitalSet::GetStaminaAttribute());
-	if (Current < Cost)
-	{
-		return false;
-	}
-
-	ASC->SetNumericAttributeBase(UARPGVitalSet::GetStaminaAttribute(), Current - Cost);
-	return true;
+	// Shared with locomotion, magic and the ability tasks. The four had a copy
+	// each, and all four read the CURRENT value and wrote it back as the BASE.
+	return UARPGAttributeLibrary::TrySpend(GetASC(), UARPGVitalSet::GetStaminaAttribute(), Cost);
 }
 
 void UARPGComboComponent::ReceiveInput(EARPGAttackInput Input, bool bEmpowered)
@@ -97,20 +106,24 @@ void UARPGComboComponent::ReceiveInput(EARPGAttackInput Input, bool bEmpowered)
 		BufferedInput = InputIndex;
 		bBufferedEmpowered = bEmpowered;
 		BufferTimer = BufferWindow; // measured from the press -- see the header
+		RefreshTickState();
 		return;
 	}
+
+	// Peek at the resolved attack to decide whether this is a charge or a
+	// channel. The SAME resolution StartAttack will perform, including the
+	// empowered parry-follow-up branch -- see ResolveNext.
+	bool bWouldFallBackToRoot = false;
+	UARPGComboAttackNode* Next = ResolveNext(Input, bEmpowered, bWouldFallBackToRoot);
 
 	// A finisher's lockout blocks starting a brand-new combo, but ONLY when this
 	// press would actually fall back to root. Mid-chain follow-ups, charges and
 	// channels from a non-root node are untouched.
-	const bool bWouldFallBackToRoot = !CurrentNode || !CurrentNode->GetFollow(Input);
 	if (RootLockoutTimer > 0.f && bWouldFallBackToRoot)
 	{
 		return;
 	}
 
-	// Peek at the resolved attack to decide whether this is a charge or a channel.
-	UARPGComboAttackNode* Next = ResolveNext(Input);
 	if (!Next)
 	{
 		// Silence here is what makes a misconfigured tree look like broken input.
@@ -118,8 +131,9 @@ void UARPGComboComponent::ReceiveInput(EARPGAttackInput Input, bool bEmpowered)
 			TEXT("%s: no attack resolved for input %d (%s). %s"),
 			*GetNameSafe(GetOwner()), InputIndex,
 			CurrentNode ? TEXT("mid-combo") : TEXT("from root"),
-			AttackTree ? TEXT("The tree has no node for this input.")
-			           : TEXT("NO ATTACK TREE ASSIGNED to the combo component."));
+			GetActiveTree() ? TEXT("The tree has no node for this input.")
+			                : TEXT("NO ATTACK TREE: nothing is equipped and no "
+			                       "FallbackAttackTree is set."));
 		return;
 	}
 
@@ -135,6 +149,7 @@ void UARPGComboComponent::ReceiveInput(EARPGAttackInput Input, bool bEmpowered)
 		ResetTimer = 0.f;
 		BufferedInput = INDEX_NONE;
 		LastInput = InputIndex;
+		RefreshTickState();
 		OnChargeStarted.Broadcast(CurrentNode, bEmpowered);
 
 		// The ability starts NOW, not on release: the wind-up has to be on screen
@@ -221,6 +236,7 @@ void UARPGComboComponent::ReleaseCharge()
 
 	bAttacking = true;
 	++AttackSequenceNumber;
+	RefreshTickState();
 	OnAttackStarted.Broadcast(CurrentNode, bChargeEmpowered);
 
 	// The ability is already running the wind-up. This tells it to cut to the
@@ -258,6 +274,7 @@ void UARPGComboComponent::StartChannel(UARPGComboAttackNode* Node, int32 InputIn
 	BufferedInput = INDEX_NONE;
 	LastInput = InputIndex;
 	++AttackSequenceNumber;
+	RefreshTickState();
 
 	OnAttackStarted.Broadcast(CurrentNode, bEmpowered);
 	SendAttackBeginEvent(bEmpowered);
@@ -280,6 +297,7 @@ bool UARPGComboComponent::NotifyChannelWindupFinished()
 	}
 
 	bChannelLooping = true;
+	RefreshTickState();
 	OnChannelLoopStarted.Broadcast(CurrentNode, bChannelEmpowered);
 	return true;
 }
@@ -311,6 +329,7 @@ void UARPGComboComponent::EndChannelLoop()
 	}
 
 	bChannelLooping = false;
+	RefreshTickState();
 	OnChannelEnded.Broadcast(CurrentNode, bChannelEmpowered);
 
 	// Tells the running ability to break out of the looping Active section and
@@ -352,6 +371,7 @@ void UARPGComboComponent::NotifyChannelEnded()
 	}
 
 	ResetTimer = NodeResetTimeout();
+	RefreshTickState();
 }
 
 // ---------------------------------------------------------------------------
@@ -390,7 +410,7 @@ void UARPGComboComponent::SendAbilityEvent(const FGameplayTag& EventTag, float M
 
 void UARPGComboComponent::StartAttack(EARPGAttackInput Input, bool bEmpowered)
 {
-	if (!AttackTree)
+	if (!GetActiveTree())
 	{
 		UE_LOG(LogARPGCombat, Warning, TEXT("%s: cannot attack, no attack tree assigned."),
 			*GetNameSafe(GetOwner()));
@@ -404,25 +424,14 @@ void UARPGComboComponent::StartAttack(EARPGAttackInput Input, bool bEmpowered)
 		return;
 	}
 
-	UARPGComboAttackNode* Next = nullptr;
+	bool bFallsBackToRoot = false;
+	UARPGComboAttackNode* Next = ResolveNext(Input, bEmpowered, bFallsBackToRoot);
 
-	// Empowered at root uses the parry follow-up branch when one exists.
-	if (bEmpowered && !CurrentNode)
+	if (bFallsBackToRoot)
 	{
-		Next = AttackTree->GetParryFollowup(Input);
-	}
-
-	if (!Next && CurrentNode)
-	{
-		Next = CurrentNode->GetFollow(Input);
-	}
-
-	if (!Next)
-	{
-		// Root fallback. Re-checked here rather than only in ReceiveInput
-		// because a buffered press can be consumed the instant
-		// NotifyAttackFinished sets the lockout -- which the earlier peek could
-		// not have seen coming.
+		// Re-checked here rather than only in ReceiveInput because a buffered
+		// press can be consumed the instant NotifyAttackFinished sets the
+		// lockout -- which the earlier peek could not have seen coming.
 		if (RootLockoutTimer > 0.f)
 		{
 			return;
@@ -434,7 +443,6 @@ void UARPGComboComponent::StartAttack(EARPGAttackInput Input, bool bEmpowered)
 		{
 			OnComboReset.Broadcast();
 		}
-		Next = AttackTree->GetRoot(Input);
 	}
 
 	if (!Next)
@@ -464,6 +472,7 @@ void UARPGComboComponent::StartAttack(EARPGAttackInput Input, bool bEmpowered)
 	BufferedInput = INDEX_NONE;
 	LastInput = static_cast<int32>(Input);
 	++AttackSequenceNumber;
+	RefreshTickState();
 
 	UE_LOG(LogARPGCombat, Log, TEXT("%s: beat %d '%s' (montage %s)"),
 		*GetNameSafe(GetOwner()), AttackSequenceNumber,
@@ -521,6 +530,7 @@ void UARPGComboComponent::NotifyAttackFinished()
 	}
 
 	ResetTimer = NodeResetTimeout();
+	RefreshTickState();
 }
 
 void UARPGComboComponent::CancelAttack()
@@ -540,6 +550,7 @@ void UARPGComboComponent::CancelAttack()
 
 	BufferedInput = INDEX_NONE;
 	ResetTimer = NodeResetTimeout();
+	RefreshTickState();
 }
 
 void UARPGComboComponent::ResetCombo()
@@ -553,6 +564,7 @@ void UARPGComboComponent::ResetCombo()
 
 	CurrentNode = nullptr;
 	ResetTimer = 0.f;
+	RefreshTickState();
 	OnComboReset.Broadcast();
 }
 
@@ -561,6 +573,7 @@ void UARPGComboComponent::KeepAlive()
 	if (CurrentNode && !bAttacking)
 	{
 		ResetTimer = NodeResetTimeout();
+		RefreshTickState();
 	}
 }
 
@@ -614,4 +627,8 @@ void UARPGComboComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 			OnComboReset.Broadcast();
 		}
 	}
+
+	// Everything above counts down; once none of it is live there is nothing to
+	// tick for until the next press.
+	RefreshTickState();
 }

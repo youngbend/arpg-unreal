@@ -130,8 +130,21 @@ public:
 
 	virtual bool NetSerialize(FArchive& Ar, class UPackageMap* Map, bool& bOutSuccess) override;
 
-	/** Convenience accessor -- returns null when the context is not one of ours. */
+	/**
+	 * Convenience accessor -- returns null when the context is not one of ours.
+	 *
+	 * TYPE-CHECKED, not a bare downcast. Every context in the project is one of
+	 * these only because UARPGAbilitySystemGlobals is registered in
+	 * DefaultGame.ini; a line missing there, an effect whose context was built by
+	 * engine code that constructs FGameplayEffectContext directly, or a fixture
+	 * that skipped globals initialisation all produce a base context, and casting
+	 * one of those to this type and then reading DamageType is undefined
+	 * behaviour that happens to look like garbage damage numbers.
+	 */
 	static const FARPGGameplayEffectContext* ExtractFrom(const FGameplayEffectContextHandle& Handle);
+
+	/** Mutable counterpart, for the hitbox and the world solvers stamping a hit. */
+	static FARPGGameplayEffectContext* ExtractFrom(FGameplayEffectContextHandle& Handle);
 };
 
 template<>

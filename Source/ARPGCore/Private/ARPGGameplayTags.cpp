@@ -112,3 +112,14 @@ UE_DEFINE_GAMEPLAY_TAG(TAG_Data_Healing,      "Data.Healing");
 UE_DEFINE_GAMEPLAY_TAG(TAG_Data_PoiseDamage,  "Data.PoiseDamage");
 UE_DEFINE_GAMEPLAY_TAG(TAG_Data_ManaCost,     "Data.ManaCost");
 UE_DEFINE_GAMEPLAY_TAG(TAG_Data_StaminaCost,  "Data.StaminaCost");
+
+// Equipment stat grants.
+UE_DEFINE_GAMEPLAY_TAG(TAG_Data_Equipment_Armor,                 "Data.Equipment.Armor");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Data_Equipment_CritChance,            "Data.Equipment.CritChance");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Data_Equipment_Resistance_Physical,   "Data.Equipment.Resistance.Physical");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Data_Equipment_Resistance_Fire,       "Data.Equipment.Resistance.Fire");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Data_Equipment_Resistance_Ice,        "Data.Equipment.Resistance.Ice");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Data_Equipment_Resistance_Light,      "Data.Equipment.Resistance.Light");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Data_Equipment_Resistance_Lightning,  "Data.Equipment.Resistance.Lightning");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Data_Equipment_Resistance_Water,      "Data.Equipment.Resistance.Water");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Data_Equipment_Resistance_Fall,       "Data.Equipment.Resistance.Fall");

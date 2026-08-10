@@ -121,6 +121,7 @@ class UARPGHudWidget : public UUserWidget
 	GENERATED_BODY()
 
 public:
+	virtual void NativeOnInitialized() override;
 	virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;
 
 	/**
@@ -289,9 +290,16 @@ protected:
 	/**
 	 * The pawn this HUD is about.
 	 *
-	 * The owning player's CURRENT pawn, re-resolved on every read rather than
-	 * cached: possession changes on respawn, and a HUD holding the corpse is a
-	 * HUD that stops updating without ever looking broken.
+	 * The owning player's CURRENT pawn. Re-resolved whenever possession changes
+	 * -- a HUD holding the corpse is a HUD that stops updating without ever
+	 * looking broken -- but CACHED between changes, along with every component
+	 * hanging off it.
+	 *
+	 * Every getter below is a Blueprint property binding, which UMG evaluates
+	 * once per bound widget per frame. Each one used to call GetPawn() and then
+	 * FindComponentByClass, so a HUD with a dozen bindings walked the pawn's
+	 * component array a dozen times a frame to reach components that had not
+	 * moved.
 	 */
 	UFUNCTION(BlueprintPure, Category = "ARPG|HUD")
 	AActor* GetSubject() const;
@@ -303,6 +311,36 @@ protected:
 	UARPGParryComponent* GetParry() const;
 	UARPGQuickSlotComponent* GetQuickSlots() const;
 	UARPGLocomotionComponent* GetLocomotion() const;
+
+private:
+	/** Re-resolves the cache when the owning player's pawn has changed. */
+	void RefreshSubject() const;
+
+	UPROPERTY(Transient)
+	mutable TWeakObjectPtr<AActor> CachedSubject;
+
+	UPROPERTY(Transient)
+	mutable TObjectPtr<UAbilitySystemComponent> CachedASC;
+
+	UPROPERTY(Transient)
+	mutable TObjectPtr<UARPGMagicComponent> CachedMagic;
+
+	UPROPERTY(Transient)
+	mutable TObjectPtr<UARPGComboComponent> CachedCombo;
+
+	UPROPERTY(Transient)
+	mutable TObjectPtr<UARPGWeaponComponent> CachedWeapon;
+
+	UPROPERTY(Transient)
+	mutable TObjectPtr<UARPGParryComponent> CachedParry;
+
+	UPROPERTY(Transient)
+	mutable TObjectPtr<UARPGQuickSlotComponent> CachedQuickSlots;
+
+	UPROPERTY(Transient)
+	mutable TObjectPtr<UARPGLocomotionComponent> CachedLocomotion;
+
+protected:
 
 	/** Attribute read that returns 0 rather than asserting with no ASC. */
 	float GetAttribute(const struct FGameplayAttribute& Attribute) const;

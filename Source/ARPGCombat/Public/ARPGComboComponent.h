@@ -3,7 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Components/ActorComponent.h"
+#include "ARPGGameplayComponentBase.h"
 #include "ARPGWeaponAttackTree.h"
 #include "GameplayTagContainer.h"
 #include "ARPGComboComponent.generated.h"
@@ -34,7 +34,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE(FARPGOnComboReset);
  * Godot version carried.
  */
 UCLASS(ClassGroup = (ARPG), meta = (BlueprintSpawnableComponent))
-class ARPGCOMBAT_API UARPGComboComponent : public UActorComponent
+class ARPGCOMBAT_API UARPGComboComponent : public UARPGGameplayComponentBase
 {
 	GENERATED_BODY()
 
@@ -44,8 +44,37 @@ public:
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType,
 		FActorComponentTickFunction* ThisTickFunction) override;
 
+	/**
+	 * The equipped weapon's moveset. WRITTEN ONLY BY UARPGWeaponComponent.
+	 *
+	 * Left null while nothing is equipped, which is correct: an unarmed
+	 * character has no weapon moveset. FallbackAttackTree is what answers in
+	 * that case -- see GetActiveTree.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Combo")
 	TObjectPtr<UARPGWeaponAttackTree> AttackTree;
+
+	/**
+	 * The moveset used when no weapon supplies one -- bare hands, or a character
+	 * with no weapon component at all.
+	 *
+	 * A SECOND FIELD rather than a default written into AttackTree, because two
+	 * writers of one field is what this replaces. The character used to fill
+	 * AttackTree from its own soft reference whenever it found it empty, while
+	 * the weapon component cleared it on unequip; which of the two won depended
+	 * on whether PossessedBy ran before or after the weapon component's
+	 * BeginPlay, so unequipping a weapon either left the character unarmed or
+	 * silently gave them the character's default sword moveset.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Combo")
+	TObjectPtr<UARPGWeaponAttackTree> FallbackAttackTree;
+
+	/** The tree actually driving resolution: the weapon's, or the fallback. */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Combo")
+	UARPGWeaponAttackTree* GetActiveTree() const
+	{
+		return AttackTree ? AttackTree.Get() : FallbackAttackTree.Get();
+	}
 
 	/**
 	 * How long a press stays valid, measured FROM THE PRESS -- not from when the
@@ -182,9 +211,29 @@ public:
 	FARPGOnAttackStarted OnChannelEnded;
 
 private:
-	UAbilitySystemComponent* GetASC() const;
-	UARPGComboAttackNode* ResolveNext(EARPGAttackInput Input) const;
+	/**
+	 * Which node an input resolves to, and whether that meant falling back to
+	 * root.
+	 *
+	 * THE ONE COPY. This used to exist twice with different rules: ReceiveInput
+	 * peeked with a version that ignored the parry follow-up branch, while
+	 * StartAttack resolved with one that checked it first. An empowered press at
+	 * root therefore peeked the root node -- deciding from it whether the attack
+	 * was a charge or a channel -- and then executed the follow-up instead. Where
+	 * the two nodes disagreed on bChargeable or bChannel, the component took the
+	 * wrong branch entirely and a channel never got its flags set.
+	 *
+	 * @param bOutFallsBackToRoot  true when neither a follow-up nor a parry
+	 *                             follow-up matched, which is what the finisher
+	 *                             lockout gates on.
+	 */
+	UARPGComboAttackNode* ResolveNext(EARPGAttackInput Input, bool bEmpowered,
+		bool& bOutFallsBackToRoot) const;
+
 	void StartAttack(EARPGAttackInput Input, bool bEmpowered);
+
+	/** Ticking is only needed while a timer, a buffer, a charge or a channel is live. */
+	void RefreshTickState();
 	void ReleaseCharge();
 	void StartChannel(UARPGComboAttackNode* Node, int32 InputIndex, bool bEmpowered);
 	void EndChannelLoop();
@@ -196,9 +245,6 @@ private:
 	void SendAbilityEvent(const FGameplayTag& EventTag, float Magnitude);
 	float NodeResetTimeout() const;
 	bool TrySpendStamina(float Cost);
-
-	UPROPERTY(Transient)
-	mutable TObjectPtr<UAbilitySystemComponent> CachedASC;
 
 	UPROPERTY(Transient)
 	TObjectPtr<UARPGComboAttackNode> CurrentNode;

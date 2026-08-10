@@ -1,11 +1,11 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ARPGProgressionComponent.h"
+#include "ARPGAttributeLibrary.h"
 #include "ARPGCore.h"
 #include "ARPGVitalSet.h"
 #include "ARPGXPCurve.h"
 #include "AbilitySystemComponent.h"
-#include "AbilitySystemGlobals.h"
 
 UARPGProgressionComponent::UARPGProgressionComponent()
 {
@@ -17,15 +17,6 @@ void UARPGProgressionComponent::BeginPlay()
 {
 	Super::BeginPlay();
 	CaptureBaseValues();
-}
-
-UAbilitySystemComponent* UARPGProgressionComponent::GetASC() const
-{
-	if (!CachedASC)
-	{
-		CachedASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(GetOwner());
-	}
-	return CachedASC;
 }
 
 void UARPGProgressionComponent::CaptureBaseValues()
@@ -43,9 +34,12 @@ void UARPGProgressionComponent::CaptureBaseValues()
 		return;
 	}
 
-	BaseMaxHealth = ASC->GetNumericAttribute(UARPGVitalSet::GetMaxHealthAttribute());
-	BaseMaxStamina = ASC->GetNumericAttribute(UARPGVitalSet::GetMaxStaminaAttribute());
-	BaseMaxMana = ASC->GetNumericAttribute(UARPGVitalSet::GetMaxManaAttribute());
+	// The BASE values, matching what ReapplyAllocations writes back. Capturing the
+	// CURRENT ones would fold any buff live at capture time into the archetype,
+	// and every later reapply would then restore it.
+	BaseMaxHealth = UARPGAttributeLibrary::GetBase(ASC, UARPGVitalSet::GetMaxHealthAttribute());
+	BaseMaxStamina = UARPGAttributeLibrary::GetBase(ASC, UARPGVitalSet::GetMaxStaminaAttribute());
+	BaseMaxMana = UARPGAttributeLibrary::GetBase(ASC, UARPGVitalSet::GetMaxManaAttribute());
 	bCapturedBase = true;
 }
 
@@ -144,11 +138,11 @@ void UARPGProgressionComponent::ReapplyAllocations()
 
 	// ABSOLUTE, not additive. Re-applying this after a load has to land on the
 	// same number, and a delta would compound every point on every load.
-	ASC->SetNumericAttributeBase(UARPGVitalSet::GetMaxHealthAttribute(),
+	UARPGAttributeLibrary::SetBase(ASC, UARPGVitalSet::GetMaxHealthAttribute(),
 		BaseMaxHealth + AllocatedHealth * HealthPerPoint);
-	ASC->SetNumericAttributeBase(UARPGVitalSet::GetMaxStaminaAttribute(),
+	UARPGAttributeLibrary::SetBase(ASC, UARPGVitalSet::GetMaxStaminaAttribute(),
 		BaseMaxStamina + AllocatedStamina * StaminaPerPoint);
-	ASC->SetNumericAttributeBase(UARPGVitalSet::GetMaxManaAttribute(),
+	UARPGAttributeLibrary::SetBase(ASC, UARPGVitalSet::GetMaxManaAttribute(),
 		BaseMaxMana + AllocatedMana * ManaPerPoint);
 }
 

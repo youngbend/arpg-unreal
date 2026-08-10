@@ -165,3 +165,22 @@ ARPGCORE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Data_Healing);
 ARPGCORE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Data_PoiseDamage);
 ARPGCORE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Data_ManaCost);
 ARPGCORE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Data_StaminaCost);
+
+// -----------------------------------------------------------------------------
+// Equipment stat grants
+//
+// One SetByCaller per attribute a worn piece can move, read by
+// UARPGEquipmentGameplayEffect. A tag rather than a dynamically-built effect
+// because a runtime-constructed UGameplayEffect has no network identity: its
+// definition pointer cannot be resolved on a client, so the owning player's
+// predicted view of their own equipment would arrive with a null Def.
+// -----------------------------------------------------------------------------
+ARPGCORE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Data_Equipment_Armor);
+ARPGCORE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Data_Equipment_CritChance);
+ARPGCORE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Data_Equipment_Resistance_Physical);
+ARPGCORE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Data_Equipment_Resistance_Fire);
+ARPGCORE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Data_Equipment_Resistance_Ice);
+ARPGCORE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Data_Equipment_Resistance_Light);
+ARPGCORE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Data_Equipment_Resistance_Lightning);
+ARPGCORE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Data_Equipment_Resistance_Water);
+ARPGCORE_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Data_Equipment_Resistance_Fall);
