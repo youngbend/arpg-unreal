@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ARPGDischargeEffect.h"
+#include "ARPGElementTintable.h"
 #include "ARPGHitboxComponent.h"
 #include "ARPGMagic.h"
 #include "ARPGMagicElement.h"
@@ -46,6 +47,10 @@ void AARPGDischargeEffect::InitializeFromContext(const FARPGDischargeContext& In
 		Hitbox->OnHitEffects.AddUnique(Element->OnHitEffect);
 		Hitbox->OnHitEffectDuration = Element->StatusDuration;
 	}
+
+	// Colour comes from the same place damage does, and for the same reason:
+	// an effect asset should be art, not a place that re-reads the element.
+	ARPGElementTint::Apply(this, Element);
 
 	// The caster, not this actor: a fireball must not self-attribute its own
 	// damage, or faction filtering treats it as its own faction and kill credit

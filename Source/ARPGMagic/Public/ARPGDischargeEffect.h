@@ -36,7 +36,7 @@ public:
 	 * BeginPlay finishes deferred spawning. Stamps the hitbox and then hands off
 	 * to Blueprint.
 	 */
-	void InitializeFromContext(const FARPGDischargeContext& InContext);
+	virtual void InitializeFromContext(const FARPGDischargeContext& InContext);
 
 	UFUNCTION(BlueprintPure, Category = "ARPG|Magic")
 	const FARPGDischargeContext& GetDischargeContext() const { return Context; }

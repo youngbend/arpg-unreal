@@ -17,6 +17,7 @@ class UARPGDamageTypeAsset;
 class UARPGComboComponent;
 class UARPGInventoryComponent;
 class UARPGLocomotionComponent;
+class UARPGHandVisualComponent;
 class UARPGMagicComponent;
 class UARPGParryComponent;
 class UARPGQuickSlotComponent;
@@ -233,6 +234,10 @@ protected:
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<UARPGMagicComponent> MagicComponent;
+
+	/** Shows what is readied. Without it, LT appears to do nothing at all. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UARPGHandVisualComponent> HandVisual;
 
 	/** The bar the D-pad cycles. Reads its stock from the inventory below. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")

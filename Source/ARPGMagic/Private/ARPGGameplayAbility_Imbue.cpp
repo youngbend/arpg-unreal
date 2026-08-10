@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ARPGGameplayAbility_Imbue.h"
+#include "ARPGElementTintable.h"
 #include "ARPGGameplayTags.h"
 #include "ARPGHitboxComponent.h"
 #include "ARPGMagic.h"
@@ -96,6 +97,8 @@ void UARPGGameplayAbility_Imbue::SpawnImbueEffect()
 	{
 		return;
 	}
+
+	ARPGElementTint::Apply(ImbueEffect, ImbuedElement);
 
 	// Attached to the weapon socket where there is one, so the coating tracks the
 	// blade rather than the character's origin.

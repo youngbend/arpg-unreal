@@ -1050,6 +1050,54 @@ a fitting bug, so the probe now refuses it loudly; and automation worlds have no
 game mode, which means **no BeginPlay runs in them at all** -- worth knowing
 before writing another fixture that assumes it does.
 
+**Placeholder magic visuals -- done, as a follow-on to phase 12 rather than a
+phase of its own.** 5 new cases; 111 pass in total.
+
+Phase 5 ported the palette, `ResolveDischargeEffect` and the settings that name
+the fallbacks -- but nothing built the fallbacks, nothing handed the palette to
+a spawned effect, and nothing ever called `ResolveHandEffect`. The palette was a
+data asset nothing read, so every unauthored element was invisible.
+
+**The tint arrives from the SPAWN POINT**, alongside where the hitbox is
+stamped, and for the same reason: an effect asset should be art, not a place
+that re-reads the element. `IARPGElementTintable` is optional in the way
+`IARPGVfxFittable` is -- an authored fire effect that is already orange simply
+does not implement it. What it buys is that one asset can serve every element,
+which is what makes the placeholders work at all.
+
+**The placeholder is a debug volume, not a VFX, and the drawn shape and the
+hitbox are the same number.** What you see is literally what the attack hits.
+Particles and bloom would hide the one thing a placeholder is for -- reading
+reach and shape while tuning -- and a placeholder that looked finished would
+also stop anyone replacing it. It needs no authored content whatsoever: no mesh,
+no material, no particle system. A fallback that itself had to be authored would
+not be a fallback.
+
+Two departures from the Godot original, both because UE's hitbox sweeps a sphere
+between frames rather than owning a shape:
+
+- **A burst TRAVELS instead of being drawn as a static capsule.** Godot gave it
+  a capsule collider and a matching capsule mesh; here a burst is honestly a
+  sphere thrown forward, and moving it makes the drawn volume exact at every
+  instant rather than an approximation of a shape the hitbox cannot express.
+- **The volume is debug-drawn** rather than being a translucent mesh, since
+  nothing in the engine ships a translucent material to lean on and authoring
+  one would defeat the purpose. The tinted light that goes with it is real, so
+  something still shows in a packaged build.
+
+`UARPGHandVisualComponent` closes the last gap: LT readying an element was
+completely invisible, which made everything downstream -- a swing imbuing, a
+dodge going elemental, RT discharging what is in hand -- impossible to verify by
+eye. It tracks the DISPLAY element rather than the raw selection, so fire plus
+water shows the steam they resolve to; a combination is one thing, and it is the
+thing about to be cast.
+
+All four settings slots default to the built-in stand-ins, so magic is visible
+in a fresh checkout with no configuration. What is still owed is content that
+was always going to be: the element data assets themselves, each with a palette.
+An element with no palette stays invisible on purpose -- that is the documented
+opt-out, not a missing asset.
+
 Each phase ends at something verifiable in-editor. From phase 1 onward, verify in **PIE with 2
 clients** (`Net Mode: Play As Listen Server`, 2 players) — catching authority bugs at the phase
 that introduces them is far cheaper than auditing later.

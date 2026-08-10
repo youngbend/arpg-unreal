@@ -17,6 +17,7 @@
 #include "ARPGDamageTypeAsset.h"
 #include "ARPGComboComponent.h"
 #include "ARPGInventoryComponent.h"
+#include "ARPGHandVisualComponent.h"
 #include "ARPGMagicComponent.h"
 #include "ARPGParryComponent.h"
 #include "ARPGQuickSlotComponent.h"
@@ -98,6 +99,7 @@ AarpgCharacter::AarpgCharacter()
 	WeaponComponent = CreateDefaultSubobject<UARPGWeaponComponent>(TEXT("WeaponComponent"));
 	ParryComponent = CreateDefaultSubobject<UARPGParryComponent>(TEXT("ParryComponent"));
 	MagicComponent = CreateDefaultSubobject<UARPGMagicComponent>(TEXT("MagicComponent"));
+	HandVisual = CreateDefaultSubobject<UARPGHandVisualComponent>(TEXT("HandVisual"));
 
 	// Inventory before quick slots reads like ordering that does not matter, and
 	// it does not -- the quick-slot component resolves its inventory lazily by

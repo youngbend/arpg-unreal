@@ -19,6 +19,12 @@ class AActor;
  * Replacing a placeholder is exactly "fill in the real slot on the element" --
  * the fallback only triggers on an empty slot, so there is nothing to un-wire
  * and no flag to remember.
+ *
+ * All four DEFAULT to the built-in stand-ins, so magic is visible in a fresh
+ * checkout with no configuration at all. That matters more than it sounds: a
+ * fallback system whose fallbacks have to be wired up first does not help the
+ * person it exists for, and every element in development is in exactly the
+ * state these cover.
  */
 UCLASS(Config = Game, DefaultConfig, meta = (DisplayName = "ARPG Magic"))
 class ARPGMAGIC_API UARPGMagicSettings : public UDeveloperSettings
@@ -26,6 +32,8 @@ class ARPGMAGIC_API UARPGMagicSettings : public UDeveloperSettings
 	GENERATED_BODY()
 
 public:
+	UARPGMagicSettings();
+
 	virtual FName GetCategoryName() const override { return TEXT("Game"); }
 
 	/** Held in hand while an element is readied. */

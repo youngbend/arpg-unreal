@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ARPGCloakComponent.h"
+#include "ARPGElementTintable.h"
 #include "ARPGMagic.h"
 #include "ARPGMagicElement.h"
 #include "AbilitySystemComponent.h"
@@ -66,6 +67,11 @@ void UARPGCloakComponent::ApplyCloak(const FARPGDischargeContext& Context)
 
 		if (CloakEffect)
 		{
+			// Spawned directly rather than through the discharge ability, so the
+			// tint has to happen here too -- a cloak is the one discharge whose
+			// lifetime belongs to this component instead of to the effect.
+			ARPGElementTint::Apply(CloakEffect, Element);
+
 			CloakEffect->AttachToActor(GetOwner(),
 				FAttachmentTransformRules::SnapToTargetIncludingScale);
 		}
