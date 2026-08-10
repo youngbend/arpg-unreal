@@ -9,6 +9,7 @@
 #include "GameFramework/Controller.h"
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
+#include "InputAction.h"
 #include "InputActionValue.h"
 #include "arpg.h"
 #include "ARPGPlayerState.h"
@@ -132,9 +133,19 @@ void AarpgCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCompo
 	// Set up action bindings
 	if (UEnhancedInputComponent* EnhancedInputComponent = Cast<UEnhancedInputComponent>(PlayerInputComponent)) {
 		
-		// Jumping
-		EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Started, this, &ACharacter::Jump);
-		EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Completed, this, &ACharacter::StopJumping);
+		// Jump is NOT bound here. It belongs to the modal scheme's South face
+		// button, which is the only thing that knows whether a trigger is held --
+		// bind it directly and A jumps even while LT is readying an element,
+		// which is exactly the misfire the modality exists to prevent.
+		//
+		// StopJumping still needs the release, and the modal component does not
+		// report one for South (jump is an impulse), so it is taken from the
+		// action directly. Harmless when nothing is jumping.
+		if (JumpAction)
+		{
+			EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Completed, this,
+				&ACharacter::StopJumping);
+		}
 
 		// Moving
 		EnhancedInputComponent->BindAction(MoveAction, ETriggerEvent::Triggered, this, &AarpgCharacter::Move);
@@ -156,6 +167,7 @@ void AarpgCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCompo
 		// same-frame trigger-plus-face press resolve as modal. See BindActions.
 		if (ModalInput)
 		{
+			ResolveDefaultModalActions();
 			ModalInput->BindActions(EnhancedInputComponent);
 		}
 	}
@@ -181,6 +193,57 @@ void AarpgCharacter::Look(const FInputActionValue& Value)
 
 	// route the input
 	DoLook(LookAxisVector.X, LookAxisVector.Y);
+}
+
+void AarpgCharacter::ResolveDefaultModalActions()
+{
+	if (!ModalInput)
+	{
+		return;
+	}
+
+	// Filled in only where a Blueprint left the slot empty, so overriding one
+	// action does not mean re-pointing all thirteen. Resolved HERE rather than in
+	// the constructor because these are content paths: a constructor-time load
+	// would make the class fail to compile the moment an asset moved, where this
+	// merely warns and leaves that one control dead.
+	static const TCHAR* const AssetDir = TEXT("/Game/ARPG/Input/");
+
+	// Generic, because the modal component stores its actions as TObjectPtr and
+	// the character's own sprint action is a raw pointer -- the assignment and
+	// the null test read identically for both.
+	auto Resolve = [](auto& Slot, const TCHAR* AssetName)
+	{
+		if (Slot)
+		{
+			return; // authored on the Blueprint; leave it alone
+		}
+
+		const FString Path = FString::Printf(TEXT("%s%s.%s"), AssetDir, AssetName, AssetName);
+		Slot = Cast<UInputAction>(FSoftObjectPath(Path).TryLoad());
+
+		if (!Slot)
+		{
+			UE_LOG(Logarpg, Warning,
+				TEXT("Missing input action '%s'. That control will do nothing; ")
+				TEXT("run Tools/generate_input_assets.py."), AssetName);
+		}
+	};
+
+	Resolve(ModalInput->FaceNorthAction,         TEXT("IA_ARPG_FaceNorth"));
+	Resolve(ModalInput->FaceWestAction,          TEXT("IA_ARPG_FaceWest"));
+	Resolve(ModalInput->FaceSouthAction,         TEXT("IA_ARPG_FaceSouth"));
+	Resolve(ModalInput->FaceEastAction,          TEXT("IA_ARPG_FaceEast"));
+	Resolve(ModalInput->MagicModifierAction,     TEXT("IA_ARPG_MagicModifier"));
+	Resolve(ModalInput->DischargeModifierAction, TEXT("IA_ARPG_DischargeModifier"));
+	Resolve(ModalInput->SpecialAttackAction,     TEXT("IA_ARPG_SpecialAttack"));
+	Resolve(ModalInput->ParryAction,             TEXT("IA_ARPG_Parry"));
+	Resolve(ModalInput->DPadUpAction,            TEXT("IA_ARPG_DPadUp"));
+	Resolve(ModalInput->DPadDownAction,          TEXT("IA_ARPG_DPadDown"));
+	Resolve(ModalInput->DPadLeftAction,          TEXT("IA_ARPG_DPadLeft"));
+	Resolve(ModalInput->DPadRightAction,         TEXT("IA_ARPG_DPadRight"));
+
+	Resolve(SprintAction, TEXT("IA_ARPG_Sprint"));
 }
 
 void AarpgCharacter::ToggleSprint()

@@ -249,6 +249,14 @@ protected:
 	/** Toggles the sprint. */
 	void ToggleSprint();
 
+	/**
+	 *  Points any unset modal action at its generated asset.
+	 *
+	 *  Per-slot rather than all-or-nothing, so overriding one control on a
+	 *  Blueprint does not mean re-pointing the other twelve.
+	 */
+	void ResolveDefaultModalActions();
+
 	bool bAbilitiesGranted = false;
 
 	void EndDebugSwing();

@@ -90,6 +90,10 @@
 		{
 			"Name": "ConfigSettingsToolset",
 			"Enabled": true
+		},
+		{
+			"Name": "GeometryProcessing",
+			"Enabled": true
 		}
 	]
 }
