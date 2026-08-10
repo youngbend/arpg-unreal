@@ -102,16 +102,6 @@ void UARPGModalInputComponent::BindActions(UEnhancedInputComponent* Input)
 	BindPressRelease(ParryAction, &UARPGModalInputComponent::InputParryPressed,
 		&UARPGModalInputComponent::InputParryReleased);
 
-	// The hat is a VALUE, so it binds to Triggered with the value signature
-	// rather than to Started -- there is no press edge to catch, only a reading
-	// that changes. Bound first so a device that has one is decoded before the
-	// four discrete actions get a chance to do nothing.
-	if (DPadHatAction)
-	{
-		Input->BindAction(DPadHatAction, ETriggerEvent::Triggered, this,
-			&UARPGModalInputComponent::InputDPadHat);
-	}
-
 	BindPressRelease(DPadUpAction, &UARPGModalInputComponent::InputDPadUp, nullptr);
 	BindPressRelease(DPadDownAction, &UARPGModalInputComponent::InputDPadDown, nullptr);
 	BindPressRelease(DPadLeftAction, &UARPGModalInputComponent::InputDPadLeft, nullptr);
@@ -412,36 +402,6 @@ void UARPGModalInputComponent::InputSpecialPressed() { PressSpecial(); }
 void UARPGModalInputComponent::InputSpecialReleased() { ReleaseSpecial(); }
 void UARPGModalInputComponent::InputParryPressed() { PressParry(); }
 void UARPGModalInputComponent::InputParryReleased() { ReleaseParry(); }
-
-void UARPGModalInputComponent::InputDPadHat(const FInputActionValue& Value)
-{
-	// Back off the offset the device config added, then recover the raw 0-7
-	// compass index. Anything beyond that is the released reading.
-	const float Raw = Value.Get<float>() - HatOffset;
-	const int32 Direction = FMath::RoundToInt(Raw * 7.f);
-
-	// ONLY ON A CHANGE. A hat reports its position continuously rather than on a
-	// transition, so acting every frame would page the loadout as fast as the
-	// game ticks for as long as the player held left.
-	if (Direction == LastHatDirection)
-	{
-		return;
-	}
-	LastHatDirection = Direction;
-
-	// 0-7 clockwise from north. The diagonals resolve to their vertical
-	// component, because a diagonal on a D-pad is a mis-press of one of the two
-	// cardinals -- and of the pair, up and down are the ones with consequences
-	// worth protecting (drinking a potion, discarding what is readied).
-	switch (Direction)
-	{
-	case 0: case 1: case 7: PressDPad(EARPGInputDPad::Up);    break;
-	case 3: case 4: case 5: PressDPad(EARPGInputDPad::Down);  break;
-	case 2:                 PressDPad(EARPGInputDPad::Right); break;
-	case 6:                 PressDPad(EARPGInputDPad::Left);  break;
-	default: break; // released, or a reading outside the hat's range
-	}
-}
 
 void UARPGModalInputComponent::InputDPadUp() { PressDPad(EARPGInputDPad::Up); }
 void UARPGModalInputComponent::InputDPadDown() { PressDPad(EARPGInputDPad::Down); }

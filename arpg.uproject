@@ -94,10 +94,6 @@
 		{
 			"Name": "GeometryProcessing",
 			"Enabled": true
-		},
-		{
-			"Name": "RawInput",
-			"Enabled": true
 		}
 	]
 }

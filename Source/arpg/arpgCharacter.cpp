@@ -40,7 +40,7 @@
 
 AarpgCharacter::AarpgCharacter()
 {
-	// Ticks only to service ARPGRawInput, which is idle unless asked for.
+	// Ticks only to service ARPGPadInput, which is idle unless asked for.
 	PrimaryActorTick.bCanEverTick = true;
 
 	// Set size for collision capsule
@@ -309,115 +309,110 @@ void AarpgCharacter::ResolveDefaultModalActions()
 	Resolve(ModalInput->DPadLeftAction,          TEXT("IA_ARPG_DPadLeft"));
 	Resolve(ModalInput->DPadRightAction,         TEXT("IA_ARPG_DPadRight"));
 
-	// Only a HID pad read through RawInput reports a hat; an XInput pad has four
-	// real buttons and leaves this one unused. Resolved unconditionally because
-	// which kind of pad is plugged in is not knowable here, and an unused action
-	// costs a null binding.
-	Resolve(ModalInput->DPadHatAction,           TEXT("IA_ARPG_DPadHat"));
 
 	Resolve(SprintAction, TEXT("IA_ARPG_Sprint"));
 }
 
 namespace
 {
-	/** How many of each the RawInput plugin can expose. */
-	constexpr int32 RawAxisCount = 8;
-	constexpr int32 RawButtonCount = 15;
+	/**
+	 * The analogue controls, in the order they are worth reading.
+	 *
+	 * Named individually rather than swept numerically because these are real
+	 * keys with meanings -- if LeftX never moves, that sentence is the diagnosis.
+	 */
+	const TCHAR* const PadAxisKeys[] = {
+		TEXT("Gamepad_LeftX"), TEXT("Gamepad_LeftY"),
+		TEXT("Gamepad_RightX"), TEXT("Gamepad_RightY"),
+		TEXT("Gamepad_LeftTriggerAxis"), TEXT("Gamepad_RightTriggerAxis"),
+	};
+
+	const TCHAR* const PadButtonKeys[] = {
+		TEXT("Gamepad_FaceButton_Bottom"), TEXT("Gamepad_FaceButton_Right"),
+		TEXT("Gamepad_FaceButton_Left"),   TEXT("Gamepad_FaceButton_Top"),
+		TEXT("Gamepad_LeftShoulder"),      TEXT("Gamepad_RightShoulder"),
+		TEXT("Gamepad_LeftTrigger"),       TEXT("Gamepad_RightTrigger"),
+		TEXT("Gamepad_DPad_Up"),           TEXT("Gamepad_DPad_Down"),
+		TEXT("Gamepad_DPad_Left"),         TEXT("Gamepad_DPad_Right"),
+		TEXT("Gamepad_LeftThumbstick"),    TEXT("Gamepad_RightThumbstick"),
+		TEXT("Gamepad_Special_Left"),      TEXT("Gamepad_Special_Right"),
+	};
 
 	/** Movement smaller than this is a stick at rest, not the player. */
-	constexpr float RawAxisChangeThreshold = 0.08f;
-
-	FKey RawAxisKey(int32 Index)
-	{
-		return FKey(*FString::Printf(TEXT("GenericUSBController_Axis%d"), Index));
-	}
-
-	FKey RawButtonKey(int32 Index)
-	{
-		return FKey(*FString::Printf(TEXT("GenericUSBController_Button%d"), Index));
-	}
+	constexpr float PadAxisChangeThreshold = 0.08f;
 }
 
-void AarpgCharacter::ARPGRawInput(float Seconds)
+void AarpgCharacter::ARPGPadInput(float Seconds)
 {
 	const APlayerController* PC = Cast<APlayerController>(GetController());
 	if (!PC || !PC->PlayerInput)
 	{
-		UE_LOG(Logarpg, Warning, TEXT("ARPGRawInput: no player input to read."));
+		UE_LOG(Logarpg, Warning, TEXT("ARPGPadInput: no player input to read."));
 		return;
 	}
 
-	// A key the plugin never registered is not merely unmapped -- it does not
-	// exist, which is a different problem with a different fix. Checked once
-	// here rather than being silently indistinguishable from a resting axis.
-	if (!RawAxisKey(1).IsValid())
+	PadWatchLastAxis.Init(0.f, UE_ARRAY_COUNT(PadAxisKeys));
+
+	UE_LOG(Logarpg, Log, TEXT("ARPGPadInput: watching for %.0f seconds."), Seconds);
+
+	// Resting values first. A stick that rests at a steady non-zero value is
+	// arriving and merely needs a deadzone; one that reads exactly zero and never
+	// changes is not arriving at all.
+	for (int32 Index = 0; Index < UE_ARRAY_COUNT(PadAxisKeys); ++Index)
 	{
-		UE_LOG(Logarpg, Warning,
-			TEXT("ARPGRawInput: GenericUSBController keys are not registered at all. ")
-			TEXT("The RawInput plugin is not loaded."));
-		return;
+		const float Value = PC->PlayerInput->GetKeyValue(FKey(PadAxisKeys[Index]));
+		PadWatchLastAxis[Index] = Value;
+		UE_LOG(Logarpg, Log, TEXT("ARPGPadInput:   %s rests at %.3f"),
+			PadAxisKeys[Index], Value);
 	}
 
-	RawInputLastAxis.Init(0.f, RawAxisCount);
-
-	UE_LOG(Logarpg, Log, TEXT("ARPGRawInput: watching for %.0f seconds."), Seconds);
-
-	// Resting values first. An axis reading exactly 0 forever is one that is not
-	// arriving; one reading a steady 0.5 is arriving and merely mis-indexed.
-	for (int32 Index = 1; Index <= RawAxisCount; ++Index)
-	{
-		const float Value = PC->PlayerInput->GetKeyValue(RawAxisKey(Index));
-		RawInputLastAxis[Index - 1] = Value;
-		UE_LOG(Logarpg, Log, TEXT("ARPGRawInput:   Axis%d rests at %.3f"), Index, Value);
-	}
-
-	RawInputWatchTimer = FMath::Max(Seconds, 0.5f);
+	PadWatchTimer = FMath::Max(Seconds, 0.5f);
 }
 
 void AarpgCharacter::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 
-	if (RawInputWatchTimer <= 0.f)
+	if (PadWatchTimer <= 0.f)
 	{
 		return;
 	}
 
-	RawInputWatchTimer -= DeltaSeconds;
+	PadWatchTimer -= DeltaSeconds;
 
 	const APlayerController* PC = Cast<APlayerController>(GetController());
 	if (!PC || !PC->PlayerInput)
 	{
-		RawInputWatchTimer = 0.f;
+		PadWatchTimer = 0.f;
 		return;
 	}
 
-	for (int32 Index = 1; Index <= RawAxisCount; ++Index)
+	for (int32 Index = 0; Index < UE_ARRAY_COUNT(PadAxisKeys); ++Index)
 	{
-		const float Value = PC->PlayerInput->GetKeyValue(RawAxisKey(Index));
+		const float Value = PC->PlayerInput->GetKeyValue(FKey(PadAxisKeys[Index]));
 
-		// Reported on CHANGE rather than on magnitude, so an axis that rests at
-		// a non-zero value still shows up the moment it is actually moved.
-		if (FMath::Abs(Value - RawInputLastAxis[Index - 1]) < RawAxisChangeThreshold)
+		// Reported on CHANGE rather than on magnitude, so an axis that rests at a
+		// non-zero value still shows up the moment it is actually moved.
+		if (FMath::Abs(Value - PadWatchLastAxis[Index]) < PadAxisChangeThreshold)
 		{
 			continue;
 		}
 
-		UE_LOG(Logarpg, Log, TEXT("ARPGRawInput: Axis%d -> %.3f"), Index, Value);
-		RawInputLastAxis[Index - 1] = Value;
+		UE_LOG(Logarpg, Log, TEXT("ARPGPadInput: %s -> %.3f"), PadAxisKeys[Index], Value);
+		PadWatchLastAxis[Index] = Value;
 	}
 
-	for (int32 Index = 1; Index <= RawButtonCount; ++Index)
+	for (const TCHAR* const KeyName : PadButtonKeys)
 	{
-		if (PC->PlayerInput->WasJustPressed(RawButtonKey(Index)))
+		if (PC->PlayerInput->WasJustPressed(FKey(KeyName)))
 		{
-			UE_LOG(Logarpg, Log, TEXT("ARPGRawInput: Button%d pressed"), Index);
+			UE_LOG(Logarpg, Log, TEXT("ARPGPadInput: %s pressed"), KeyName);
 		}
 	}
 
-	if (RawInputWatchTimer <= 0.f)
+	if (PadWatchTimer <= 0.f)
 	{
-		UE_LOG(Logarpg, Log, TEXT("ARPGRawInput: done."));
+		UE_LOG(Logarpg, Log, TEXT("ARPGPadInput: done."));
 	}
 }
 
