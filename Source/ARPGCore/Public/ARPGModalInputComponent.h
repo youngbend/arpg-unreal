@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
+#include "InputActionValue.h"
 #include "ARPGModalInputComponent.generated.h"
 
 class UInputAction;
@@ -302,6 +303,32 @@ public:
 	UPROPERTY(EditAnywhere, Category = "ARPG|Input|Actions")
 	TObjectPtr<UInputAction> DPadRightAction;
 
+	/**
+	 * The D-pad as a single 8-direction value, for a pad read through RawInput.
+	 *
+	 * A HID controller reports its D-pad as a HAT SWITCH -- one analogue value
+	 * naming a compass direction -- not as four buttons, and no key mapping can
+	 * turn one value into four keys. So a device that arrives this way binds
+	 * here instead of to the four actions above, and this component does the
+	 * decoding. Leave it unset for an XInput pad, which genuinely does have four
+	 * separate buttons.
+	 */
+	UPROPERTY(EditAnywhere, Category = "ARPG|Input|Actions")
+	TObjectPtr<UInputAction> DPadHatAction;
+
+	/**
+	 * What the hat's neutral position reads as, and the shift applied to every
+	 * reading to get there.
+	 *
+	 * The raw hat is 0-7 clockwise from north, with 8 meaning released, scaled
+	 * into 0-1 by the RawInput plugin. North therefore reads as exactly ZERO,
+	 * which Enhanced Input cannot distinguish from "not pressed" -- so the
+	 * device config shifts everything up by this much and the decode below takes
+	 * it back off. See Config/DefaultInput.ini.
+	 */
+	UPROPERTY(EditAnywhere, Category = "ARPG|Input", meta = (ClampMin = "0.0"))
+	float HatOffset = 0.1f;
+
 protected:
 	/**
 	 * Re-reads both trigger actions from the player's live input state.
@@ -332,6 +359,14 @@ private:
 	EARPGInputFace ChargingSlot = EARPGInputFace::None;
 	float ChargeElapsed = 0.f;
 
+	/**
+	 * The hat's last decoded direction, so a held direction is ONE press.
+	 *
+	 * A hat reports continuously rather than on a transition, so without this
+	 * every frame the D-pad is held would page the loadout again.
+	 */
+	int32 LastHatDirection = INDEX_NONE;
+
 	// --- Enhanced Input trampolines -------------------------------------------
 	//
 	// Enhanced Input binds to a UFUNCTION by name, so each action needs a real
@@ -356,6 +391,9 @@ private:
 	UFUNCTION() void InputSpecialReleased();
 	UFUNCTION() void InputParryPressed();
 	UFUNCTION() void InputParryReleased();
+
+	/** Decodes the hat value into a direction and fires it as a press. */
+	UFUNCTION() void InputDPadHat(const FInputActionValue& Value);
 
 	UFUNCTION() void InputDPadUp();
 	UFUNCTION() void InputDPadDown();

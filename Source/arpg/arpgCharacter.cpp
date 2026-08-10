@@ -306,7 +306,65 @@ void AarpgCharacter::ResolveDefaultModalActions()
 	Resolve(ModalInput->DPadLeftAction,          TEXT("IA_ARPG_DPadLeft"));
 	Resolve(ModalInput->DPadRightAction,         TEXT("IA_ARPG_DPadRight"));
 
+	// Only a HID pad read through RawInput reports a hat; an XInput pad has four
+	// real buttons and leaves this one unused. Resolved unconditionally because
+	// which kind of pad is plugged in is not knowable here, and an unused action
+	// costs a null binding.
+	Resolve(ModalInput->DPadHatAction,           TEXT("IA_ARPG_DPadHat"));
+
 	Resolve(SprintAction, TEXT("IA_ARPG_Sprint"));
+}
+
+void AarpgCharacter::ARPGRawInput()
+{
+	const APlayerController* PC = Cast<APlayerController>(GetController());
+	if (!PC || !PC->PlayerInput)
+	{
+		UE_LOG(Logarpg, Warning, TEXT("ARPGRawInput: no player input to read."));
+		return;
+	}
+
+	// Read straight off the player input rather than through Enhanced Input.
+	// The point of this command is to see what the DEVICE is producing, before
+	// any mapping has had a chance to swallow it -- an unmapped key is exactly
+	// the case being diagnosed.
+	int32 Reported = 0;
+
+	for (int32 Index = 1; Index <= 8; ++Index)
+	{
+		const FKey Key(*FString::Printf(TEXT("GenericUSBController_Axis%d"), Index));
+		const float Value = PC->PlayerInput->GetKeyValue(Key);
+
+		// A stick at rest reads 0, a trigger at rest reads 0, and the hat at rest
+		// reads its offset -- so anything past a small deadzone is the player
+		// actually doing something.
+		if (FMath::Abs(Value) > 0.2f)
+		{
+			UE_LOG(Logarpg, Log, TEXT("ARPGRawInput: Axis%d = %.3f"), Index, Value);
+			++Reported;
+		}
+	}
+
+	for (int32 Index = 1; Index <= 15; ++Index)
+	{
+		const FKey Key(*FString::Printf(TEXT("GenericUSBController_Button%d"), Index));
+		if (PC->PlayerInput->IsPressed(Key))
+		{
+			UE_LOG(Logarpg, Log, TEXT("ARPGRawInput: Button%d is down"), Index);
+			++Reported;
+		}
+	}
+
+	if (Reported == 0)
+	{
+		// Two very different failures look identical from the player's side, so
+		// they are named separately.
+		UE_LOG(Logarpg, Warning,
+			TEXT("ARPGRawInput: nothing active. Either hold a control while running ")
+			TEXT("this, or the pad is not reaching RawInput at all -- check that the ")
+			TEXT("RawInput plugin is enabled and that the vendor/product IDs in ")
+			TEXT("Config/DefaultInput.ini match your device."));
+	}
 }
 
 void AarpgCharacter::ToggleSprint()

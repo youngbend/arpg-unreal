@@ -263,6 +263,21 @@ protected:
 	void ToggleSprint();
 
 	/**
+	 *  Prints every raw controller axis and button that is currently non-idle.
+	 *
+	 *  EXISTS BECAUSE THE AXIS ORDER CANNOT BE KNOWN IN ADVANCE. RawInput numbers
+	 *  a device's axes in the order its HID descriptor happens to declare them,
+	 *  which is conventional but not promised, so Config/DefaultInput.ini starts
+	 *  from the standard DualSense layout and may be wrong for a given pad.
+	 *
+	 *  Run it, move one control, and the log names what actually moved -- which
+	 *  turns "the mapping is a guess" into a minute of work rather than an
+	 *  afternoon of swapping numbers and relaunching.
+	 */
+	UFUNCTION(Exec)
+	void ARPGRawInput();
+
+	/**
 	 *  Points any unset modal action at its generated asset.
 	 *
 	 *  Per-slot rather than all-or-nothing, so overriding one control on a
