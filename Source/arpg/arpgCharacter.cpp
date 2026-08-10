@@ -19,7 +19,9 @@
 #include "ARPGComboComponent.h"
 #include "ARPGInventoryComponent.h"
 #include "ARPGHandVisualComponent.h"
+#include "ARPGMagicCombinationTable.h"
 #include "ARPGMagicComponent.h"
+#include "ARPGMagicLoadout.h"
 #include "ARPGParryComponent.h"
 #include "ARPGQuickSlotComponent.h"
 #include "ARPGWeaponComponent.h"
@@ -193,6 +195,48 @@ void AarpgCharacter::Look(const FInputActionValue& Value)
 
 	// route the input
 	DoLook(LookAxisVector.X, LookAxisVector.Y);
+}
+
+void AarpgCharacter::BeginPlay()
+{
+	Super::BeginPlay();
+	ResolveDefaultMagicContent();
+}
+
+void AarpgCharacter::ResolveDefaultMagicContent()
+{
+	if (!MagicComponent)
+	{
+		return;
+	}
+
+	// Soft paths resolved at begin play rather than hard references in the
+	// constructor: a moved asset should mean one warning and a character with no
+	// spells, not a class that fails to load.
+	if (!MagicComponent->Loadout)
+	{
+		MagicComponent->Loadout = Cast<UARPGMagicLoadout>(FSoftObjectPath(
+			TEXT("/Game/ARPG/Magic/DA_MagicLoadout_Starter.DA_MagicLoadout_Starter")).TryLoad());
+
+		if (!MagicComponent->Loadout)
+		{
+			UE_LOG(Logarpg, Warning,
+				TEXT("No starter magic loadout. Element slots will be empty; ")
+				TEXT("run Tools/generate_element_assets.py."));
+		}
+	}
+
+	if (!MagicComponent->CombinationTable)
+	{
+		MagicComponent->CombinationTable = Cast<UARPGMagicCombinationTable>(FSoftObjectPath(
+			TEXT("/Game/ARPG/Magic/DA_MagicCombinations.DA_MagicCombinations")).TryLoad());
+
+		if (!MagicComponent->CombinationTable)
+		{
+			UE_LOG(Logarpg, Warning,
+				TEXT("No magic combination table. Elements will ready but never combine."));
+		}
+	}
 }
 
 void AarpgCharacter::ResolveDefaultModalActions()

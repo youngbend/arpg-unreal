@@ -86,6 +86,19 @@ public:
 
 protected:
 
+	virtual void BeginPlay() override;
+
+	/**
+	 *  Points the magic component at the generated loadout and table if a
+	 *  Blueprint left either empty.
+	 *
+	 *  Without a loadout the four element slots are empty, so LT does nothing
+	 *  and appears broken; without a table two elements can be readied but never
+	 *  combine. Both are content this project ships, so defaulting to it beats
+	 *  shipping a character that looks unfinished out of the box.
+	 */
+	void ResolveDefaultMagicContent();
+
 	/** Initialize input action bindings */
 	virtual void SetupPlayerInputComponent(class UInputComponent* PlayerInputComponent) override;
 
