@@ -17,6 +17,7 @@ class UARPGDamageTypeAsset;
 class UARPGComboComponent;
 class UARPGInventoryComponent;
 class UARPGLocomotionComponent;
+class UARPGVitalRegenComponent;
 class UARPGHandVisualComponent;
 class UARPGMagicComponent;
 class UARPGParryComponent;
@@ -231,6 +232,10 @@ protected:
 	/** Speed tiers and the stamina that pays for the sprint. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<UARPGLocomotionComponent> Locomotion;
+
+	/** Refills stamina and mana. Without it both pools only ever go down. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UARPGVitalRegenComponent> VitalRegen;
 
 	/** Routes modal input events into the combat and magic components. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")

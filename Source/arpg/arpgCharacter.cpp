@@ -26,6 +26,7 @@
 #include "ARPGQuickSlotComponent.h"
 #include "ARPGWeaponComponent.h"
 #include "ARPGLocomotionComponent.h"
+#include "ARPGVitalRegenComponent.h"
 #include "ARPGModalInputComponent.h"
 #include "ARPGPlayerActionComponent.h"
 #include "ARPGWeaponAttackTree.h"
@@ -103,6 +104,7 @@ AarpgCharacter::AarpgCharacter()
 	// with no input to bind to never fires.
 	ModalInput = CreateDefaultSubobject<UARPGModalInputComponent>(TEXT("ModalInput"));
 	Locomotion = CreateDefaultSubobject<UARPGLocomotionComponent>(TEXT("Locomotion"));
+	VitalRegen = CreateDefaultSubobject<UARPGVitalRegenComponent>(TEXT("VitalRegen"));
 	PlayerActions = CreateDefaultSubobject<UARPGPlayerActionComponent>(TEXT("PlayerActions"));
 
 	WeaponComponent = CreateDefaultSubobject<UARPGWeaponComponent>(TEXT("WeaponComponent"));

@@ -66,6 +66,16 @@ private:
 
 	void SpawnDodgeEffect(const UARPGElementalDodgeData& Data);
 
+	/**
+	 * Whether a dodge is legal from where the character is standing -- or not
+	 * standing.
+	 *
+	 * Takes the readied element's dodge data rather than reading it back off the
+	 * ability, because this is asked BEFORE the element is consumed: a refused
+	 * dodge must not cost the player what they were holding.
+	 */
+	bool CanDodgeFromCurrentFooting(const class UARPGElementalDodgeData* Elemental) const;
+
 	/** Direction from movement input, falling back to facing for a backstep. */
 	FVector ResolveDodgeDirection(bool& bOutIsBackstep) const;
 

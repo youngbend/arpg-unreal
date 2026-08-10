@@ -35,6 +35,28 @@ UARPGGameplayAbility_Dodge::UARPGGameplayAbility_Dodge()
 	// guaranteed follow-up.
 }
 
+bool UARPGGameplayAbility_Dodge::CanDodgeFromCurrentFooting(
+	const UARPGElementalDodgeData* Elemental) const
+{
+	const ACharacter* Character = Cast<ACharacter>(GetAvatarActorFromActorInfo());
+	const UCharacterMovementComponent* Movement =
+		Character ? Character->GetCharacterMovement() : nullptr;
+
+	// No movement component to ask means no grounds to refuse on. A dodge that
+	// silently did nothing would be worse than one that fires oddly.
+	if (!Movement || !Movement->IsFalling())
+	{
+		return true;
+	}
+
+	// AIRBORNE. An ordinary roll needs the ground to push off, so mid-air it is
+	// simply not a move the character has -- and allowing it turns the dodge
+	// into a second jump, which is a different game. An element may buy the
+	// exception, and that is per-element rather than blanket: an air dash is
+	// something a specific element grants, not something dodging does.
+	return Elemental && Elemental->bAllowAirDodge;
+}
+
 FVector UARPGGameplayAbility_Dodge::ResolveDodgeDirection(bool& bOutIsBackstep) const
 {
 	const ACharacter* Character = Cast<ACharacter>(GetAvatarActorFromActorInfo());
@@ -66,6 +88,20 @@ void UARPGGameplayAbility_Dodge::ActivateAbility(const FGameplayAbilitySpecHandl
 	}
 
 	UARPGMagicComponent* Magic = Avatar->FindComponentByClass<UARPGMagicComponent>();
+
+	// PEEKED BEFORE CONSUMING. Whether a dodge is legal depends on what is
+	// readied -- an ordinary roll is ground-only, while an element may authorise
+	// an air dodge -- and a refusal must not cost the player the element they
+	// were holding. So the readied element is inspected first and only spent
+	// once the dodge is going to happen.
+	const UARPGMagicElement* Readied = Magic ? Magic->GetDisplayElement() : nullptr;
+	const UARPGElementalDodgeData* Peeked = Readied ? Readied->ElementalDodge.Get() : nullptr;
+
+	if (!CanDodgeFromCurrentFooting(Peeked))
+	{
+		EndAbility(Handle, ActorInfo, ActivationInfo, true, true);
+		return;
+	}
 
 	// Consumed on the server only -- it spends mana. The client still runs the
 	// rest of the ability, and the element replicates through the magic
