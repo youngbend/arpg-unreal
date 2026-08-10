@@ -38,6 +38,23 @@ def log(message):
     unreal.log("[ARPG elements] {}".format(message))
 
 
+def save(asset, path):
+    """Saves, and treats a refusal as an error rather than a silent no-op.
+
+    THE RETURN VALUE MATTERS. A package whose file is held open by another
+    process -- an editor with the asset loaded is enough -- fails to save with
+    only a warning, and the object in memory still holds everything you just
+    wrote. Verifying by reading the loaded object back therefore reports success
+    against a file that never changed, which is exactly how a broken asset
+    survived several "verified" runs of this script.
+    """
+    if unreal.EditorAssetLibrary.save_asset(path, only_if_is_dirty=False):
+        return True
+
+    log("SAVE REFUSED for {} -- is the editor open with this asset loaded?".format(path))
+    return False
+
+
 def colour(r, g, b, a=1.0):
     return unreal.LinearColor(r, g, b, a)
 
@@ -216,7 +233,7 @@ def main():
         palette.set_editor_property("glow", spec["glow"])
         palette.set_editor_property("edge", spec["edge"])
         palette.set_editor_property("emission_strength", spec["emission"])
-        unreal.EditorAssetLibrary.save_loaded_asset(palette)
+        save(palette, "{}/DA_Palette_{}".format(PALETTE_DIR, spec["id"]))
 
         element = ensure(ELEMENT_DIR, "DA_Element_{}".format(spec["id"]),
                          unreal.ARPGMagicElement)
@@ -251,7 +268,7 @@ def main():
         element.set_editor_property("cloak_base_duration", spec.get("cloak_duration", 0.0))
         element.set_editor_property("cloak_charge_bonus", spec.get("cloak_bonus", 0.0))
 
-        unreal.EditorAssetLibrary.save_loaded_asset(element)
+        save(element, "{}/DA_Element_{}".format(ELEMENT_DIR, spec["id"]))
         elements[spec["id"]] = element
 
     # --- Combination table --------------------------------------------------
@@ -282,7 +299,7 @@ def main():
         entries.append(entry)
 
     table.set_editor_property("entries", entries)
-    unreal.EditorAssetLibrary.save_loaded_asset(table)
+    save(table, "{}/DA_MagicCombinations".format(MAGIC_DIR))
     log("table has {} entries".format(len(entries)))
 
     # --- Loadout ------------------------------------------------------------
@@ -299,7 +316,7 @@ def main():
         slots[page * SLOT_COUNT + SLOT_INDEX[slot_name]] = elements[element_id]
 
     loadout.set_editor_property("elements", slots)
-    unreal.EditorAssetLibrary.save_loaded_asset(loadout)
+    save(loadout, "{}/DA_MagicLoadout_Starter".format(MAGIC_DIR))
     log("loadout has {} pages".format(page_count))
 
 

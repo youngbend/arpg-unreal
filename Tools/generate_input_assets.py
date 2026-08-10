@@ -61,6 +61,23 @@ def log(message):
     unreal.log("[ARPG input] {}".format(message))
 
 
+def save(asset, path):
+    """Saves, and treats a refusal as an error rather than a silent no-op.
+
+    THE RETURN VALUE MATTERS. A package whose file is held open by another
+    process -- an editor with the asset loaded is enough -- fails to save with
+    only a warning, and the object in memory still holds everything you just
+    wrote. Verifying by reading the loaded object back therefore reports success
+    against a file that never changed, which is exactly how a broken asset
+    survived several "verified" runs of this script.
+    """
+    if unreal.EditorAssetLibrary.save_asset(path, only_if_is_dirty=False):
+        return True
+
+    log("SAVE REFUSED for {} -- is the editor open with this asset loaded?".format(path))
+    return False
+
+
 def make_key(key_name):
     """FKey has no Python constructor; its text form is the way in."""
     key = unreal.Key()
@@ -85,7 +102,7 @@ def ensure_action(name):
     # analogue actions the game needs -- move and look -- are the template's and
     # are deliberately left where they are.
     action.set_editor_property("value_type", unreal.InputActionValueType.BOOLEAN)
-    unreal.EditorAssetLibrary.save_loaded_asset(action)
+    save(action, path)
     log("created {}".format(path))
     return action
 
@@ -93,24 +110,18 @@ def ensure_action(name):
 def main():
     unreal.EditorAssetLibrary.make_directory(CONTENT_DIR)
 
-    mappings = []
-    for name, gamepad_key, keyboard_key in ACTIONS:
-        action = ensure_action(name)
-        if not action:
-            log("FAILED to create {} -- skipping".format(name))
-            continue
-
-        for key_name in (gamepad_key, keyboard_key):
-            if not key_name:
-                continue
-            mapping = unreal.EnhancedActionKeyMapping()
-            mapping.set_editor_property("action", action)
-            mapping.set_editor_property("key", make_key(key_name))
-            mappings.append(mapping)
-
     imc_path = "{}/{}".format(CONTENT_DIR, IMC_NAME)
+
+    # EMPTIED AND REFILLED rather than deleted and recreated: a package deleted
+    # in this session still holds its name, so the recreate fails and you are
+    # left with nothing at all.
+    #
+    # The mapping list is derived rather than authored, so wiping it is correct
+    # -- an asset carrying entries from a previous layout is worse than no asset,
+    # because the stale ones still bind.
     if unreal.EditorAssetLibrary.does_asset_exist(imc_path):
         imc = unreal.EditorAssetLibrary.load_asset(imc_path)
+        imc.unmap_all()
     else:
         imc = asset_tools.create_asset(
             asset_name=IMC_NAME,
@@ -120,15 +131,45 @@ def main():
         )
         log("created {}".format(imc_path))
 
-    imc.set_editor_property("mappings", mappings)
-    unreal.EditorAssetLibrary.save_loaded_asset(imc)
+    if not imc:
+        log("could not open or create {}".format(imc_path))
+        return
 
-    # Read back rather than trusting the write. A mapping list that silently
-    # failed to stick would leave every control dead with nothing to say why --
-    # which is exactly the failure this whole script exists to fix.
-    written = len(unreal.EditorAssetLibrary.load_asset(imc_path).get_editor_property("mappings"))
-    log("{} has {} mappings (expected {})".format(IMC_NAME, written, len(mappings)))
-    if written != len(mappings):
+    expected = 0
+    for name, gamepad_key, keyboard_key in ACTIONS:
+        action = ensure_action(name)
+        if not action:
+            log("FAILED to create {} -- skipping".format(name))
+            continue
+
+        for key_name in (gamepad_key, keyboard_key):
+            if not key_name:
+                continue
+
+            # MapKey, NOT set_editor_property on the mappings array. There are
+            # two arrays on this asset: a deprecated `Mappings` and the
+            # `DefaultKeyMappings` struct the engine actually reads. Writing the
+            # first produces an asset that looks right, reads back exactly what
+            # you wrote, and binds nothing -- and PostLoad only migrates it for
+            # assets saved before the change, which a freshly written one is
+            # not. MapKey puts it in the right place by construction.
+            imc.map_key(action, make_key(key_name))
+            expected += 1
+
+    # Emptied so nothing is left in the dead property to mislead the next person
+    # who opens this asset and sees a full-looking list that binds nothing.
+    imc.set_editor_property("mappings", [])
+
+    if not save(imc, imc_path):
+        log("IMC_ARPG was NOT written. Close the editor and run this again.")
+        return
+
+    # Read back in the property the ENGINE reads, not the one we wrote through.
+    written = len(imc.get_editor_property("default_key_mappings")
+                  .get_editor_property("mappings"))
+
+    log("{} has {} live mappings (expected {})".format(IMC_NAME, written, expected))
+    if written != expected:
         log("MISMATCH -- the mappings did not persist")
 
 
