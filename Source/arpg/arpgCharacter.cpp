@@ -40,6 +40,9 @@
 
 AarpgCharacter::AarpgCharacter()
 {
+	// Ticks only to service ARPGRawInput, which is idle unless asked for.
+	PrimaryActorTick.bCanEverTick = true;
+
 	// Set size for collision capsule
 	GetCapsuleComponent()->InitCapsuleSize(42.f, 96.0f);
 		
@@ -315,7 +318,27 @@ void AarpgCharacter::ResolveDefaultModalActions()
 	Resolve(SprintAction, TEXT("IA_ARPG_Sprint"));
 }
 
-void AarpgCharacter::ARPGRawInput()
+namespace
+{
+	/** How many of each the RawInput plugin can expose. */
+	constexpr int32 RawAxisCount = 8;
+	constexpr int32 RawButtonCount = 15;
+
+	/** Movement smaller than this is a stick at rest, not the player. */
+	constexpr float RawAxisChangeThreshold = 0.08f;
+
+	FKey RawAxisKey(int32 Index)
+	{
+		return FKey(*FString::Printf(TEXT("GenericUSBController_Axis%d"), Index));
+	}
+
+	FKey RawButtonKey(int32 Index)
+	{
+		return FKey(*FString::Printf(TEXT("GenericUSBController_Button%d"), Index));
+	}
+}
+
+void AarpgCharacter::ARPGRawInput(float Seconds)
 {
 	const APlayerController* PC = Cast<APlayerController>(GetController());
 	if (!PC || !PC->PlayerInput)
@@ -324,46 +347,77 @@ void AarpgCharacter::ARPGRawInput()
 		return;
 	}
 
-	// Read straight off the player input rather than through Enhanced Input.
-	// The point of this command is to see what the DEVICE is producing, before
-	// any mapping has had a chance to swallow it -- an unmapped key is exactly
-	// the case being diagnosed.
-	int32 Reported = 0;
-
-	for (int32 Index = 1; Index <= 8; ++Index)
+	// A key the plugin never registered is not merely unmapped -- it does not
+	// exist, which is a different problem with a different fix. Checked once
+	// here rather than being silently indistinguishable from a resting axis.
+	if (!RawAxisKey(1).IsValid())
 	{
-		const FKey Key(*FString::Printf(TEXT("GenericUSBController_Axis%d"), Index));
-		const float Value = PC->PlayerInput->GetKeyValue(Key);
-
-		// A stick at rest reads 0, a trigger at rest reads 0, and the hat at rest
-		// reads its offset -- so anything past a small deadzone is the player
-		// actually doing something.
-		if (FMath::Abs(Value) > 0.2f)
-		{
-			UE_LOG(Logarpg, Log, TEXT("ARPGRawInput: Axis%d = %.3f"), Index, Value);
-			++Reported;
-		}
-	}
-
-	for (int32 Index = 1; Index <= 15; ++Index)
-	{
-		const FKey Key(*FString::Printf(TEXT("GenericUSBController_Button%d"), Index));
-		if (PC->PlayerInput->IsPressed(Key))
-		{
-			UE_LOG(Logarpg, Log, TEXT("ARPGRawInput: Button%d is down"), Index);
-			++Reported;
-		}
-	}
-
-	if (Reported == 0)
-	{
-		// Two very different failures look identical from the player's side, so
-		// they are named separately.
 		UE_LOG(Logarpg, Warning,
-			TEXT("ARPGRawInput: nothing active. Either hold a control while running ")
-			TEXT("this, or the pad is not reaching RawInput at all -- check that the ")
-			TEXT("RawInput plugin is enabled and that the vendor/product IDs in ")
-			TEXT("Config/DefaultInput.ini match your device."));
+			TEXT("ARPGRawInput: GenericUSBController keys are not registered at all. ")
+			TEXT("The RawInput plugin is not loaded."));
+		return;
+	}
+
+	RawInputLastAxis.Init(0.f, RawAxisCount);
+
+	UE_LOG(Logarpg, Log, TEXT("ARPGRawInput: watching for %.0f seconds."), Seconds);
+
+	// Resting values first. An axis reading exactly 0 forever is one that is not
+	// arriving; one reading a steady 0.5 is arriving and merely mis-indexed.
+	for (int32 Index = 1; Index <= RawAxisCount; ++Index)
+	{
+		const float Value = PC->PlayerInput->GetKeyValue(RawAxisKey(Index));
+		RawInputLastAxis[Index - 1] = Value;
+		UE_LOG(Logarpg, Log, TEXT("ARPGRawInput:   Axis%d rests at %.3f"), Index, Value);
+	}
+
+	RawInputWatchTimer = FMath::Max(Seconds, 0.5f);
+}
+
+void AarpgCharacter::Tick(float DeltaSeconds)
+{
+	Super::Tick(DeltaSeconds);
+
+	if (RawInputWatchTimer <= 0.f)
+	{
+		return;
+	}
+
+	RawInputWatchTimer -= DeltaSeconds;
+
+	const APlayerController* PC = Cast<APlayerController>(GetController());
+	if (!PC || !PC->PlayerInput)
+	{
+		RawInputWatchTimer = 0.f;
+		return;
+	}
+
+	for (int32 Index = 1; Index <= RawAxisCount; ++Index)
+	{
+		const float Value = PC->PlayerInput->GetKeyValue(RawAxisKey(Index));
+
+		// Reported on CHANGE rather than on magnitude, so an axis that rests at
+		// a non-zero value still shows up the moment it is actually moved.
+		if (FMath::Abs(Value - RawInputLastAxis[Index - 1]) < RawAxisChangeThreshold)
+		{
+			continue;
+		}
+
+		UE_LOG(Logarpg, Log, TEXT("ARPGRawInput: Axis%d -> %.3f"), Index, Value);
+		RawInputLastAxis[Index - 1] = Value;
+	}
+
+	for (int32 Index = 1; Index <= RawButtonCount; ++Index)
+	{
+		if (PC->PlayerInput->WasJustPressed(RawButtonKey(Index)))
+		{
+			UE_LOG(Logarpg, Log, TEXT("ARPGRawInput: Button%d pressed"), Index);
+		}
+	}
+
+	if (RawInputWatchTimer <= 0.f)
+	{
+		UE_LOG(Logarpg, Log, TEXT("ARPGRawInput: done."));
 	}
 }
 

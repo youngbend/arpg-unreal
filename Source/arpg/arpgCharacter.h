@@ -102,6 +102,9 @@ protected:
 	/** Initialize input action bindings */
 	virtual void SetupPlayerInputComponent(class UInputComponent* PlayerInputComponent) override;
 
+	/** Drives the raw-input watch; idle otherwise. */
+	virtual void Tick(float DeltaSeconds) override;
+
 protected:
 
 	/** Called for movement input */
@@ -263,19 +266,33 @@ protected:
 	void ToggleSprint();
 
 	/**
-	 *  Prints every raw controller axis and button that is currently non-idle.
+	 *  Watches every raw controller axis and button for a few seconds and logs
+	 *  whatever moves.
 	 *
 	 *  EXISTS BECAUSE THE AXIS ORDER CANNOT BE KNOWN IN ADVANCE. RawInput numbers
 	 *  a device's axes in the order its HID descriptor happens to declare them,
 	 *  which is conventional but not promised, so Config/DefaultInput.ini starts
 	 *  from the standard DualSense layout and may be wrong for a given pad.
 	 *
-	 *  Run it, move one control, and the log names what actually moved -- which
-	 *  turns "the mapping is a guess" into a minute of work rather than an
-	 *  afternoon of swapping numbers and relaunching.
+	 *  SAMPLES OVER TIME RATHER THAN ONCE, which the first version of this got
+	 *  wrong: you cannot hold a stick and type a console command at the same
+	 *  moment, and opening the console takes focus away from the thing being
+	 *  measured. Start it, close the console, move one control at a time, and
+	 *  read the log afterwards.
+	 *
+	 *  It also reports the axes it finds at REST, which is the difference
+	 *  between two failures that look identical from the outside: a stick whose
+	 *  index is wrong still reads a plausible resting value, while a device
+	 *  whose config never applied reads nothing at all.
 	 */
 	UFUNCTION(Exec)
-	void ARPGRawInput();
+	void ARPGRawInput(float Seconds = 10.f);
+
+	/** Seconds left on the raw-input watch; zero when it is not running. */
+	float RawInputWatchTimer = 0.f;
+
+	/** Last logged value per axis, so only real movement is reported. */
+	TArray<float> RawInputLastAxis;
 
 	/**
 	 *  Points any unset modal action at its generated asset.
