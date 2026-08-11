@@ -910,6 +910,45 @@ energy trade, and conduction checks whether a strike was roofed by a solid --
 NOT THROUGH THE ICE, since a floe roofs over the water beneath it and the pool's
 own collider knows nothing about that.
 
+**A LATER CORRECTION: nothing ever put a puddle in the world.** Phase 10 built
+every operation on a body -- deposit, merge, grow, erode, freeze, melt -- and
+wired the last two to the reaction and conduction subsystems, but `Deposit`
+itself had no caller outside the tests and the melt path. A water spell landed on
+dry ground and left it dry, and the same was true one layer down: the fluid
+definitions, the solid definitions and the combination table were all
+`EditAnywhere` on world subsystems, which have no editing surface, so a real
+session ran the whole thing with empty lists. Three things were missing and each
+would have been enough on its own to produce no puddles.
+
+- **A cast spell now finishes into the fluid system.** `AARPGDischargeEffect`
+  carries a `DepositRadius` and broadcasts a static `OnDischargeLanded` on
+  EndPlay(Destroyed); the fluid subsystem subscribes. A STATIC DELEGATE for the
+  same reason `OnVolumesMet` is one -- ARPGWorld depends on ARPGMagic, so an
+  effect calling the fluid system directly would close the cycle.
+- **The ground is probed, not assumed.** A spell finishes at chest height, so the
+  landing point is traced down to whatever is under it and the body forms there.
+  Past `MaxDepositDrop` the spell expired over a drop and wet nothing, which is an
+  outcome rather than a failure.
+- **Still nothing in C++ knows that water pools and fire does not.** An element
+  with no fluid definition deposits nothing, so the same radius on a fire orb is
+  simply inert. What changed is that the miss is now SAYABLE: an element nobody
+  pools logs at Verbose, and NOTHING being configured to pool -- the state this
+  project was actually in -- warns once and names the setting.
+- **The placeholders deposit, so this works with no authored content.** The same
+  number that drives a placeholder's hitbox and its drawn volume now drives what
+  it leaves, which is the rule that class already lived by. A projectile spreads
+  on impact rather than depositing at its own width -- a placeholder orb is 20 to
+  60cm and would otherwise leave a wet coin.
+- **A deposit under the minimum area no longer becomes a body.** It was spawned,
+  replicated, and destroyed by the next weather tick for being under the same
+  floor. Refused only where it would have nothing to belong to: a splash too small
+  to be a puddle still enlarges one it lands in, and the last of a melting floe
+  still returns its water to the pool it froze out of.
+
+3 new cases under `ARPG.World.Fluid.Casting`, the first of which is the gate that
+was missing -- a cast spell leaves a body on the ground under where it finished --
+plus the area floor asserted in `Pools.DepositsMergeRatherThanStack`.
+
 **Phase 11 -- code complete. Not in the original ten: this is the layer that
 makes the other ten reachable from a controller.** The modal control scheme, the
 speed tiers, the buffering, and auto-sheathe. 13 new cases; 99 pass in total.

@@ -4,6 +4,8 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
+#include "ARPGDischargeContext.h"
+#include "ARPGDischargeEffect.h"
 #include "ARPGElementalVolumeComponent.h"
 #include "ARPGFluidBody.h"
 #include "ARPGFluidDefinition.h"
@@ -12,6 +14,7 @@
 #include "ARPGGameplayTags.h"
 #include "ARPGMagicCombinationTable.h"
 #include "ARPGMagicElement.h"
+#include "Components/BoxComponent.h"
 #include "Components/SphereComponent.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
@@ -66,6 +69,72 @@ namespace ARPGFluidTestUtils
 		Definition->RainGrowthRate = 10.f;
 		Definition->MergeDistance = 200.f;
 		return Definition;
+	}
+
+	/**
+	 * Something for the ground probe to find.
+	 *
+	 * A body lies on the GROUND, and an automation world has none -- no landscape,
+	 * no floor, nothing a line trace can hit. Without this every deposit correctly
+	 * concludes the spell expired over a drop and wet nothing.
+	 */
+	AActor* MakeGround(UWorld* World, float Height, FVector2D Extent = FVector2D(5000, 5000))
+	{
+		FActorSpawnParameters Params;
+		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+		AActor* Ground = World->SpawnActor<AActor>(AActor::StaticClass(),
+			FTransform(FVector(0, 0, Height)), Params);
+
+		UBoxComponent* Box = NewObject<UBoxComponent>(Ground, TEXT("Ground"));
+		Box->SetBoxExtent(FVector(Extent.X, Extent.Y, 10.f));
+		Box->SetMobility(EComponentMobility::Movable);
+		Box->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+		Box->SetCollisionResponseToAllChannels(ECR_Block);
+		Ground->SetRootComponent(Box);
+		Box->RegisterComponent();
+		Box->SetWorldLocation(FVector(0, 0, Height - 10.f)); // top face AT Height
+
+		return Ground;
+	}
+
+	/**
+	 * A cast spell, at the point it is about to finish.
+	 *
+	 * Spawned rather than constructed because the deposit hangs off EndPlay, which
+	 * only a real actor in a real world reaches.
+	 */
+	AARPGDischargeEffect* MakeCastSpell(UWorld* World, UARPGMagicElement* Element,
+		FVector Origin, FVector FinishedAt, float Radius, bool bSwept = false)
+	{
+		FActorSpawnParameters Params;
+		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+		AARPGDischargeEffect* Effect = World->SpawnActor<AARPGDischargeEffect>(
+			AARPGDischargeEffect::StaticClass(), FTransform(FinishedAt), Params);
+
+		FARPGDischargeContext Context;
+		Context.PrimaryElement = Element;
+		Context.Origin = Origin;
+		Context.ComputedDamage = 25.f;
+		Effect->InitializeFromContext(Context);
+
+		Effect->DepositRadius = Radius;
+		Effect->bDepositSwept = bSwept;
+
+		// EndPlay is only routed to an actor that BEGAN play, so a spell that never
+		// started cannot finish and the deposit would silently never happen. The
+		// fixture world has begun play and spawning should cover this; the guard is
+		// here so the test is asserting on the deposit rather than on that.
+		if (!Effect->HasActorBegunPlay())
+		{
+			Effect->DispatchBeginPlay();
+		}
+
+		// Lifespan off: these tests decide when the spell finishes.
+		Effect->SetLifeSpan(0.f);
+
+		return Effect;
 	}
 }
 
@@ -226,6 +295,20 @@ bool FARPGFluidDepositTest::RunTest(const FString& Parameters)
 	Fluids->Deposit(FVector(5000, 0, 0), 100.f, TAG_Element_Water);
 	TestEqual(TEXT("A distant deposit makes its own pool"), Fluids->GetPools().Num(), 2);
 
+	// Too little to be a body of its own: spawning it would replicate a pool that
+	// the next weather tick destroys for being under the same floor.
+	TestNull(TEXT("A splash below the minimum area makes no pool"),
+		Fluids->Deposit(FVector(-5000, 0, 0), 10.f, TAG_Element_Water));
+	TestEqual(TEXT("And leaves the count alone"), Fluids->GetPools().Num(), 2);
+
+	// But the same splash still ADDS to one it lands in -- the floor is on being a
+	// body of your own, not on being worth anything -- which is how repeated light
+	// casts eventually wet the ground.
+	const double BeforeSplash = First->GetArea();
+	TestEqual(TEXT("A splash that small still merges into a pool it overlaps"),
+		Fluids->Deposit(FVector(190, 0, 0), 25.f, TAG_Element_Water), First);
+	TestTrue(TEXT("And grows it"), First->GetArea() > BeforeSplash);
+
 	// The polygon is the truth, not the box.
 	TestTrue(TEXT("A point in the pool is in the pool"),
 		First->ContainsPoint(FVector(0, 0, 0)));
@@ -291,6 +374,174 @@ bool FARPGFluidRainTest::RunTest(const FString& Parameters)
 	// Literally the same operation with the sign flipped, which is the entire
 	// reason a body is a polygon rather than a grid or a heightfield.
 	TestTrue(TEXT("Rain grows the pool"), Pool->GetArea() > Initial);
+
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// Casting
+//
+// The other half of the system, and the half that was missing: everything above
+// grows, erodes, freezes or melts a body that ALREADY EXISTS, and until a cast
+// spell could put one there, a water spell landed on dry ground and left it dry.
+// ---------------------------------------------------------------------------
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFluidCastDepositTest,
+	"ARPG.World.Fluid.Casting.ASpellLeavesABodyOnTheGround",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGFluidCastDepositTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+	if (!Fluids)
+	{
+		AddError(TEXT("Setup: no fluid subsystem in the test world."));
+		return false;
+	}
+
+	MakeGround(Scope.World, 0.f);
+
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+	Fluids->Definitions = { MakeWater(GetTransientPackage(), Water) };
+
+	// Finishing at chest height, which is where a spell actually ends.
+	AARPGDischargeEffect* Bolt = MakeCastSpell(Scope.World, Water,
+		/*Origin=*/FVector(0, 0, 150), /*FinishedAt=*/FVector(400, 0, 150), /*Radius=*/120.f);
+
+	TestEqual(TEXT("Nothing pools while the spell is still in the air"),
+		Fluids->GetPools().Num(), 0);
+
+	Bolt->Destroy();
+
+	TestEqual(TEXT("Finishing leaves one body"), Fluids->GetPools().Num(), 1);
+
+	if (Fluids->GetPools().Num() != 1)
+	{
+		return false;
+	}
+
+	AARPGFluidPool* Pool = Fluids->GetPools()[0];
+
+	// ON THE GROUND, not at the height the spell died at. Without the probe the
+	// puddle forms at chest height and floats.
+	TestEqual(TEXT("At ground level"), Pool->GroundHeight, 0.f, 1.f);
+	TestTrue(TEXT("And under where the spell finished"),
+		Pool->ContainsPoint(FVector(400, 0, 0)));
+
+	// A DISC, because a projectile wet the ground where it landed rather than the
+	// whole line of its flight. See bDepositSwept.
+	TestFalse(TEXT("But not where it was cast from"),
+		Pool->ContainsPoint(FVector(0, 0, 0)));
+	TestFalse(TEXT("Nor anywhere along the way"),
+		Pool->ContainsPoint(FVector(200, 0, 0)));
+
+	// Two casts into the same spot are ONE puddle, by the same merge every other
+	// deposit goes through.
+	MakeCastSpell(Scope.World, Water, FVector(0, 0, 150), FVector(430, 0, 150), 120.f)->Destroy();
+	TestEqual(TEXT("A second cast nearby merges rather than stacking"),
+		Fluids->GetPools().Num(), 1);
+
+	// The knob is a radius and 0 is the default, so most spells leave nothing
+	// without anyone having to opt them out.
+	MakeCastSpell(Scope.World, Water, FVector(0, 0, 150), FVector(3000, 0, 150),
+		/*Radius=*/0.f)->Destroy();
+	TestEqual(TEXT("A spell with no deposit radius leaves nothing"),
+		Fluids->GetPools().Num(), 1);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFluidCastNoDefinitionTest,
+	"ARPG.World.Fluid.Casting.OnlyWhatPoolsLeavesAnything",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGFluidCastNoDefinitionTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	MakeGround(Scope.World, 0.f);
+
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+	UARPGMagicElement* Fire = MakeElement(GetTransientPackage(), TAG_Element_Fire);
+
+	Fluids->Definitions = { MakeWater(GetTransientPackage(), Water) };
+
+	// NOTHING IN C++ KNOWS THAT WATER POOLS AND FIRE DOES NOT. The fire orb is
+	// configured to deposit exactly as the water one is, and the only difference
+	// is that no fluid definition describes fire -- so there is nothing for it to
+	// leave. That is what keeps the branch out of the discharge effect and the
+	// list of wet elements out of the codebase entirely.
+	MakeCastSpell(Scope.World, Fire, FVector(0, 0, 150), FVector(0, 0, 150), 120.f)->Destroy();
+	TestEqual(TEXT("An element with no fluid definition leaves nothing"),
+		Fluids->GetPools().Num(), 0);
+
+	MakeCastSpell(Scope.World, Water, FVector(0, 0, 150), FVector(0, 0, 150), 120.f)->Destroy();
+	TestEqual(TEXT("And the same spell of an element that pools does"),
+		Fluids->GetPools().Num(), 1);
+
+	// Expired high above the floor: past MaxDepositDrop it wet nothing, which is
+	// an outcome and not a failure.
+	MakeCastSpell(Scope.World, Water, FVector(0, 0, 150),
+		FVector(2000, 0, Fluids->MaxDepositDrop + 500.f), 120.f)->Destroy();
+	TestEqual(TEXT("A spell that expired far above the ground leaves nothing"),
+		Fluids->GetPools().Num(), 1);
+
+	// And out past the floor entirely, where the probe finds no ground at all.
+	MakeCastSpell(Scope.World, Water, FVector(0, 0, 150), FVector(50000, 0, 150), 120.f)->Destroy();
+	TestEqual(TEXT("Nor does one that finished over a drop"), Fluids->GetPools().Num(), 1);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFluidCastSweptTest,
+	"ARPG.World.Fluid.Casting.AnElongatedSpellLeavesASweptFootprint",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGFluidCastSweptTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	MakeGround(Scope.World, 0.f);
+
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+	Fluids->Definitions = { MakeWater(GetTransientPackage(), Water) };
+
+	// A JET, whose body is elongated at any one instant -- so the stadium from
+	// where it was cast to where it ends is its honest footprint, which a
+	// projectile's line of flight is not.
+	AARPGDischargeEffect* Jet = MakeCastSpell(Scope.World, Water,
+		/*Origin=*/FVector(0, 0, 150), /*FinishedAt=*/FVector(600, 0, 150),
+		/*Radius=*/100.f, /*bSwept=*/true);
+
+	Jet->Destroy();
+
+	TestEqual(TEXT("A jet leaves one body"), Fluids->GetPools().Num(), 1);
+
+	if (Fluids->GetPools().Num() != 1)
+	{
+		return false;
+	}
+
+	AARPGFluidPool* Pool = Fluids->GetPools()[0];
+
+	TestTrue(TEXT("Covering where it was cast"), Pool->ContainsPoint(FVector(0, 0, 0)));
+	TestTrue(TEXT("And the whole way along"), Pool->ContainsPoint(FVector(300, 0, 0)));
+	TestTrue(TEXT("And where it ended"), Pool->ContainsPoint(FVector(600, 0, 0)));
+	TestFalse(TEXT("But not off to the side"), Pool->ContainsPoint(FVector(300, 600, 0)));
+
+	// Larger than the disc the same spell would have left unswept, which is the
+	// only reason the flag exists.
+	TestTrue(TEXT("A swept footprint is bigger than a disc of the same radius"),
+		Pool->GetArea() > PI * 100.0 * 100.0);
 
 	return true;
 }

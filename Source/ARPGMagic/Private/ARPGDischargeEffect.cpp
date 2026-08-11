@@ -8,6 +8,8 @@
 #include "GameplayEffect.h"
 #include "TimerManager.h"
 
+FARPGOnDischargeLanded AARPGDischargeEffect::OnDischargeLanded;
+
 AARPGDischargeEffect::AARPGDischargeEffect()
 {
 	PrimaryActorTick.bCanEverTick = false;
@@ -87,4 +89,21 @@ void AARPGDischargeEffect::BeginPlay()
 	{
 		SetLifeSpan(Lifetime);
 	}
+}
+
+void AARPGDischargeEffect::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	// DESTROYED specifically, which is the spell FINISHING: its Blueprint killed
+	// it on impact, or its lifespan ran out. Every other reason is the world going
+	// away underneath it -- a level transition, PIE ending -- and leaving a puddle
+	// behind on the way out is exactly what the reason enum exists to prevent.
+	//
+	// Broadcast before Super, which is where the components end and the actor
+	// stops being able to answer where it is.
+	if (EndPlayReason == EEndPlayReason::Destroyed && DepositRadius > 0.f)
+	{
+		OnDischargeLanded.Broadcast(this);
+	}
+
+	Super::EndPlay(EndPlayReason);
 }

@@ -7,6 +7,7 @@
 #include "Subsystems/WorldSubsystem.h"
 #include "ARPGFluidSurfaceSubsystem.generated.h"
 
+class AARPGDischargeEffect;
 class AARPGFluidPool;
 class AARPGFluidSolid;
 class UARPGElementalVolumeComponent;
@@ -47,6 +48,7 @@ class ARPGWORLD_API UARPGFluidSurfaceSubsystem : public UTickableWorldSubsystem
 
 public:
 	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
+	virtual void Deinitialize() override;
 	virtual bool DoesSupportWorldType(const EWorldType::Type WorldType) const override;
 	virtual void Tick(float DeltaTime) override;
 	virtual TStatId GetStatId() const override;
@@ -92,6 +94,18 @@ public:
 	/** The capsule footprint of an elongated spell, rather than a disc. */
 	UFUNCTION(BlueprintCallable, Category = "ARPG|Fluid")
 	AARPGFluidPool* DepositSwept(FVector From, FVector To, float Radius, FGameplayTag ElementTag);
+
+	/**
+	 * How far below a finished spell this will look for ground to wet.
+	 *
+	 * A BODY LIES ON THE GROUND, and a spell finishes at chest height or in the
+	 * air, so where it died is never where its puddle goes. Past this the spell
+	 * expired over a drop or high overhead and wet nothing -- which is a real
+	 * outcome and not a failure.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Fluid",
+		meta = (ClampMin = "0.0"))
+	float MaxDepositDrop = 1000.f;
 
 	// --- Solidifying ----------------------------------------------------------
 
@@ -142,6 +156,21 @@ private:
 	AARPGFluidPool* DepositRing(const TArray<FVector2D>& Footprint, float GroundHeight,
 		UARPGFluidDefinition* Definition);
 
+	/**
+	 * A cast spell leaving its element on the ground. THE ONLY THING THAT PUTS A
+	 * PUDDLE IN THE WORLD from gameplay -- everything else here grows, erodes,
+	 * freezes or melts one that already exists.
+	 */
+	void HandleDischargeLanded(AARPGDischargeEffect* Effect);
+
+	/**
+	 * Drops a world position onto the ground beneath it. False when there is none.
+	 *
+	 * @param Ignore the spell itself, which is still in the world at the moment it
+	 *        finishes and whose own collider would otherwise be what it lands on.
+	 */
+	bool TraceToGround(FVector From, const AActor* Ignore, FVector& OutGround) const;
+
 	void TickWeather(float DeltaTime);
 
 	/** True where this machine owns the simulation; pools are server-spawned. */
@@ -152,6 +181,11 @@ private:
 
 	UPROPERTY(Transient)
 	TArray<AARPGFluidSolid*> ActiveSolids;
+
+	FDelegateHandle DischargeLandedHandle;
+
+	/** So "nothing is configured to pool" is said once rather than every cast. */
+	mutable bool bWarnedNoDefinitions = false;
 
 	float TickAccumulator = 0.f;
 };

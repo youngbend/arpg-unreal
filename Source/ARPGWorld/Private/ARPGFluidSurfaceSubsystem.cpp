@@ -1,6 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ARPGFluidSurfaceSubsystem.h"
+#include "ARPGDischargeContext.h"
+#include "ARPGDischargeEffect.h"
 #include "ARPGElementalVolumeComponent.h"
 #include "ARPGFluidBody.h"
 #include "ARPGFluidDefinition.h"
@@ -10,6 +12,20 @@
 #include "ARPGWorld.h"
 #include "ARPGWorldSettings.h"
 #include "Engine/World.h"
+
+namespace
+{
+	/**
+	 * How far ABOVE a finished spell the ground probe starts.
+	 *
+	 * A spell that ended a little inside the floor -- a projectile destroyed one
+	 * frame after it began penetrating -- traces from inside the geometry, and a
+	 * line trace starting inside a body does not report its surface. Lifting the
+	 * start clear costs nothing and is the difference between that spell wetting
+	 * the ground and wetting nothing.
+	 */
+	constexpr float GroundProbeLift = 100.f;
+}
 
 void UARPGFluidSurfaceSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -38,10 +54,36 @@ void UARPGFluidSurfaceSubsystem::Initialize(FSubsystemCollectionBase& Collection
 		}
 	}
 
+	if (Solids.Num() == 0)
+	{
+		for (const TSoftObjectPtr<UARPGSolidDefinition>& Soft : Settings.SolidDefinitions)
+		{
+			if (UARPGSolidDefinition* Definition = Soft.LoadSynchronous())
+			{
+				Solids.Add(Definition);
+			}
+			else if (!Soft.IsNull())
+			{
+				UE_LOG(LogARPGWorld, Warning,
+					TEXT("Solid definition '%s' from project settings failed to load."),
+					*Soft.ToString());
+			}
+		}
+	}
+
 	if (!CombinationTable)
 	{
 		CombinationTable = Settings.CombinationTable.LoadSynchronous();
 	}
+
+	DischargeLandedHandle = AARPGDischargeEffect::OnDischargeLanded.AddUObject(
+		this, &UARPGFluidSurfaceSubsystem::HandleDischargeLanded);
+}
+
+void UARPGFluidSurfaceSubsystem::Deinitialize()
+{
+	AARPGDischargeEffect::OnDischargeLanded.Remove(DischargeLandedHandle);
+	Super::Deinitialize();
 }
 
 bool UARPGFluidSurfaceSubsystem::DoesSupportWorldType(const EWorldType::Type WorldType) const
@@ -72,6 +114,27 @@ UARPGFluidDefinition* UARPGFluidSurfaceSubsystem::FindDefinition(FGameplayTag El
 			return Definition;
 		}
 	}
+
+	// LOUDLY, and once. An element with no fluid definition is ordinary -- fire
+	// does not pool, and that is why Deposit's own miss is only Verbose. NOTHING
+	// having one is a configuration mistake with no other symptom whatsoever:
+	// spells cast, spells land, and the ground silently stays dry, which is
+	// exactly the state this project was in until its fluid settings were filled.
+	//
+	// Raised on the first deposit ASKED FOR rather than at startup, so a world
+	// that never wanted a puddle -- and every test fixture that brings its own
+	// definitions -- stays quiet.
+	if (Definitions.Num() == 0 && !bWarnedNoDefinitions)
+	{
+		bWarnedNoDefinitions = true;
+
+		UE_LOG(LogARPGWorld, Warning,
+			TEXT("Something tried to deposit '%s' and NOTHING is configured to pool: no spell "
+			     "will ever leave a body on the ground and nothing can be frozen. Fill in "
+			     "Project Settings > Game > ARPG World > Fluids."),
+			*ElementTag.ToString());
+	}
+
 	return nullptr;
 }
 
@@ -97,6 +160,13 @@ AARPGFluidPool* UARPGFluidSurfaceSubsystem::Deposit(FVector WorldPosition, float
 	UARPGFluidDefinition* Definition = FindDefinition(ElementTag);
 	if (!Definition)
 	{
+		// VERBOSE, not a warning. "This element does not pool" is the ordinary
+		// answer for most of them -- fire, air, lightning -- and it is the answer
+		// that keeps the branch out of the caller. The misconfiguration worth
+		// shouting about is having NO definitions at all, which FindDefinition
+		// covers.
+		UE_LOG(LogARPGWorld, Verbose, TEXT("Nothing pools '%s'; deposited nothing."),
+			*ElementTag.ToString());
 		return nullptr;
 	}
 
@@ -112,6 +182,8 @@ AARPGFluidPool* UARPGFluidSurfaceSubsystem::DepositSwept(FVector From, FVector T
 	UARPGFluidDefinition* Definition = FindDefinition(ElementTag);
 	if (!Definition)
 	{
+		UE_LOG(LogARPGWorld, Verbose, TEXT("Nothing pools '%s'; deposited nothing."),
+			*ElementTag.ToString());
 		return nullptr;
 	}
 
@@ -157,6 +229,20 @@ AARPGFluidPool* UARPGFluidSurfaceSubsystem::DepositRing(const TArray<FVector2D>&
 		return Pool;
 	}
 
+	// TOO LITTLE TO BE A BODY. Nothing merged it, so this would be a new pool
+	// already under the floor at which weather destroys it -- spawned, replicated
+	// and gone within a tick.
+	//
+	// Checked HERE and not in the merge above, because being too small to be a
+	// puddle of your own does not stop you adding to one: a light cast into
+	// standing water still enlarges it, and the last of a melting floe still
+	// returns its water to the pool it froze out of. What is refused is only the
+	// body that would have nothing to belong to.
+	if (ARPGFluidGeometry::PolygonArea(Footprint) < Definition->MinimumArea)
+	{
+		return nullptr;
+	}
+
 	FActorSpawnParameters Params;
 	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
@@ -173,6 +259,93 @@ AARPGFluidPool* UARPGFluidSurfaceSubsystem::DepositRing(const TArray<FVector2D>&
 	Pools.Add(Pool);
 
 	return Pool;
+}
+
+bool UARPGFluidSurfaceSubsystem::TraceToGround(FVector From, const AActor* Ignore,
+	FVector& OutGround) const
+{
+	const UWorld* World = GetWorld();
+	if (!World)
+	{
+		return false;
+	}
+
+	const FVector Start = From + FVector(0.f, 0.f, GroundProbeLift);
+	const FVector End = From - FVector(0.f, 0.f, MaxDepositDrop);
+
+	// VISIBILITY rather than WorldStatic, because it is the channel a designer can
+	// opt a mesh OUT of. Dressing that a puddle should form under rather than on
+	// top of -- grass, debris, a fallen banner -- already ignores it.
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(ARPGFluidDeposit), /*bTraceComplex=*/false);
+
+	// The spell is still in the world at the moment it finishes, so without this a
+	// projectile with a collider lands on ITSELF and the puddle forms in mid-air.
+	Params.AddIgnoredActor(Ignore);
+
+	FHitResult Hit;
+	if (!World->LineTraceSingleByChannel(Hit, Start, End, ECC_Visibility, Params))
+	{
+		return false;
+	}
+
+	OutGround = Hit.ImpactPoint;
+	return true;
+}
+
+void UARPGFluidSurfaceSubsystem::HandleDischargeLanded(AARPGDischargeEffect* Effect)
+{
+	// OnDischargeLanded is process-wide, so a PIE session running a server and a
+	// client world would otherwise each deposit the other's puddles. Same rule as
+	// OnVolumesMet, and for the same reason.
+	if (!Effect || Effect->GetWorld() != GetWorld())
+	{
+		return;
+	}
+
+	// Pools are replicated actors the server owns -- see HasAuthority. The effect
+	// replicates down, so this fires on clients too, and a client depositing its
+	// own copy would leave every puddle in the level doubled.
+	if (!HasAuthority())
+	{
+		return;
+	}
+
+	const FARPGDischargeContext& Context = Effect->GetDischargeContext();
+	if (!Context.PrimaryElement || Effect->DepositRadius <= 0.f)
+	{
+		return;
+	}
+
+	const FGameplayTag ElementTag = Context.PrimaryElement->ElementTag;
+
+	// Asked BEFORE tracing, so the overwhelmingly common case -- a fire spell,
+	// which pools nothing -- costs a lookup rather than a line trace.
+	if (!FindDefinition(ElementTag))
+	{
+		return;
+	}
+
+	FVector Landed;
+	if (!TraceToGround(Effect->GetActorLocation(), Effect, Landed))
+	{
+		// Expired over a drop or too high above the floor. It wet nothing, which
+		// is an outcome and not a failure.
+		return;
+	}
+
+	// A jet's footprint runs from where it was cast to where it ended; a
+	// projectile's is a disc where it landed. See bDepositSwept. A jet cast from
+	// somewhere with no ground beneath it -- off a ledge, over a stairwell -- falls
+	// back to the disc rather than depositing nothing, since the far end plainly
+	// finished somewhere real.
+	FVector CastFrom;
+	if (Effect->bDepositSwept && TraceToGround(Context.Origin, Effect, CastFrom))
+	{
+		DepositSwept(CastFrom, Landed, Effect->DepositRadius, ElementTag);
+		return;
+	}
+
+	Deposit(Landed, Effect->DepositRadius, ElementTag);
 }
 
 // ---------------------------------------------------------------------------

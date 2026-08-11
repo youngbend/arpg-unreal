@@ -120,6 +120,14 @@ void AARPGPlaceholderDischarge::InitializeFromContext(const FARPGDischargeContex
 	// which is the only reason it exists.
 	Hitbox->TraceRadius = Radius;
 
+	// And the same number again for what it leaves on the ground, so an element
+	// that pools wets exactly the ground the spell covered. A burst sweeps because
+	// its volume genuinely does travel forward; an emanation and a cloak are
+	// centred, so they wet where they stood. Elements that pool nothing -- fire,
+	// air -- deposit nothing from this, with no branch here.
+	DepositRadius = Radius;
+	bDepositSwept = Shape.bSwept;
+
 	// Written before FinishSpawning, so the base class's BeginPlay picks them up
 	// -- this is the window the deferred spawn exists for.
 	if (Shape.bHeld)
@@ -209,6 +217,12 @@ void AARPGPlaceholderProjectile::InitializeFromContext(const FARPGDischargeConte
 
 	Radius = FMath::Lerp(MinRadius, MaxRadius, Power);
 	Hitbox->TraceRadius = Radius;
+
+	// A thrown volume of liquid SPREADS where it lands rather than staying its own
+	// width, which is the difference between a bolt leaving a puddle and a bolt
+	// leaving a wet coin too small for the fluid system to keep. Not swept: what a
+	// projectile wet is where it landed, not its line of flight.
+	DepositRadius = Radius * DepositSpread;
 
 	// The hitbox stays armed for the whole flight and stops on the first
 	// contact, which is what a projectile is: one hit, wherever it lands.
