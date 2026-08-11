@@ -214,6 +214,9 @@ FLUIDS = [
         # merging late leaves a pair of bodies that each apply their own ambient
         # wetting and each react to the next spell.
         "merge_distance": 120.0,
+        # Water, and the number every solid's own density is compared against to
+        # decide whether it floats. Nothing in the code names either substance.
+        "density": 0.001,
         "surface": "M_ARPG_Water_Placeholder",
     },
 ]
@@ -279,6 +282,7 @@ def main():
         fluid.set_editor_property("rain_growth_rate", spec["rain_growth_rate"])
         fluid.set_editor_property("evaporation_rate", spec["evaporation_rate"])
         fluid.set_editor_property("merge_distance", spec["merge_distance"])
+        fluid.set_editor_property("density", spec["density"])
         fluid.set_editor_property("surface_material", surfaces[spec["surface"]])
 
         save(fluid, "{}/{}".format(FLUID_DIR, spec["name"]))

@@ -50,7 +50,19 @@ public:
 	virtual float GetSurfaceEnergyDensity() const override { return 0.f; }
 	virtual bool IsSurfaceAt(const FVector2D& At) const override { return IsWaterAt(At); }
 	virtual FVector2D GetSurfaceFlowAt(const FVector2D& At) const override { return FlowVelocity; }
+	virtual float GetSurfaceDensity() const override { return Density; }
+	virtual float GetSurfaceBedAt(const FVector2D& At) const override;
 	//~ End IARPGElementalSurface
+
+	/**
+	 * Mass per unit volume, in kg per cubic centimetre. Water is 0.001.
+	 *
+	 * What anything frozen out of this floats on. A moat of water and a channel of
+	 * lava differ here and nowhere else.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Reservoir",
+		meta = (ClampMin = "0.0001"))
+	float Density = 0.001f;
 
 	/**
 	 * An authored current, in cm/s. Zero for standing water.

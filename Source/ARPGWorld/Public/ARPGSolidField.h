@@ -3,7 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "ARPGIceField.generated.h"
+#include "ARPGSolidField.generated.h"
 
 /**
  * A slab of ice as a HEIGHTFIELD rather than an outline with a thickness.
@@ -43,7 +43,7 @@
  * records rather than a special case someone has to write.
  */
 USTRUCT(BlueprintType)
-struct ARPGWORLD_API FARPGIceField
+struct ARPGWORLD_API FARPGSolidField
 {
 	GENERATED_BODY()
 

@@ -1183,6 +1183,24 @@ Dirty-region updates are the obvious next economy.
 pathology -- forty melt ticks with holes opening -- and asserts the mesh never
 grows.
 
+**AND NONE OF IT IS ABOUT ICE.** `FARPGSolidField` rather than an ice field: the
+same slab model serves anything frozen, crusted or congealed out of a fluid, and
+which of them behaves how is data.
+
+- **Whether a slab floats is two densities compared**, one on the fluid
+  definition and one on the solid. Ice on water floats; a crust denser than the
+  lava it formed on does not, and a slab that does not float RESTS ON THE BED
+  rather than sitting awash -- one branch on the same Archimedes, reached through
+  `GetSurfaceBedAt` rather than anything knowing what it is standing in.
+- **Permanence is two independent questions, now stated as such.** `MeltRate` is
+  "does time take it" and `EnergyPerArea` is "can a reaction take it". Obsidian
+  answers no to both; ice answers yes to both; a ward could sit unchanged forever
+  and still be broken by a big enough spell. They were already separate fields
+  and one of them was undocumented, which is how a permanent crust would have
+  been quietly edible by fire.
+
+1 new case under `ARPG.World.Fluid.Floating`.
+
 **Phase 11 -- code complete. Not in the original ten: this is the layer that
 makes the other ten reachable from a controller.** The modal control scheme, the
 speed tiers, the buffering, and auto-sheathe. 13 new cases; 99 pass in total.

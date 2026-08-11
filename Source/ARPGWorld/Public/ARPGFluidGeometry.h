@@ -3,7 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "ARPGIceField.h"
+#include "ARPGSolidField.h"
 
 class UDynamicMeshComponent;
 
@@ -159,5 +159,5 @@ namespace ARPGFluidGeometry
 	 * Emitted in the component's LOCAL space; the field's own heights already are.
 	 */
 	ARPGWORLD_API void BuildFieldMesh(UDynamicMeshComponent* Component,
-		const FARPGIceField& Field, const FVector2D& Origin);
+		const FARPGSolidField& Field, const FVector2D& Origin);
 }

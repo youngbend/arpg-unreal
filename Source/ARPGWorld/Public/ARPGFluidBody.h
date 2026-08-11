@@ -6,7 +6,7 @@
 #include "GameFramework/Actor.h"
 #include "ARPGElementalReactive.h"
 #include "ARPGElementalSurface.h"
-#include "ARPGIceField.h"
+#include "ARPGSolidField.h"
 #include "ARPGFluidBody.generated.h"
 
 class UARPGElementalVolumeComponent;
@@ -48,6 +48,8 @@ public:
 	virtual float GetSurfaceEnergyDensity() const override { return 0.f; }
 	virtual bool IsSurfaceAt(const FVector2D& At) const override;
 	virtual FVector2D GetSurfaceFlowAt(const FVector2D& At) const override { return FVector2D::ZeroVector; }
+	virtual float GetSurfaceDensity() const override { return 0.f; }
+	virtual float GetSurfaceBedAt(const FVector2D& At) const override { return GroundHeight; }
 	//~ End IARPGElementalSurface
 
 	/**
@@ -217,6 +219,7 @@ public:
 	/** A lake is bottomless, so freezing and boiling both take nothing from it. */
 	virtual bool ConsumeSurfaceArea(double Area) override;
 	virtual float GetSurfaceEnergyDensity() const override;
+	virtual float GetSurfaceDensity() const override;
 
 	/** Configures the pool. Called by the subsystem; nothing else builds one. */
 	void Setup(UARPGFluidDefinition* InDefinition, const TArray<FVector2D>& InRing,
@@ -271,6 +274,14 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "ARPG|Fluid")
 	bool bAnchored = false;
 
+	/**
+	 * Too heavy for what it formed on, so it is resting on the bed rather than
+	 * riding. Not a failure -- a crust denser than its own fluid sinks, and the
+	 * same equation says so.
+	 */
+	UPROPERTY(BlueprintReadOnly, Category = "ARPG|Fluid")
+	bool bAground = false;
+
 	/** How deep it is riding, in cm below the waterline. Replicated as the result. */
 	UPROPERTY(Replicated, BlueprintReadOnly, Category = "ARPG|Fluid")
 	float Draft = 0.f;
@@ -290,7 +301,7 @@ public:
 	void UpdateAnchoring();
 
 	/**
-	 * WHAT THE SLAB ACTUALLY IS. See FARPGIceField.
+	 * WHAT THE SLAB ACTUALLY IS. See FARPGSolidField.
 	 *
 	 * The outline it froze with was only the seed; from then on the ice is a
 	 * heightfield, because everything interesting that happens to a floe happens
@@ -299,7 +310,7 @@ public:
 	 * a hole where the top met the bottom.
 	 */
 	UPROPERTY(ReplicatedUsing = OnRep_Body, BlueprintReadOnly, Category = "ARPG|Fluid")
-	FARPGIceField Field;
+	FARPGSolidField Field;
 
 	/**
 	 * Melts a bowl into the slab at a world point, deepest at the centre.

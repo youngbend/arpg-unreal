@@ -56,6 +56,18 @@ public:
 		meta = (ClampMin = "0.0"))
 	float ReservoirArea = 200000.f;
 
+	/**
+	 * Mass per unit volume, in kg per cubic centimetre. Water is 0.001.
+	 *
+	 * What anything frozen out of this floats ON, so it is half of the answer to
+	 * whether a slab rides or sinks -- the other half being the solid's own. Lava
+	 * is heavy, and a crust of obsidian floating on it is a different sum from ice
+	 * on water even though the code doing it is the same.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Body",
+		meta = (ClampMin = "0.0001"))
+	float Density = 0.001f;
+
 	/** How much energy the body's volume carries per unit of area. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Body",
 		meta = (ClampMin = "0.0"))
@@ -140,7 +152,17 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Body")
 	bool bStandable = true;
 
-	/** Inward offset per second as it melts. 0 means it is permanent. */
+	/**
+	 * How fast time alone takes this, in cm of thickness per second. 0 is
+	 * permanent -- obsidian is rock, not frozen lava.
+	 *
+	 * ONE OF TWO INDEPENDENT QUESTIONS, and they are worth keeping apart. This one
+	 * is "does the world wear it away". The other is "can something MELT it", which
+	 * is EnergyPerArea: a slab with no energy density is not a body a reaction can
+	 * eat, however much fire is thrown at it. Obsidian answers no to both; ice
+	 * answers yes to both; a magical ward might sit still forever and still be
+	 * broken by a big enough spell.
+	 */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Melting",
 		meta = (ClampMin = "0.0"))
 	float MeltRate = 0.5f;
@@ -171,6 +193,9 @@ public:
 	 * Higher than water's on purpose: ice takes more energy to shift per unit of
 	 * ground than the same ground of open water, so one fireball opens a hole
 	 * rather than clearing the floe.
+	 *
+	 * ZERO MEANS NOTHING CAN MELT IT. That is the setting for permanent rock, and
+	 * it is a separate question from MeltRate -- see that field.
 	 */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Body",
 		meta = (ClampMin = "0.0"))
@@ -215,9 +240,14 @@ public:
 	/**
 	 * Mass per unit volume, in kg per cubic centimetre. Water is 0.001.
 	 *
-	 * Below water's, or it does not float. DELIBERATELY LIGHTER THAN REAL ICE
-	 * (0.00092): the physical value leaves a 30cm slab riding with 2cm proud,
-	 * which is a surface awash rather than one you would choose to stand on.
+	 * Below the density of what it formed on, or it does not float -- and a slab
+	 * that does not float RESTS ON THE BED rather than sitting awash, which is one
+	 * branch on the same equation and is how a crust denser than its own fluid
+	 * behaves without anything being special-cased for it.
+	 *
+	 * DELIBERATELY LIGHTER THAN REAL ICE (0.00092): the physical value leaves a
+	 * 30cm slab riding with 2cm proud, which is a surface awash rather than one
+	 * you would choose to stand on.
 	 */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Floating",
 		meta = (ClampMin = "0.0"))

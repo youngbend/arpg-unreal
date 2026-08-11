@@ -4,7 +4,7 @@
 #include "ARPGElementalVolumeComponent.h"
 #include "ARPGFluidDefinition.h"
 #include "ARPGFluidGeometry.h"
-#include "ARPGIceField.h"
+#include "ARPGSolidField.h"
 #include "ARPGFluidSurfaceSubsystem.h"
 #include "ARPGMagicElement.h"
 #include "Components/BoxComponent.h"
@@ -307,6 +307,11 @@ float AARPGFluidPool::GetSurfaceEnergyDensity() const
 	return Definition ? Definition->EnergyPerArea : 0.f;
 }
 
+float AARPGFluidPool::GetSurfaceDensity() const
+{
+	return Definition ? Definition->Density : 0.f;
+}
+
 double AARPGFluidPool::GetMinimumArea() const
 {
 	return Definition ? Definition->MinimumArea : 0.0;
@@ -417,7 +422,7 @@ void AARPGFluidSolid::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutL
 	// can fall through, so a client that meshed and collided the slab without it
 	// would let a player stand on air over the melted-out middle.
 	// THE FIELD, which is the slab. Millimetre integers rather than floats for
-	// exactly this reason -- see FARPGIceField -- and even so it is the heaviest
+	// exactly this reason -- see FARPGSolidField -- and even so it is the heaviest
 	// thing this system puts on the wire, so a floe replicates at a modest rate
 	// and dirty-region updates are the obvious next economy.
 	DOREPLIFETIME(AARPGFluidSolid, Field);
@@ -427,7 +432,7 @@ void AARPGFluidSolid::RebuildFromRing()
 {
 	if (!Definition || !Field.IsValidField() || Field.IcedCellCount() == 0)
 	{
-		ARPGFluidGeometry::BuildFieldMesh(Surface, FARPGIceField(), FVector2D::ZeroVector);
+		ARPGFluidGeometry::BuildFieldMesh(Surface, FARPGSolidField(), FVector2D::ZeroVector);
 		Surface->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 		return;
 	}
@@ -539,44 +544,41 @@ int32 AARPGFluidSolid::CountOccupants() const
 
 float AARPGFluidSolid::ComputeTargetDraft() const
 {
-	if (!Definition)
+	if (!Definition || !FloatsOn)
 	{
 		return 0.f;
 	}
 
-	// Water, in kg per cubic centimetre. Not a knob: it is the thing every other
-	// density in the system is relative to.
-	static constexpr float WaterDensity = 0.001f;
+	// THE FLUID'S OWN DENSITY, asked rather than assumed. Nothing here names water
+	// or ice: a crust on lava and a floe on a pond are the same two numbers
+	// compared, and which of them floats is data.
+	const float FluidDensity = FloatsOn->GetSurfaceDensity();
 
 	const double Area = Field.IcedArea();
-	if (Area <= 0.0)
+	if (Area <= 0.0 || FluidDensity <= 0.f)
 	{
 		return 0.f;
 	}
 
 	// ARCHIMEDES. A floating body displaces its own weight, so the depth it rides
-	// at is mass over the water it has to push aside:
+	// at is mass over the fluid it has to push aside:
 	//
-	//     Draft = (SlabMass + LoadMass) / (WaterDensity * Area)
+	//     Draft = (SlabMass + LoadMass) / (FluidDensity * Area)
 	//
-	// The slab's own term reduces to Thickness * Density / WaterDensity, with the
-	// area cancelling -- which is why a big floe and a small one of the same
-	// thickness ride at the same depth, and correctly so. The load's term does NOT
-	// cancel, so a wider floe takes a person's weight better. Both fall out of the
-	// equation rather than being arranged.
-	// FROM THE FIELD'S REAL VOLUME, so a floe a fireball has thinned rides higher
-	// than one it has not -- which the old uniform Thickness could not express.
-	// Volume over area is the average thickness, so this is still the same
-	// equation, now told the truth about the slab.
-	const float SlabDraft = static_cast<float>(Field.IceVolume() / Area)
-		* (Definition->Density / WaterDensity);
+	// The slab's own term reduces to AverageThickness * Density / FluidDensity,
+	// with the area cancelling -- which is why a big slab and a small one of the
+	// same stuff ride at the same depth, and correctly so. The load's term does
+	// NOT cancel, so a wider slab takes a person's weight better. Both fall out of
+	// the equation rather than being arranged.
+	const float AverageThickness = static_cast<float>(Field.IceVolume() / Area);
+	const float SlabDraft = AverageThickness * (Definition->Density / FluidDensity);
 
 	const float LoadMass = OccupantCount * Definition->OccupantMass * Definition->LoadResponse;
-	const float LoadDraft = LoadMass / (WaterDensity * static_cast<float>(Area));
+	const float LoadDraft = LoadMass / (FluidDensity * static_cast<float>(Area));
 
-	// Never further than under. Past this the slab is swamped, and letting it
-	// keep sinking would drag whoever is standing on it through the floor.
-	return FMath::Min(SlabDraft + LoadDraft, Definition->Thickness);
+	// Never further than under. Past this the slab is swamped, and letting it keep
+	// sinking would drag whoever is standing on it through the floor.
+	return FMath::Min(SlabDraft + LoadDraft, AverageThickness);
 }
 
 bool AARPGFluidSolid::HasRoomToward(const FVector2D& Direction) const
@@ -647,12 +649,29 @@ void AARPGFluidSolid::Tick(float DeltaTime)
 
 	OccupantCount = CountOccupants();
 
+	// TOO HEAVY TO FLOAT IS NOT A FAILURE. A slab denser than the fluid it formed
+	// out of sinks and comes to rest on the bed, which is one comparison on the
+	// same equation -- and it is why nothing in here is named for ice or water. A
+	// crust of obsidian on lava settles by exactly this line.
+	bAground = Definition->Density >= FloatsOn->GetSurfaceDensity();
+
+	const float TargetDraft = bAground
+		? GroundHeight - FloatsOn->GetSurfaceBedAt(Centre)
+		: ComputeTargetDraft();
+
 	// SETTLE toward it rather than snapping. A step change would teleport anyone
-	// standing on the slab, and the lag is most of what makes the ice feel like it
-	// gives under a footfall rather than being a lift.
-	Draft = FMath::FInterpTo(Draft, ComputeTargetDraft(), DeltaTime, Definition->SettleSpeed);
+	// standing on the slab, and the lag is most of what makes a surface feel like
+	// it gives under a footfall rather than being a lift.
+	Draft = FMath::FInterpTo(Draft, TargetDraft, DeltaTime, Definition->SettleSpeed);
 
 	SetActorLocation(FVector(Centre.X, Centre.Y, GroundHeight - Draft));
+
+	if (bAground)
+	{
+		// Sitting on the bottom. The current has nothing to lift it with.
+		Surface->ComponentVelocity = FVector::ZeroVector;
+		return;
+	}
 
 	if (bAnchored)
 	{

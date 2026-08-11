@@ -104,6 +104,19 @@ TArray<FVector2D> UARPGReservoirVolumeComponent::GetSurfaceFootprint(const FVect
 	return Footprint;
 }
 
+float UARPGReservoirVolumeComponent::GetSurfaceBedAt(const FVector2D& At) const
+{
+	// The floor of the channel, which for a box is simply its underside. A slab
+	// too heavy to float comes to rest here.
+	if (!OverlapSource)
+	{
+		return 0.f;
+	}
+
+	const FBoxSphereBounds ShapeBounds = OverlapSource->Bounds;
+	return static_cast<float>(ShapeBounds.Origin.Z - ShapeBounds.BoxExtent.Z);
+}
+
 float UARPGReservoirVolumeComponent::GetSurfaceLevelAt(const FVector2D& At) const
 {
 	return GetSurfaceHeightAt(FVector(At.X, At.Y, 0.f));

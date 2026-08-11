@@ -13,7 +13,7 @@
 #include "ARPGFluidBody.h"
 #include "ARPGFluidDefinition.h"
 #include "ARPGFluidGeometry.h"
-#include "ARPGIceField.h"
+#include "ARPGSolidField.h"
 #include "ARPGFluidSurfaceSubsystem.h"
 #include "ARPGGameplayTags.h"
 #include "ARPGMagicCombinationTable.h"
@@ -651,20 +651,20 @@ bool FARPGFluidMeltTest::RunTest(const FString& Parameters)
 // ---------------------------------------------------------------------------
 // The slab as a solid
 //
-// A floe is a HEIGHTFIELD, not an outline with a thickness -- see FARPGIceField.
+// A floe is a HEIGHTFIELD, not an outline with a thickness -- see FARPGSolidField.
 // Everything interesting that happens to ice happens in the third dimension: a
 // bowl melted at an angle into one edge, a step where new ice formed at the
 // waterline a load had pushed the surface down to, a hole where the two faces
 // met. None of it can be said with a polygon.
 // ---------------------------------------------------------------------------
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGIceFieldMeltTest,
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGSolidFieldMeltTest,
 	"ARPG.World.Fluid.Ice.FireMeltsABowlAndBreaksThrough",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FARPGIceFieldMeltTest::RunTest(const FString& Parameters)
+bool FARPGSolidFieldMeltTest::RunTest(const FString& Parameters)
 {
-	FARPGIceField Field;
+	FARPGSolidField Field;
 	Field.BuildFrom(ARPGFluidGeometry::MakeCircle(FVector2D::ZeroVector, 300.0),
 		/*CellSize=*/20.f, /*Thickness=*/30.f);
 
@@ -714,15 +714,15 @@ bool FARPGIceFieldMeltTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGIceFieldRefreezeTest,
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGSolidFieldRefreezeTest,
 	"ARPG.World.Fluid.Ice.RefreezingLeavesAStepWhereTheIceWasLow",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FARPGIceFieldRefreezeTest::RunTest(const FString& Parameters)
+bool FARPGSolidFieldRefreezeTest::RunTest(const FString& Parameters)
 {
 	const TArray<FVector2D> Whole = ARPGFluidGeometry::MakeCircle(FVector2D::ZeroVector, 300.0);
 
-	FARPGIceField Field;
+	FARPGSolidField Field;
 	Field.BuildFrom(Whole, /*CellSize=*/20.f, /*Thickness=*/30.f);
 
 	// Zero is the underside the slab started at, so fresh ice tops out at its
@@ -753,11 +753,11 @@ bool FARPGIceFieldRefreezeTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGIceFieldBoundedTest,
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGSolidFieldBoundedTest,
 	"ARPG.World.Fluid.Ice.DetailIsBoundedNoMatterHowMuchHappens",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FARPGIceFieldBoundedTest::RunTest(const FString& Parameters)
+bool FARPGSolidFieldBoundedTest::RunTest(const FString& Parameters)
 {
 	using namespace ARPGFluidTestUtils;
 	FTestWorld Scope;
@@ -1084,6 +1084,78 @@ bool FARPGFluidFloeStrandedTest::RunTest(const FString& Parameters)
 	// an independent object -- it is a thing riding a surface.
 	TestEqual(TEXT("And the floe that was riding it goes with it"),
 		Fluids->GetSolids().Num(), 0);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFluidHeavySolidTest,
+	"ARPG.World.Fluid.Floating.ASolidTooHeavyToFloatRestsOnTheBed",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGFluidHeavySolidTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+	UARPGMagicElement* Earth = MakeElement(GetTransientPackage(), TAG_Element_Earth);
+
+	UARPGFluidDefinition* WaterDefinition = MakeWater(GetTransientPackage(), Water);
+	WaterDefinition->EvaporationRate = 0.f;
+	WaterDefinition->Depth = 40.f;
+	WaterDefinition->Density = 0.001f;
+
+	// A CRUST, not a floe. Denser than the fluid it formed out of, so nothing here
+	// should float it -- and nothing in the floating code names ice or water, so
+	// the only thing that decides is which density is larger.
+	UARPGSolidDefinition* Crust = NewObject<UARPGSolidDefinition>();
+	Crust->Element = Earth;
+	Crust->Thickness = 30.f;
+	Crust->bStandable = true;
+	Crust->MinimumArea = 100.f;
+	Crust->SettleSpeed = 1000.f;
+	Crust->Density = 0.0025f;   // heavier than the water under it
+
+	// Permanent rock, in both of the senses that are separate questions: time does
+	// not take it, and no reaction can eat it either.
+	Crust->MeltRate = 0.f;
+	Crust->EnergyPerArea = 0.f;
+
+	Fluids->Definitions = { WaterDefinition };
+	Fluids->Solids = { Crust };
+	Fluids->CombinationTable = MakeFreezeTable(Earth);
+
+	AARPGFluidPool* Pool = Fluids->Deposit(FVector(0, 0, 0), 400.f, TAG_Element_Water);
+	const float Bed = Pool->GroundHeight;
+
+	UARPGElementalVolumeComponent* Agent = MakeShard(Scope.World, Earth, FVector(0, 0, 0), 200.f);
+	if (!Fluids->TrySolidify(Pool->Volume, Agent) || Fluids->GetSolids().Num() != 1)
+	{
+		AddError(TEXT("Setup: nothing solidified."));
+		return false;
+	}
+
+	AARPGFluidSolid* Slab = Fluids->GetSolids()[0];
+	Slab->Tick(1.f);
+
+	TestTrue(TEXT("A slab denser than its fluid does not float"), Slab->bAground);
+
+	// It comes to rest ON THE BOTTOM rather than sitting awash at the surface,
+	// which is what clamping the draft to the thickness would have given.
+	TestEqual(TEXT("It settles onto the bed"),
+		Slab->GetActorLocation().Z, Bed, 1.f);
+
+	// And nothing melts it. MeltRate and EnergyPerArea are the two independent
+	// questions -- does time take it, can a reaction take it -- and permanent rock
+	// answers no to both.
+	const double Before = Slab->GetArea();
+	Slab->NoteContactAt(FVector2D::ZeroVector);
+	Slab->Volume->Consume(500.f, nullptr);
+
+	TestEqual(TEXT("And no reaction can eat permanent rock"), Slab->GetArea(), Before, 1.0);
+	TestEqual(TEXT("So it is still there"), Fluids->GetSolids().Num(), 1);
 
 	return true;
 }

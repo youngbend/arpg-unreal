@@ -592,7 +592,7 @@ void BuildSlabMesh(UDynamicMeshComponent* Component, const TArray<FVector2D>& Ri
 	Component->NotifyMeshUpdated();
 }
 
-void BuildFieldMesh(UDynamicMeshComponent* Component, const FARPGIceField& Field,
+void BuildFieldMesh(UDynamicMeshComponent* Component, const FARPGSolidField& Field,
 	const FVector2D& Origin)
 {
 	using namespace UE::Geometry;

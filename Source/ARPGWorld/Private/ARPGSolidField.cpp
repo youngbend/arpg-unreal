@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "ARPGIceField.h"
+#include "ARPGSolidField.h"
 #include "ARPGFluidGeometry.h"
 
 namespace
@@ -19,7 +19,7 @@ namespace
 	}
 }
 
-FIntPoint FARPGIceField::CellAt(const FVector2D& World) const
+FIntPoint FARPGSolidField::CellAt(const FVector2D& World) const
 {
 	if (CellSize <= 0.f)
 	{
@@ -32,17 +32,17 @@ FIntPoint FARPGIceField::CellAt(const FVector2D& World) const
 	return (X >= 0 && Y >= 0 && X < CountX && Y < CountY) ? FIntPoint(X, Y) : FIntPoint(-1, -1);
 }
 
-FVector2D FARPGIceField::CentreOf(int32 X, int32 Y) const
+FVector2D FARPGSolidField::CentreOf(int32 X, int32 Y) const
 {
 	return Origin + FVector2D(X * CellSize, Y * CellSize);
 }
 
-bool FARPGIceField::IsIced(int32 X, int32 Y) const
+bool FARPGSolidField::IsIced(int32 X, int32 Y) const
 {
 	return ThicknessAt(X, Y) >= MinimumLayer;
 }
 
-float FARPGIceField::ThicknessAt(int32 X, int32 Y) const
+float FARPGSolidField::ThicknessAt(int32 X, int32 Y) const
 {
 	if (!IsValidField() || X < 0 || Y < 0 || X >= CountX || Y >= CountY)
 	{
@@ -53,19 +53,19 @@ float FARPGIceField::ThicknessAt(int32 X, int32 Y) const
 	return FMath::Max(0.f, (Top[At] - Bottom[At]) * ToCm);
 }
 
-bool FARPGIceField::IsIcedAt(const FVector2D& World) const
+bool FARPGSolidField::IsIcedAt(const FVector2D& World) const
 {
 	const FIntPoint Cell = CellAt(World);
 	return Cell.X >= 0 && IsIced(Cell.X, Cell.Y);
 }
 
-float FARPGIceField::TopAt(const FVector2D& World) const
+float FARPGSolidField::TopAt(const FVector2D& World) const
 {
 	const FIntPoint Cell = CellAt(World);
 	return Cell.X >= 0 ? Top[Index(Cell.X, Cell.Y)] * ToCm : 0.f;
 }
 
-int32 FARPGIceField::IcedCellCount() const
+int32 FARPGSolidField::IcedCellCount() const
 {
 	int32 Count = 0;
 	for (int32 Y = 0; Y < CountY; ++Y)
@@ -78,12 +78,12 @@ int32 FARPGIceField::IcedCellCount() const
 	return Count;
 }
 
-double FARPGIceField::IcedArea() const
+double FARPGSolidField::IcedArea() const
 {
 	return IcedCellCount() * static_cast<double>(CellSize) * CellSize;
 }
 
-double FARPGIceField::IceVolume() const
+double FARPGSolidField::IceVolume() const
 {
 	double Volume = 0.0;
 	const double CellArea = static_cast<double>(CellSize) * CellSize;
@@ -102,7 +102,7 @@ double FARPGIceField::IceVolume() const
 	return Volume;
 }
 
-FVector2D FARPGIceField::IcedCentroid() const
+FVector2D FARPGSolidField::IcedCentroid() const
 {
 	FVector2D Sum = FVector2D::ZeroVector;
 	int32 Count = 0;
@@ -122,7 +122,7 @@ FVector2D FARPGIceField::IcedCentroid() const
 	return Count > 0 ? Sum / Count : Origin;
 }
 
-double FARPGIceField::SupportDistance(const FVector2D& From, const FVector2D& Direction) const
+double FARPGSolidField::SupportDistance(const FVector2D& From, const FVector2D& Direction) const
 {
 	double Furthest = 0.0;
 
@@ -147,7 +147,7 @@ double FARPGIceField::SupportDistance(const FVector2D& From, const FVector2D& Di
 // Writing
 // ---------------------------------------------------------------------------
 
-void FARPGIceField::BuildFrom(const TArray<FVector2D>& Ring, float InCellSize, float Thickness)
+void FARPGSolidField::BuildFrom(const TArray<FVector2D>& Ring, float InCellSize, float Thickness)
 {
 	Top.Reset();
 	Bottom.Reset();
@@ -189,7 +189,7 @@ void FARPGIceField::BuildFrom(const TArray<FVector2D>& Ring, float InCellSize, f
 	}
 }
 
-bool FARPGIceField::Refreeze(const TArray<FVector2D>& Ring, float WaterlineZ, float MinimumGain)
+bool FARPGSolidField::Refreeze(const TArray<FVector2D>& Ring, float WaterlineZ, float MinimumGain)
 {
 	if (!IsValidField() || Ring.Num() < 3)
 	{
@@ -232,7 +232,7 @@ bool FARPGIceField::Refreeze(const TArray<FVector2D>& Ring, float WaterlineZ, fl
 	return bGained;
 }
 
-double FARPGIceField::MeltBowl(const FVector2D& At, float Radius, float Depth)
+double FARPGSolidField::MeltBowl(const FVector2D& At, float Radius, float Depth)
 {
 	if (!IsValidField() || Radius <= 0.f || Depth <= 0.f)
 	{
@@ -288,7 +288,7 @@ double FARPGIceField::MeltBowl(const FVector2D& At, float Radius, float Depth)
 	return Removed;
 }
 
-double FARPGIceField::MeltUniform(float FromTop, float FromBottom)
+double FARPGSolidField::MeltUniform(float FromTop, float FromBottom)
 {
 	if (!IsValidField() || (FromTop <= 0.f && FromBottom <= 0.f))
 	{

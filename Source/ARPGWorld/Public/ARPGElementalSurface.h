@@ -95,4 +95,21 @@ public:
 	 * current, and a floe on one should sit still.
 	 */
 	virtual FVector2D GetSurfaceFlowAt(const FVector2D& At) const = 0;
+
+	/**
+	 * Mass per unit volume of this body, in kg per cubic centimetre.
+	 *
+	 * What anything frozen out of it has to be lighter than in order to float.
+	 * Nothing in the floating code names water or ice: it compares two densities,
+	 * so a crust on lava and a floe on a pond are the same arithmetic.
+	 */
+	virtual float GetSurfaceDensity() const = 0;
+
+	/**
+	 * The BED under this body at a point -- how far down the bottom is.
+	 *
+	 * Where a slab too heavy to float comes to rest. A puddle's bed is the ground
+	 * it formed on; a river's is the floor of its channel.
+	 */
+	virtual float GetSurfaceBedAt(const FVector2D& At) const = 0;
 };
