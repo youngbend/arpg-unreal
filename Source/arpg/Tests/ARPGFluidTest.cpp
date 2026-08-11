@@ -19,6 +19,7 @@
 #include "ARPGMagicElement.h"
 #include "ARPGReservoirVolumeComponent.h"
 #include "Components/BoxComponent.h"
+#include "Components/CapsuleComponent.h"
 #include "Components/SphereComponent.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
@@ -642,6 +643,299 @@ bool FARPGFluidMeltTest::RunTest(const FString& Parameters)
 
 	TestEqual(TEXT("Melted through, the floe is gone"), Fluids->GetSolids().Num(), 0);
 	TestEqual(TEXT("And left water behind it"), Fluids->GetPools().Num(), 1);
+
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// Floating
+//
+// A floe RIDES the water rather than being pinned to where the waterline was
+// when it formed. Archimedes for the depth, the body's own current for the
+// drift, and the shore for whether it may drift at all.
+//
+// Kinematic on purpose. UBuoyancyComponent drives a SIMULATING body, which is
+// right for a boat you ride and wrong for a platform you walk on -- a simulating
+// body under a character movement component jitters and gets shoved, and it
+// needs simple collision where a floe's whole value is complex-as-simple
+// collision honouring its outline and its melted-through hole. The water state
+// still comes from the plugin; only the integration is ours.
+// ---------------------------------------------------------------------------
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFluidFloatTest,
+	"ARPG.World.Fluid.Floating.AFloeRidesAtItsDraft",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGFluidFloatTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+	UARPGMagicElement* Ice = MakeElement(GetTransientPackage(), TAG_Element_Ice);
+
+	UARPGFluidDefinition* WaterDefinition = MakeWater(GetTransientPackage(), Water);
+	WaterDefinition->EvaporationRate = 0.f;
+
+	UARPGSolidDefinition* IceDefinition = MakeIce(Ice);
+	IceDefinition->Thickness = 30.f;
+	IceDefinition->Density = 0.0006f;   // 60% of water, so 60% of it sits under
+	IceDefinition->SettleSpeed = 1000.f; // effectively instant, for the assertion
+
+	Fluids->Definitions = { WaterDefinition };
+	Fluids->Solids = { IceDefinition };
+	Fluids->CombinationTable = MakeFreezeTable(Ice);
+
+	AARPGFluidPool* Pool = Fluids->Deposit(FVector(0, 0, 0), 400.f, TAG_Element_Water);
+	const float Waterline = Pool->GetSurfaceHeight();
+
+	UARPGElementalVolumeComponent* Shard = MakeShard(Scope.World, Ice, FVector(0, 0, 0), 200.f);
+	if (!Fluids->TrySolidify(Pool->Volume, Shard) || Fluids->GetSolids().Num() != 1)
+	{
+		AddError(TEXT("Setup: nothing froze."));
+		return false;
+	}
+
+	AARPGFluidSolid* Floe = Fluids->GetSolids()[0];
+
+	// It knows what it is riding, which is what lets it ask for a waterline that
+	// moves rather than remembering one that does not.
+	TestNotNull(TEXT("A floe knows the water it froze out of"), Floe->FloatsOn.GetObject());
+
+	Floe->Tick(1.f);
+
+	// ARCHIMEDES. A floating body displaces its own weight, so the slab's own
+	// draft is Thickness * Density / WaterDensity and the area cancels out --
+	// 30cm of ice at 60% of water's density rides 18cm under.
+	TestEqual(TEXT("It rides at the depth its density says"), Floe->Draft, 18.f, 0.5f);
+
+	// Which leaves the walkable top PROUD of the water rather than awash. That is
+	// the whole reason Density is tuned below real ice's 92%.
+	TestTrue(TEXT("And its surface stands above the waterline"),
+		Floe->GetSurfaceHeight() > Waterline);
+	TestEqual(TEXT("By the freeboard the draft leaves"),
+		Floe->GetSurfaceHeight(), Waterline + 12.f, 0.5f);
+
+	// A BIGGER SLAB OF THE SAME ICE RIDES THE SAME DEPTH, because the area
+	// cancels. Falls out of the equation rather than being arranged.
+	const double Before = Floe->GetArea();
+	Floe->SetRing(ARPGFluidGeometry::MakeCircle(FVector2D::ZeroVector, 300.0));
+	TestTrue(TEXT("Setup: it did get bigger"), Floe->GetArea() > Before);
+
+	Floe->Tick(1.f);
+	TestEqual(TEXT("A larger floe of the same ice rides just as deep"),
+		Floe->Draft, 18.f, 0.5f);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFluidSinkTest,
+	"ARPG.World.Fluid.Floating.WeightPushesAFloeDown",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGFluidSinkTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+	UARPGMagicElement* Ice = MakeElement(GetTransientPackage(), TAG_Element_Ice);
+
+	UARPGFluidDefinition* WaterDefinition = MakeWater(GetTransientPackage(), Water);
+	WaterDefinition->EvaporationRate = 0.f;
+
+	UARPGSolidDefinition* IceDefinition = MakeIce(Ice);
+	IceDefinition->Thickness = 30.f;
+	IceDefinition->Density = 0.0006f;
+	IceDefinition->SettleSpeed = 1000.f;
+
+	Fluids->Definitions = { WaterDefinition };
+	Fluids->Solids = { IceDefinition };
+	Fluids->CombinationTable = MakeFreezeTable(Ice);
+
+	AARPGFluidPool* Pool = Fluids->Deposit(FVector(0, 0, 0), 400.f, TAG_Element_Water);
+	UARPGElementalVolumeComponent* Shard = MakeShard(Scope.World, Ice, FVector(0, 0, 0), 200.f);
+	Fluids->TrySolidify(Pool->Volume, Shard);
+
+	if (Fluids->GetSolids().Num() != 1)
+	{
+		AddError(TEXT("Setup: nothing froze."));
+		return false;
+	}
+
+	AARPGFluidSolid* Floe = Fluids->GetSolids()[0];
+	Floe->Tick(1.f);
+
+	const float Unloaded = Floe->Draft;
+	TestEqual(TEXT("Setup: nobody is aboard"), Floe->GetOccupantCount(), 0);
+
+	// A pawn standing on it. ECC_Pawn, because that is the one object type the
+	// occupancy probe asks for -- what stands on ice is a character, and a crate
+	// resting on it is not something this models.
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	AActor* Pawn = Scope.World->SpawnActor<AActor>(AActor::StaticClass(),
+		FTransform(FVector(0, 0, Floe->GetSurfaceHeight() + 40.f)), Params);
+
+	UCapsuleComponent* Capsule = NewObject<UCapsuleComponent>(Pawn);
+	Capsule->SetCapsuleSize(40.f, 90.f);
+	Capsule->SetMobility(EComponentMobility::Movable);
+	Capsule->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+	Capsule->SetCollisionObjectType(ECC_Pawn);
+	Pawn->SetRootComponent(Capsule);
+	Capsule->RegisterComponent();
+	Capsule->SetWorldLocation(FVector(0, 0, Floe->GetSurfaceHeight() + 40.f));
+
+	Floe->Tick(1.f);
+
+	TestEqual(TEXT("Someone standing on it is aboard"), Floe->GetOccupantCount(), 1);
+	TestTrue(TEXT("And the ice gives under them"), Floe->Draft > Unloaded);
+
+	// It never goes further under than it is thick. Past that the slab is swamped,
+	// and letting it keep sinking would drag whoever is on it through the floor.
+	TestTrue(TEXT("But never further under than it is thick"),
+		Floe->Draft <= IceDefinition->Thickness + KINDA_SMALL_NUMBER);
+
+	// Standing off the edge is standing in the water beside it, not aboard. The
+	// box is broadphase; the polygon is the truth, the same split everything else
+	// in this system runs on.
+	Capsule->SetWorldLocation(FVector(2000, 0, Floe->GetSurfaceHeight() + 40.f));
+	Floe->Tick(1.f);
+
+	TestEqual(TEXT("Someone off the floe is not aboard"), Floe->GetOccupantCount(), 0);
+	TestEqual(TEXT("And it comes back up"), Floe->Draft, Unloaded, 0.5f);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFluidDriftTest,
+	"ARPG.World.Fluid.Floating.ACurrentCarriesAFloeUnlessTheShoreHasIt",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGFluidDriftTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+	UARPGMagicElement* Ice = MakeElement(GetTransientPackage(), TAG_Element_Ice);
+
+	UARPGSolidDefinition* IceDefinition = MakeIce(Ice);
+	IceDefinition->DriftResponse = 1.f;   // travel at exactly the water's speed
+
+	Fluids->Solids = { IceDefinition };
+	Fluids->CombinationTable = MakeFreezeTable(Ice);
+
+	// A long river, 400 to either side of centre, with a current down its length.
+	UARPGReservoirVolumeComponent* River =
+		MakeRiver(Scope.World, Water, FVector(0, 0, 0), FVector(4000, 400, 350));
+	River->FlowVelocity = FVector2D(100.f, 0.f);   // 1 m/s downstream
+
+	// A floe well short of either bank: open water on both sides, so free to move.
+	UARPGElementalVolumeComponent* Shard = MakeShard(Scope.World, Ice, FVector(0, 0, 0), 150.f);
+	if (!Fluids->TrySolidify(River, Shard) || Fluids->GetSolids().Num() != 1)
+	{
+		AddError(TEXT("Setup: nothing froze."));
+		return false;
+	}
+
+	AARPGFluidSolid* Raft = Fluids->GetSolids()[0];
+
+	TestFalse(TEXT("A floe with open water around it is not anchored"), Raft->bAnchored);
+
+	const double StartX = ARPGFluidGeometry::PolygonCentroid(Raft->GetRing()).X;
+	Raft->Tick(1.f);
+	const double DriftedX = ARPGFluidGeometry::PolygonCentroid(Raft->GetRing()).X;
+
+	// One second at 1 m/s. Downstream, and by the water's own speed because
+	// DriftResponse is 1.
+	TestEqual(TEXT("The current carries it downstream"), DriftedX - StartX, 100.0, 5.0);
+
+	// SO IT CARRIES THE PLAYER. A character on a kinematic base is moved by the
+	// movement component's based movement, and the base's velocity is what it
+	// imparts on jumping off. Without it the ice slides out from under them, which
+	// is worse than not drifting at all.
+	TestTrue(TEXT("And reports the velocity it is moving at"),
+		Raft->GetSurfaceComponent()->GetComponentVelocity().X > 50.f);
+
+	// NOW A PLUG. Frozen across the whole width, it is braced on both banks and
+	// the current has nothing to push against -- which is what a spell that
+	// freezes an entire river makes.
+	UARPGElementalVolumeComponent* Wide = MakeShard(Scope.World, Ice, FVector(2000, 0, 0), 900.f);
+	if (!Fluids->TrySolidify(River, Wide) || Fluids->GetSolids().Num() != 2)
+	{
+		AddError(TEXT("Setup: the wide shard froze nothing."));
+		return false;
+	}
+
+	AARPGFluidSolid* Plug = Fluids->GetSolids()[1];
+
+	TestTrue(TEXT("A floe spanning the water is anchored by the shore"), Plug->bAnchored);
+
+	const double PlugX = ARPGFluidGeometry::PolygonCentroid(Plug->GetRing()).X;
+	Plug->Tick(1.f);
+
+	TestEqual(TEXT("And the current cannot move it"),
+		ARPGFluidGeometry::PolygonCentroid(Plug->GetRing()).X, PlugX, 0.01);
+	TestEqual(TEXT("Nor does it report a velocity to carry anyone"),
+		Plug->GetSurfaceComponent()->GetComponentVelocity().X, 0.f);
+
+	// It still RIDES, though -- there is water under it, and being wedged is about
+	// going nowhere horizontally.
+	TestTrue(TEXT("But it still floats"), Plug->Draft > 0.f);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFluidFloeStrandedTest,
+	"ARPG.World.Fluid.Floating.AFloeGoesWithTheWaterUnderIt",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGFluidFloeStrandedTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+	UARPGMagicElement* Ice = MakeElement(GetTransientPackage(), TAG_Element_Ice);
+	UARPGMagicElement* Steam = MakeElement(GetTransientPackage(), TAG_Element_Steam);
+
+	UARPGFluidDefinition* WaterDefinition = MakeWater(GetTransientPackage(), Water);
+	WaterDefinition->EvaporationRate = 0.f;
+	WaterDefinition->MinimumArea = 1000.f;
+
+	Fluids->Definitions = { WaterDefinition };
+	Fluids->Solids = { MakeIce(Ice) };
+	Fluids->CombinationTable = MakeFreezeTable(Ice);
+
+	AARPGFluidPool* Pool = Fluids->Deposit(FVector(0, 0, 0), 300.f, TAG_Element_Water);
+	UARPGElementalVolumeComponent* Shard = MakeShard(Scope.World, Ice, FVector(0, 0, 0), 120.f);
+	Fluids->TrySolidify(Pool->Volume, Shard);
+
+	if (Fluids->GetSolids().Num() != 1)
+	{
+		AddError(TEXT("Setup: nothing froze."));
+		return false;
+	}
+
+	// Boil the pool out from under it, which fire can now do.
+	Pool->Volume->Consume(Pool->Volume->GetEnergy(), Steam);
+
+	TestEqual(TEXT("The pool is gone"), Fluids->GetPools().Num(), 0);
+
+	// AND SO IS THE ICE. Nothing linked a floe's life to the water under it, so
+	// this used to leave a slab hanging in mid-air over dry ground. A floe is not
+	// an independent object -- it is a thing riding a surface.
+	TestEqual(TEXT("And the floe that was riding it goes with it"),
+		Fluids->GetSolids().Num(), 0);
 
 	return true;
 }

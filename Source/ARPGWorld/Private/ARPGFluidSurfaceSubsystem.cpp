@@ -500,7 +500,16 @@ bool UARPGFluidSurfaceSubsystem::TrySolidify(UARPGElementalVolumeComponent* A,
 		Solid->HoleRing = Holes[Largest];
 	}
 
+	// WHAT IT RIDES. A floe is not an independent object: it asks this for the
+	// waterline under it, for the current carrying it, and for where the water
+	// stops. Set before Setup, which is what first places it.
+	Solid->FloatsOn = Surface->_getUObject();
+
 	Solid->Setup(SolidDefinition, FrozenRing, SurfaceHeight);
+
+	// Immediately, so a plug frozen across a river is anchored on the frame it
+	// forms rather than drifting for a quarter of a second first.
+	Solid->UpdateAnchoring();
 
 	ActiveSolids.Add(Solid);
 
@@ -534,6 +543,22 @@ void UARPGFluidSurfaceSubsystem::RetireBody(AARPGFluidBody* Body)
 	if (AARPGFluidPool* Pool = Cast<AARPGFluidPool>(Body))
 	{
 		Pools.Remove(Pool);
+
+		// AND ANYTHING FLOATING ON IT. Nothing linked a floe's life to the water
+		// under it, so boiling a pool out from beneath one -- which fire can now
+		// do -- left ice hanging in the air over dry ground. A floe is not an
+		// independent object; it is a thing riding a surface, and there is no
+		// surface left to ride.
+		for (int32 Index = ActiveSolids.Num() - 1; Index >= 0; --Index)
+		{
+			AARPGFluidSolid* Riding = ActiveSolids[Index];
+			if (IsValid(Riding) && Riding->FloatsOn.GetObject() == Pool)
+			{
+				ActiveSolids.RemoveAt(Index);
+				Riding->Destroy();
+			}
+		}
+
 		Pool->Destroy();
 		return;
 	}
@@ -699,5 +724,10 @@ void UARPGFluidSurfaceSubsystem::TickWeather(float DeltaTime)
 		}
 
 		Solid->SetRing(Next);
+
+		// A floe that has narrowed enough to come free of the banks COMES FREE.
+		// Here rather than per frame: this is the tick that changes its outline,
+		// and it costs a containment probe per direction.
+		Solid->UpdateAnchoring();
 	}
 }

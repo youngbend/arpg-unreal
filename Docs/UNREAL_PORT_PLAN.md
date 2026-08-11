@@ -1106,6 +1106,47 @@ happened.
 2 new cases under `ARPG.World.Fluid.Conduction`, and they use REAL deposited
 pools rather than hand-built volumes, which is the whole reason this survived.
 
+**A floe now FLOATS, and this is a departure from the Godot original rather than
+a correction to the port.** It was pinned: `GroundHeight` was set to the waterline
+once at creation and never touched, so a floe did not ride waves, did not move on
+a current, and did not give under anyone standing on it.
+
+**KINEMATIC, NOT SIMULATED, AND THAT IS THE WHOLE DESIGN.** `UBuoyancyComponent`
+is the obvious reach and the wrong one: it drives a SIMULATING rigid body, which
+is right for a boat you ride and wrong for a platform you WALK ON -- a simulating
+body under a character movement component jitters and gets shoved around by the
+character it is carrying. It also requires simple collision, where a floe's whole
+value is complex-as-simple collision honouring its exact outline and its
+melted-through hole. So the integration is ours and the water state is the
+plugin's: surface height and flow velocity come from the same queries that drive
+its own buoyancy, and a kinematic movable base is what UE actually carries a
+character on.
+
+- **Archimedes, with two knobs traded for feel.** Draft is
+  `(SlabMass + LoadMass) / (WaterDensity * Area)`, so the slab's own term reduces
+  to `Thickness * Density / WaterDensity` with the area cancelling -- a big floe
+  and a small one of the same ice ride equally deep, and a wider floe takes a
+  person's weight better. Both fall out rather than being arranged. The two
+  departures are named in the definition: real ice at 92% submerged leaves 2cm of
+  freeboard on a slab you are meant to walk on, and a real person on 10m² pushes
+  it under a centimetre.
+- **Drift translates the RING, not the actor**, so the polygon stays the single
+  truth. `TranslateRing` skips the mesh rebuild, because a translation changes no
+  local geometry -- which is what makes per-frame drift affordable, and which
+  also leaves the surface texture riding with the floe instead of swimming past
+  it.
+- **A floe spanning its water is ANCHORED.** A spell that freezes the whole width
+  of a river makes a plug, not a raft: it is braced on both banks. Detected by
+  probing for open water past the outline in opposing directions, and recomputed
+  as it melts, so one that narrows enough comes free.
+- **It reports its velocity**, so based movement carries whoever is standing on
+  it. A drifting floe that slid out from under the player would be worse than a
+  static one.
+- **And it goes when its water goes** -- the mid-air-ice defect that boiling a
+  pool away had just made reachable.
+
+4 new cases under `ARPG.World.Fluid.Floating`.
+
 **Phase 11 -- code complete. Not in the original ten: this is the layer that
 makes the other ten reachable from a controller.** The modal control scheme, the
 speed tiers, the buffering, and auto-sheathe. 13 new cases; 99 pass in total.

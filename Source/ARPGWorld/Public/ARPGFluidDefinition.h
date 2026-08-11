@@ -176,6 +176,57 @@ public:
 		meta = (ClampMin = "0.0"))
 	float EnergyPerArea = 0.002f;
 
+	// --- Floating ---------------------------------------------------------------
+	//
+	// A slab frozen on water RIDES it, and how it rides is Archimedes with two
+	// deliberate departures for feel. Real ice floats 92% submerged, which leaves
+	// a couple of centimetres of freeboard on a slab you are meant to walk on; and
+	// a real person on a ten-square-metre floe pushes it down under a centimetre,
+	// which nobody would ever see. Density and LoadResponse are where those two
+	// are traded away, and everything else is the honest equation.
+
+	/**
+	 * Mass per unit volume, in kg per cubic centimetre. Water is 0.001.
+	 *
+	 * Below water's, or it does not float. DELIBERATELY LIGHTER THAN REAL ICE
+	 * (0.00092): the physical value leaves a 30cm slab riding with 2cm proud,
+	 * which is a surface awash rather than one you would choose to stand on.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Floating",
+		meta = (ClampMin = "0.0"))
+	float Density = 0.0006f;
+
+	/** What one thing standing on it weighs, in kg. Characters do not simulate. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Floating",
+		meta = (ClampMin = "0.0"))
+	float OccupantMass = 80.f;
+
+	/**
+	 * Exaggerates how far a load pushes the slab down.
+	 *
+	 * 1 is physically honest and almost invisible -- see the section note. This is
+	 * the one number that is openly a lie, and it is a lie in service of the thing
+	 * the player is supposed to feel: that the ice gives under them.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Floating",
+		meta = (ClampMin = "1.0"))
+	float LoadResponse = 12.f;
+
+	/** How quickly it settles to the depth it should be riding at, per second. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Floating",
+		meta = (ClampMin = "0.1"))
+	float SettleSpeed = 3.f;
+
+	/**
+	 * How much of the current it takes, 0-1.
+	 *
+	 * 1 means it travels at exactly the speed of the water. Below that it lags,
+	 * which is what a heavy slab against a fast river actually does.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Floating",
+		meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float DriftResponse = 0.6f;
+
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Presentation")
 	TSoftObjectPtr<UMaterialInterface> SurfaceMaterial;
 

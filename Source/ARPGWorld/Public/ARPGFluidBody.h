@@ -45,7 +45,21 @@ public:
 	virtual float GetSurfaceLevelAt(const FVector2D& At) const override;
 	virtual bool ConsumeSurfaceArea(double Area) override;
 	virtual float GetSurfaceEnergyDensity() const override { return 0.f; }
+	virtual bool IsSurfaceAt(const FVector2D& At) const override;
+	virtual FVector2D GetSurfaceFlowAt(const FVector2D& At) const override { return FVector2D::ZeroVector; }
 	//~ End IARPGElementalSurface
+
+	/**
+	 * Slides the outline without touching the mesh.
+	 *
+	 * A TRANSLATION CHANGES NO LOCAL GEOMETRY, so retriangulating and recooking
+	 * collision for one would be work for a shape that did not change -- and it is
+	 * what makes a floe drifting on a current affordable every frame rather than
+	 * four times a second. It also leaves the surface texture pinned to the body
+	 * rather than to the world, which for something drifting is the right answer
+	 * and for something eroding in place is not; see BuildSlabMesh's UVs.
+	 */
+	void TranslateRing(const FVector2D& Delta);
 
 	/**
 	 * A REACTION TAKES GROUND, NOT SCALE.
@@ -87,9 +101,9 @@ public:
 	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
 	bool ContainsPoint(FVector WorldPoint) const;
 
-	/** Height of the walkable or swimmable surface. */
+	/** Height of the walkable or swimmable surface, including how far it is riding. */
 	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
-	float GetSurfaceHeight() const { return GroundHeight + GetSurfaceOffset(); }
+	float GetSurfaceHeight() const { return GroundHeight + GetVerticalOffset() + GetSurfaceOffset(); }
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<UBoxComponent> Bounds;
@@ -151,6 +165,16 @@ protected:
 
 	/** Below this area the body is not worth keeping. From its definition. */
 	virtual double GetMinimumArea() const { return 0.0; }
+
+	/**
+	 * How far the whole body is displaced from where its outline says it sits.
+	 *
+	 * Zero for anything resting on the ground, which is every fluid: a puddle IS
+	 * its ground height. A floe rides, so it answers with its draft -- and that is
+	 * the only axis the polygon model cannot express, which is why it is a
+	 * separate number rather than something smuggled into the ring.
+	 */
+	virtual float GetVerticalOffset() const { return 0.f; }
 
 	/** The definition's material, loaded. Null for a body with nothing authored. */
 	virtual UMaterialInterface* ResolveSurfaceMaterial() const { return nullptr; }
@@ -218,8 +242,51 @@ class ARPGWORLD_API AARPGFluidSolid : public AARPGFluidBody
 	GENERATED_BODY()
 
 public:
+	AARPGFluidSolid();
+
+	virtual void Tick(float DeltaTime) override;
+
 	UPROPERTY(ReplicatedUsing = OnRep_Body, BlueprintReadOnly, Category = "ARPG|Fluid")
 	TObjectPtr<UARPGSolidDefinition> Definition;
+
+	/**
+	 * The body of water this froze out of, and therefore the one it rides.
+	 *
+	 * A floe is not an independent object: it asks this for the waterline under
+	 * it, for the current carrying it, and for where the water stops. Null means
+	 * it is aground -- the water went and the ice did not, which the subsystem
+	 * treats as the end of it.
+	 */
+	UPROPERTY(BlueprintReadOnly, Category = "ARPG|Fluid")
+	TScriptInterface<IARPGElementalSurface> FloatsOn;
+
+	/**
+	 * Wedged against the shore, and so going nowhere.
+	 *
+	 * A spell that freezes the entire width of a river makes a PLUG, not a raft:
+	 * it is braced on both banks and the current cannot take it. Recomputed as the
+	 * floe melts, so one that has narrowed enough to come free does.
+	 */
+	UPROPERTY(BlueprintReadOnly, Category = "ARPG|Fluid")
+	bool bAnchored = false;
+
+	/** How deep it is riding, in cm below the waterline. Replicated as the result. */
+	UPROPERTY(Replicated, BlueprintReadOnly, Category = "ARPG|Fluid")
+	float Draft = 0.f;
+
+	/** Things currently standing on it, from the last settle. */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
+	int32 GetOccupantCount() const { return OccupantCount; }
+
+	/**
+	 * Recomputes whether the shore has hold of it.
+	 *
+	 * Not per frame: it changes only as the floe melts or drifts, and it costs a
+	 * containment probe per direction. The subsystem's weather tick is where it
+	 * happens, beside the melting that is the main reason it would change.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "ARPG|Fluid")
+	void UpdateAnchoring();
 
 	/** Interior gaps, kept separate from the outline -- see the class comment. */
 	UPROPERTY(ReplicatedUsing = OnRep_Body, BlueprintReadOnly, Category = "ARPG|Fluid")
@@ -240,6 +307,18 @@ protected:
 	virtual void RebuildFromRing() override;
 	virtual float GetSurfaceOffset() const override;
 	virtual double GetMinimumArea() const override;
+	virtual float GetVerticalOffset() const override { return -Draft; }
 	virtual UMaterialInterface* ResolveSurfaceMaterial() const override;
 	virtual const TArray<FVector2D>& GetMeshHole() const override { return HoleRing; }
+
+	/** The depth it WANTS to be riding at, from Archimedes and what is aboard. */
+	float ComputeTargetDraft() const;
+
+	/** How many things are standing on the slab right now. */
+	int32 CountOccupants() const;
+
+	/** Does the water continue past the floe's edge in this direction? */
+	bool HasRoomToward(const FVector2D& Direction) const;
+
+	int32 OccupantCount = 0;
 };

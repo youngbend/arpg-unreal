@@ -235,6 +235,22 @@ SOLIDS = [
         # meltable AT ALL -- a slab used to carry no energy, so the reaction
         # solver bailed at its zero-energy guard and fire did nothing to ice.
         "energy_per_area": 0.002,
+        # --- Floating ---
+        #
+        # Archimedes, with two knobs traded for feel. Real ice is 0.00092 and
+        # floats 92% submerged, leaving a 30cm slab with 2cm proud -- a surface
+        # awash rather than one to walk on. 0.0006 rides 18cm under and 12cm
+        # proud, which reads as ice and is worth standing on.
+        "density": 0.0006,
+        "occupant_mass": 80.0,
+        # A real person on a 10 square metre floe pushes it down under a
+        # centimetre. Openly exaggerated, because the point is that the player
+        # FEELS the ice give under them.
+        "load_response": 12.0,
+        "settle_speed": 3.0,
+        # Lags the current rather than matching it: a heavy slab against a fast
+        # river does not travel at the water's speed.
+        "drift_response": 0.6,
         "surface": "M_ARPG_Ice_Placeholder",
     },
 ]
@@ -270,6 +286,11 @@ def main():
         solid.set_editor_property("melt_rate", spec["melt_rate"])
         solid.set_editor_property("minimum_area", spec["minimum_area"])
         solid.set_editor_property("energy_per_area", spec["energy_per_area"])
+        solid.set_editor_property("density", spec["density"])
+        solid.set_editor_property("occupant_mass", spec["occupant_mass"])
+        solid.set_editor_property("load_response", spec["load_response"])
+        solid.set_editor_property("settle_speed", spec["settle_speed"])
+        solid.set_editor_property("drift_response", spec["drift_response"])
         solid.set_editor_property("surface_material", surfaces[spec["surface"]])
 
         # Melting RETURNS its area to the fluid it came from rather than the

@@ -47,7 +47,21 @@ public:
 	virtual TArray<FVector2D> GetSurfaceFootprint(const FVector2D& Centre, double Radius) const override;
 	virtual float GetSurfaceLevelAt(const FVector2D& At) const override;
 	virtual bool ConsumeSurfaceArea(double Area) override;
+	virtual float GetSurfaceEnergyDensity() const override { return 0.f; }
+	virtual bool IsSurfaceAt(const FVector2D& At) const override { return IsWaterAt(At); }
+	virtual FVector2D GetSurfaceFlowAt(const FVector2D& At) const override { return FlowVelocity; }
 	//~ End IARPGElementalSurface
+
+	/**
+	 * An authored current, in cm/s. Zero for standing water.
+	 *
+	 * One vector for the whole body, which is all a box can honestly carry -- a
+	 * canal or a millrace, where the water goes one way at one speed. A spline
+	 * river overrides this with the plugin's real per-location flow, and that is
+	 * the difference the subclass exists for.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Reservoir")
+	FVector2D FlowVelocity = FVector2D::ZeroVector;
 
 	/**
 	 * How many directions the footprint march samples.
@@ -60,9 +74,10 @@ public:
 		meta = (ClampMin = "6", ClampMax = "64"))
 	int32 FootprintSegments = 16;
 
-protected:
 	/** Is there water at this XY, tested just under the surface? */
 	bool IsWaterAt(const FVector2D& Point) const;
+
+protected:
 
 	/** How far the water reaches from Centre along Direction, up to MaxDistance. */
 	double MarchToEdge(const FVector2D& Centre, const FVector2D& Direction, double MaxDistance) const;
@@ -97,6 +112,14 @@ public:
 
 	virtual bool ContainsPoint(FVector WorldPoint, float BelowReach = 0.f) const override;
 	virtual float GetSurfaceHeightAt(FVector WorldPoint) const override;
+
+	/**
+	 * A river's CURRENT, which is what carries a floe downstream.
+	 *
+	 * The same flow the plugin's own buoyancy pushes boats with, so ice and a raft
+	 * on the same stretch travel together rather than at two tunings.
+	 */
+	virtual FVector2D GetSurfaceFlowAt(const FVector2D& At) const override;
 
 	/**
 	 * The body to ask. Defaults to the one on this component's owner, which is

@@ -75,4 +75,24 @@ public:
 	 * ConsumeSurfaceArea refusing, made early enough to skip the arithmetic.
 	 */
 	virtual float GetSurfaceEnergyDensity() const = 0;
+
+	/**
+	 * Is this XY still within the body?
+	 *
+	 * What a floe asks to find out whether it has anywhere to drift to, and
+	 * whether it is wedged against the shore. Deliberately the same question
+	 * freezing asks when it marches a footprint out to the bank, so a body only
+	 * has to be able to answer "am I here" once.
+	 */
+	virtual bool IsSurfaceAt(const FVector2D& At) const = 0;
+
+	/**
+	 * How fast this surface is MOVING at a point, in cm/s. Zero for still water.
+	 *
+	 * Only a river has an answer worth giving, and it comes from the water body's
+	 * own flow -- the same data the plugin's buoyancy pushes boats with. A puddle
+	 * and a plain box return zero, which is not a stub: a puddle genuinely has no
+	 * current, and a floe on one should sit still.
+	 */
+	virtual FVector2D GetSurfaceFlowAt(const FVector2D& At) const = 0;
 };

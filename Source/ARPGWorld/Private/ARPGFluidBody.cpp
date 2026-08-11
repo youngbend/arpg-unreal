@@ -86,6 +86,30 @@ float AARPGFluidBody::GetSurfaceLevelAt(const FVector2D& At) const
 	return GetSurfaceHeight();
 }
 
+bool AARPGFluidBody::IsSurfaceAt(const FVector2D& At) const
+{
+	return ARPGFluidGeometry::PolygonContains(Ring, At);
+}
+
+void AARPGFluidBody::TranslateRing(const FVector2D& Delta)
+{
+	if (Ring.Num() < 3 || Delta.IsNearlyZero())
+	{
+		return;
+	}
+
+	for (FVector2D& Point : Ring)
+	{
+		Point += Delta;
+	}
+
+	// The actor moves and NOTHING ELSE DOES. The mesh is local and a translation
+	// leaves it identical; the trigger box keeps its extent; the volume keeps its
+	// energy, because none of them are functions of WHERE the body is.
+	const FVector Location = GetActorLocation();
+	SetActorLocation(FVector(Location.X + Delta.X, Location.Y + Delta.Y, Location.Z));
+}
+
 bool AARPGFluidBody::ConsumeSurfaceArea(double Area)
 {
 	if (Area <= 0.0)
@@ -198,7 +222,7 @@ void AARPGFluidBody::RebuildFromRing()
 
 	const float SurfaceOffset = GetSurfaceOffset();
 
-	SetActorLocation(FVector(Centre.X, Centre.Y, GroundHeight));
+	SetActorLocation(FVector(Centre.X, Centre.Y, GroundHeight + GetVerticalOffset()));
 
 	// Generous headroom above the surface, so a spell arriving from above enters
 	// the broadphase well before it reaches the waterline -- which is what lets
@@ -322,6 +346,20 @@ void AARPGFluidPool::RebuildFromRing()
 // Solid
 // ---------------------------------------------------------------------------
 
+AARPGFluidSolid::AARPGFluidSolid()
+{
+	// THE ONE BODY THAT MOVES. A fluid is its ground height and never budges; a
+	// floe rides a surface that is somewhere else every frame. Every frame rather
+	// than on the weather tick, because settling and drifting are things you watch
+	// -- 4Hz would step visibly -- and both are a few queries and a SetActorLocation
+	// with no mesh rebuild behind them.
+	PrimaryActorTick.bCanEverTick = true;
+
+	// The outline replicates at its own rate while drifting; the transform between
+	// those is the client's to smooth.
+	SetNetUpdateFrequency(10.f);
+}
+
 void AARPGFluidSolid::Setup(UARPGSolidDefinition* InDefinition, const TArray<FVector2D>& InRing,
 	float InGroundHeight)
 {
@@ -361,6 +399,11 @@ void AARPGFluidSolid::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutL
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 
 	DOREPLIFETIME(AARPGFluidSolid, Definition);
+
+	// The RESULT of the buoyancy settle, not its inputs. A client cannot see who
+	// is standing on a floe accurately enough to arrive at the same number, and
+	// four bytes is cheaper than trying.
+	DOREPLIFETIME(AARPGFluidSolid, Draft);
 
 	// The hole matters on the client as much as the outline does: it is a gap you
 	// can fall through, so a client that meshed and collided the slab without it
@@ -418,6 +461,210 @@ void AARPGFluidSolid::RebuildFromRing()
 	// slab of a few hundred triangles, and the alternative -- collision lagging
 	// the visible edge as it erodes -- is a player standing on water.
 	Surface->UpdateCollision(/*bOnlyIfPending=*/false);
+}
+
+// ---------------------------------------------------------------------------
+// Floating
+// ---------------------------------------------------------------------------
+
+int32 AARPGFluidSolid::CountOccupants() const
+{
+	const UWorld* World = GetWorld();
+	if (!World || Ring.Num() < 3)
+	{
+		return 0;
+	}
+
+	const FBox2D Box = ARPGFluidGeometry::PolygonBounds(Ring);
+	const FVector2D Extent = Box.GetExtent();
+	const float Top = GetSurfaceHeight();
+
+	// A shallow slice ABOVE the slab, because what is standing on it is not
+	// overlapping it -- the mesh blocks, and a blocking contact generates no
+	// overlap. Anything with feet in this slice is a candidate; the polygon test
+	// below decides.
+	static constexpr float StandingSlice = 120.f;
+
+	TArray<FOverlapResult> Overlaps;
+
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(ARPGFloeOccupants), /*bTraceComplex=*/false);
+	Params.AddIgnoredActor(this);
+
+	FCollisionObjectQueryParams ObjectParams;
+	ObjectParams.AddObjectTypesToQuery(ECC_Pawn);
+
+	World->OverlapMultiByObjectType(Overlaps,
+		FVector(Box.GetCenter().X, Box.GetCenter().Y, Top + StandingSlice * 0.5f),
+		FQuat::Identity, ObjectParams,
+		FCollisionShape::MakeBox(FVector(Extent.X, Extent.Y, StandingSlice * 0.5f)), Params);
+
+	TSet<const AActor*> Counted;
+	for (const FOverlapResult& Result : Overlaps)
+	{
+		const AActor* Actor = Result.GetActor();
+		if (!Actor || Counted.Contains(Actor))
+		{
+			continue;
+		}
+
+		// THE SAME TRUTH standing on it uses. Inside the outline and not down a
+		// hole -- the box is broadphase, and a pawn in the box but off the floe is
+		// in the water beside it, not aboard.
+		if (IsStandableAt(Actor->GetActorLocation()))
+		{
+			Counted.Add(Actor);
+		}
+	}
+
+	return Counted.Num();
+}
+
+float AARPGFluidSolid::ComputeTargetDraft() const
+{
+	if (!Definition)
+	{
+		return 0.f;
+	}
+
+	// Water, in kg per cubic centimetre. Not a knob: it is the thing every other
+	// density in the system is relative to.
+	static constexpr float WaterDensity = 0.001f;
+
+	const double Area = GetArea();
+	if (Area <= 0.0)
+	{
+		return 0.f;
+	}
+
+	// ARCHIMEDES. A floating body displaces its own weight, so the depth it rides
+	// at is mass over the water it has to push aside:
+	//
+	//     Draft = (SlabMass + LoadMass) / (WaterDensity * Area)
+	//
+	// The slab's own term reduces to Thickness * Density / WaterDensity, with the
+	// area cancelling -- which is why a big floe and a small one of the same
+	// thickness ride at the same depth, and correctly so. The load's term does NOT
+	// cancel, so a wider floe takes a person's weight better. Both fall out of the
+	// equation rather than being arranged.
+	const float SlabDraft = Definition->Thickness * (Definition->Density / WaterDensity);
+
+	const float LoadMass = OccupantCount * Definition->OccupantMass * Definition->LoadResponse;
+	const float LoadDraft = LoadMass / (WaterDensity * static_cast<float>(Area));
+
+	// Never further than under. Past this the slab is swamped, and letting it
+	// keep sinking would drag whoever is standing on it through the floor.
+	return FMath::Min(SlabDraft + LoadDraft, Definition->Thickness);
+}
+
+bool AARPGFluidSolid::HasRoomToward(const FVector2D& Direction) const
+{
+	if (!FloatsOn || Ring.Num() < 3)
+	{
+		return false;
+	}
+
+	// Clear water this far past the edge counts as room. Smaller than a floe and
+	// larger than the wobble in a polygon's outline.
+	static constexpr double Clearance = 50.0;
+
+	const FVector2D Centre = ARPGFluidGeometry::PolygonCentroid(Ring);
+
+	// The support function: how far the outline reaches along this direction.
+	double Reach = 0.0;
+	for (const FVector2D& Point : Ring)
+	{
+		Reach = FMath::Max(Reach, FVector2D::DotProduct(Point - Centre, Direction));
+	}
+
+	return FloatsOn->IsSurfaceAt(Centre + Direction * (Reach + Clearance));
+}
+
+void AARPGFluidSolid::UpdateAnchoring()
+{
+	bAnchored = false;
+
+	if (!FloatsOn || Ring.Num() < 3)
+	{
+		return;
+	}
+
+	// WEDGED, not merely touching. A floe pushed against one bank is still a raft
+	// -- the current can turn it, slide it along, work it free. One that reaches
+	// the shore on OPPOSITE sides is braced between them, which is what a spell
+	// freezing the whole width of a river produces and what nothing should move.
+	//
+	// Four opposing pairs is enough to catch a plug across a river of any
+	// orientation without pretending to more precision than a polygon has.
+	static constexpr int32 Pairs = 4;
+
+	for (int32 Index = 0; Index < Pairs; ++Index)
+	{
+		const double Angle = PI * Index / Pairs;
+		const FVector2D Direction(FMath::Cos(Angle), FMath::Sin(Angle));
+
+		if (!HasRoomToward(Direction) && !HasRoomToward(-Direction))
+		{
+			bAnchored = true;
+			return;
+		}
+	}
+}
+
+void AARPGFluidSolid::Tick(float DeltaTime)
+{
+	Super::Tick(DeltaTime);
+
+	// Server only. The draft replicates as a result and the outline carries the
+	// drift, so a client that simulated its own would be fighting both.
+	if (!HasAuthority() || !Definition || !FloatsOn || Ring.Num() < 3)
+	{
+		return;
+	}
+
+	const FVector2D Centre = ARPGFluidGeometry::PolygonCentroid(Ring);
+
+	// The waterline it should be riding, asked of the body it froze out of -- so a
+	// floe on a Water plugin river follows the waves and one on a puddle sits on a
+	// flat number, without this knowing which it is on.
+	GroundHeight = FloatsOn->GetSurfaceLevelAt(Centre);
+
+	OccupantCount = CountOccupants();
+
+	// SETTLE toward it rather than snapping. A step change would teleport anyone
+	// standing on the slab, and the lag is most of what makes the ice feel like it
+	// gives under a footfall rather than being a lift.
+	Draft = FMath::FInterpTo(Draft, ComputeTargetDraft(), DeltaTime, Definition->SettleSpeed);
+
+	SetActorLocation(FVector(Centre.X, Centre.Y, GroundHeight - Draft));
+
+	if (bAnchored)
+	{
+		// Braced on both banks. Still bobs -- the water under it is still there --
+		// but the current has nothing to push against.
+		Surface->ComponentVelocity = FVector::ZeroVector;
+		return;
+	}
+
+	const FVector2D Flow = FloatsOn->GetSurfaceFlowAt(Centre) * Definition->DriftResponse;
+	const FVector2D Step = Flow * DeltaTime;
+
+	// Not off the end of its own water. The march is one containment probe, and
+	// refusing the step is what stops a floe beaching itself on a bank the anchor
+	// test did not catch because it only reaches the shore on one side.
+	if (!Step.IsNearlyZero() && HasRoomToward(Step.GetSafeNormal()))
+	{
+		TranslateRing(Step);
+
+		// SO IT CARRIES THE PLAYER. A character standing on a kinematic base is
+		// moved by UCharacterMovementComponent's based movement, and the base's
+		// velocity is what it imparts when they jump off. Without this the ice
+		// slides out from under them, which is worse than not drifting at all.
+		Surface->ComponentVelocity = FVector(Flow.X, Flow.Y, 0.f);
+	}
+	else
+	{
+		Surface->ComponentVelocity = FVector::ZeroVector;
+	}
 }
 
 bool AARPGFluidSolid::IsStandableAt(FVector WorldPoint) const

@@ -189,6 +189,25 @@ bool UARPGWaterBodyVolumeComponent::ContainsPoint(FVector WorldPoint, float Belo
 	return Result.GetImmersionDepth() >= -BelowReach;
 }
 
+FVector2D UARPGWaterBodyVolumeComponent::GetSurfaceFlowAt(const FVector2D& At) const
+{
+	if (!WaterBody)
+	{
+		return FVector2D::ZeroVector;
+	}
+
+	const FVector Probe(At.X, At.Y, GetSurfaceHeightAt(FVector(At.X, At.Y, 0.f)));
+
+	const FWaterBodyQueryResult Result = WaterBody->QueryWaterInfoClosestToWorldLocation(
+		Probe, EWaterBodyQueryFlags::ComputeLocation | EWaterBodyQueryFlags::ComputeVelocity);
+
+	// FLAT. Whatever vertical component the flow has is the plugin describing a
+	// waterfall, and a floe riding one is not a thing this models -- it drifts on
+	// the surface or it does not drift.
+	const FVector Velocity = Result.GetVelocity();
+	return FVector2D(Velocity.X, Velocity.Y);
+}
+
 float UARPGWaterBodyVolumeComponent::GetSurfaceHeightAt(FVector WorldPoint) const
 {
 	if (!WaterBody)
