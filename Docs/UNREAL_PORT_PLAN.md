@@ -949,6 +949,47 @@ would have been enough on its own to produce no puddles.
 was missing -- a cast spell leaves a body on the ground under where it finished --
 plus the area floor asserted in `Pools.DepositsMergeRatherThanStack`.
 
+**A SECOND CORRECTION: a body had no appearance at all.** The phase table above
+claimed dynamic meshing and replicated outlines; neither was implemented. A pool
+was a trigger box and an elemental volume, `SurfaceMaterial` was declared on both
+definitions and read by nothing, and `Ring` was a plain `UPROPERTY` on an actor
+that replicates -- so a client received a pool with an empty outline and
+`RebuildFromRing` returned early on it.
+
+- **`UDynamicMeshComponent`, not the Water plugin.** Unreal's water bodies are
+  spline-authored level geometry served by a water zone: right for a river
+  someone placed, wrong for a puddle a spell made half a second ago whose
+  outline changes 4Hz. A body here is already a polygon, so drawing it is a
+  constrained Delaunay and an extrude -- `ARPGFluidGeometry::BuildSlabMesh`, the
+  fifth library call, sitting beside the four the design already reduced to.
+- **The mesh is the simulation's ring**, built in `RebuildFromRing` alongside the
+  bounds and the volume. There is no second representation to drift. UVs are
+  anchored to WORLD position, not the mesh's own space: a pool's centroid moves
+  every time it merges or erodes, and local UVs make the surface texture swim
+  sideways while the water sits still.
+- **The outline is all that replicates.** `Ring`, `GroundHeight`, the definition
+  and a solid's hole carry the Net flag and share one rep notify, since they
+  arrive in no guaranteed order and a rebuild driven by whichever came first
+  would size the mesh against a null definition. No mesh data goes on the wire.
+- **A floe is walked on where it is drawn.** Standable solids blocked pawns with
+  the BOUNDS BOX -- the polygon's rectangle -- so a player could stand off the
+  floe and inside the box, in mid-air over open water. Invisible while nothing
+  was drawn, and the first thing you notice once the slab is there. Collision is
+  now complex-as-simple on the mesh itself, which is also the only way to keep a
+  melted-through hole.
+- **Two ordering bugs the mesh exposed.** `TrySolidify` assigned `HoleRing` after
+  `Setup`, and the melt tick set the new outline before widening the hole. Both
+  were invisible while a hole only fed `IsStandableAt`, which reads it live; both
+  now leave a floe drawn and walkable over its own gap.
+
+The materials are placeholders on the same principle as the discharge volumes: a
+Fresnel driving opacity, which is most of what makes a flat surface read as
+liquid, and no textures at all. A real water shader is still the `M_ocean`
+rewrite the plan called for, and still presentation-only -- the waterline stays a
+flat number and nothing queries back into it.
+
+3 new cases under `ARPG.World.Fluid.Surface`.
+
 **Phase 11 -- code complete. Not in the original ten: this is the layer that
 makes the other ten reachable from a controller.** The modal control scheme, the
 speed tiers, the buffering, and auto-sheathe. 13 new cases; 99 pass in total.

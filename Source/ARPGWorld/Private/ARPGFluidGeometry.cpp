@@ -1,9 +1,13 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ARPGFluidGeometry.h"
+#include "CompGeom/ConstrainedDelaunay2.h"
+#include "Components/DynamicMeshComponent.h"
 #include "Curve/GeneralPolygon2.h"
 #include "Curve/PolygonIntersectionUtils.h"
 #include "Curve/PolygonOffsetUtils.h"
+#include "DynamicMesh/DynamicMesh3.h"
+#include "DynamicMesh/MeshNormals.h"
 
 namespace
 {
@@ -414,6 +418,178 @@ TArray<FVector2D> ShrinkToArea(const TArray<FVector2D>& Ring, double TargetArea)
 	}
 
 	return Scaled;
+}
+
+// ---------------------------------------------------------------------------
+// Meshing
+// ---------------------------------------------------------------------------
+
+namespace
+{
+	/**
+	 * One tile of surface texture per metre of world.
+	 *
+	 * Anchored to WORLD position rather than the mesh's own space -- see
+	 * BuildSlabMesh. The number itself only decides how big the material's detail
+	 * reads; it is here rather than on the definition because changing it per
+	 * fluid buys nothing a material's own tiling cannot do better.
+	 */
+	constexpr double SurfaceUVScale = 100.0;
+
+	/** Appends a vertex carrying its world-anchored UV. */
+	int32 AppendSurfaceVertex(UE::Geometry::FDynamicMesh3& Mesh, const FVector2D& Origin,
+		double LocalX, double LocalY, double Z)
+	{
+		const int32 Index = Mesh.AppendVertex(FVector3d(LocalX, LocalY, Z));
+
+		Mesh.SetVertexUV(Index, FVector2f(
+			static_cast<float>((LocalX + Origin.X) / SurfaceUVScale),
+			static_cast<float>((LocalY + Origin.Y) / SurfaceUVScale)));
+
+		return Index;
+	}
+
+	/**
+	 * The wall under one ring, joining its top edge to its bottom.
+	 *
+	 * Wound so the face points AWAY from the body's interior for an outer ring
+	 * given counter-clockwise, and into the gap for a hole given clockwise --
+	 * which is the winding each already has by the time it gets here.
+	 */
+	void AppendWall(UE::Geometry::FDynamicMesh3& Mesh, const TArray<FVector2D>& Ring,
+		const FVector2D& Origin, double BottomZ, double TopZ)
+	{
+		const int32 Count = Ring.Num();
+
+		for (int32 Index = 0; Index < Count; ++Index)
+		{
+			const FVector2D& A = Ring[Index];
+			const FVector2D& B = Ring[(Index + 1) % Count];
+
+			// Fresh vertices per quad rather than shared with the cap, so the lip
+			// of the slab is a HARD edge. Sharing them would average the cap's
+			// upward normal into the wall's sideways one and round the whole thing
+			// off, which on a 20cm puddle reads as a blob rather than as water
+			// with an edge.
+			const int32 TopA = AppendSurfaceVertex(Mesh, Origin, A.X, A.Y, TopZ);
+			const int32 TopB = AppendSurfaceVertex(Mesh, Origin, B.X, B.Y, TopZ);
+			const int32 BottomA = AppendSurfaceVertex(Mesh, Origin, A.X, A.Y, BottomZ);
+			const int32 BottomB = AppendSurfaceVertex(Mesh, Origin, B.X, B.Y, BottomZ);
+
+			Mesh.AppendTriangle(TopA, BottomA, BottomB);
+			Mesh.AppendTriangle(TopA, BottomB, TopB);
+		}
+	}
+}
+
+void BuildSlabMesh(UDynamicMeshComponent* Component, const TArray<FVector2D>& Ring,
+	const TArray<FVector2D>& Hole, const FVector2D& Origin, double BottomZ, double TopZ)
+{
+	using namespace UE::Geometry;
+
+	if (!Component)
+	{
+		return;
+	}
+
+	FDynamicMesh3 Mesh;
+	Mesh.EnableVertexNormals(FVector3f::UnitZ());
+	Mesh.EnableVertexUVs(FVector2f::Zero());
+
+	FGeneralPolygon2d Polygon;
+	if (!ToGeneralPolygon(Ring, Polygon))
+	{
+		// Eroded away to nothing. An EMPTY mesh rather than an early return: the
+		// component is still showing the last shape it was given, and leaving it
+		// there is how a fully evaporated puddle stays visible forever.
+		Component->SetMesh(MoveTemp(Mesh));
+		Component->NotifyMeshUpdated();
+		return;
+	}
+
+	// The hole has to wind against the outline for the fill rule to read it as a
+	// gap rather than as a second body sitting inside the first.
+	TArray<FVector2D> WoundHole;
+	if (Hole.Num() >= 3)
+	{
+		FPolygon2d HolePolygon;
+		for (const FVector2D& Point : Hole)
+		{
+			HolePolygon.AppendVertex(FVector2d(Point.X, Point.Y));
+		}
+
+		if (!HolePolygon.IsClockwise())
+		{
+			HolePolygon.Reverse();
+		}
+
+		// Containment and orientation both unchecked: IntersectWithHoles already
+		// produced this as a hole of this outline, and a rejected hole would
+		// silently mesh over a gap someone can fall through.
+		Polygon.AddHole(HolePolygon, /*bCheckContainment=*/false, /*bCheckOrientation=*/false);
+
+		WoundHole = FromPolygon(HolePolygon);
+	}
+
+	// A CONSTRAINED DELAUNAY rather than ear clipping, because these outlines are
+	// arbitrarily concave -- a pool that three spells have landed in and an ice
+	// shard has cut across -- and a solid's may have a gap in the middle. Both are
+	// exactly what the constrained triangulator is for.
+	FConstrainedDelaunay2d Triangulator;
+	Triangulator.FillRule = FConstrainedDelaunay2d::EFillRule::Positive;
+	Triangulator.Add(Polygon);
+
+	if (!Triangulator.Triangulate() || Triangulator.Triangles.Num() == 0)
+	{
+		Component->SetMesh(FDynamicMesh3());
+		Component->NotifyMeshUpdated();
+		return;
+	}
+
+	const int32 CapCount = Triangulator.Vertices.Num();
+	const bool bHasDepth = TopZ - BottomZ > UE_DOUBLE_SMALL_NUMBER;
+
+	for (const FVector2d& Vertex : Triangulator.Vertices)
+	{
+		AppendSurfaceVertex(Mesh, Origin, Vertex.X, Vertex.Y, TopZ);
+	}
+
+	if (bHasDepth)
+	{
+		for (const FVector2d& Vertex : Triangulator.Vertices)
+		{
+			AppendSurfaceVertex(Mesh, Origin, Vertex.X, Vertex.Y, BottomZ);
+		}
+	}
+
+	for (const FIndex3i& Triangle : Triangulator.Triangles)
+	{
+		Mesh.AppendTriangle(Triangle.A, Triangle.B, Triangle.C);
+
+		if (bHasDepth)
+		{
+			// Reversed, so the underside faces DOWN. A one-sided slab whose floor
+			// pointed up is invisible from below and lets you see into it through
+			// the walls.
+			Mesh.AppendTriangle(Triangle.A + CapCount, Triangle.C + CapCount,
+				Triangle.B + CapCount);
+		}
+	}
+
+	if (bHasDepth)
+	{
+		AppendWall(Mesh, FromPolygon(Polygon.GetOuter()), Origin, BottomZ, TopZ);
+
+		if (WoundHole.Num() >= 3)
+		{
+			AppendWall(Mesh, WoundHole, Origin, BottomZ, TopZ);
+		}
+	}
+
+	FMeshNormals::QuickComputeVertexNormals(Mesh);
+
+	Component->SetMesh(MoveTemp(Mesh));
+	Component->NotifyMeshUpdated();
 }
 
 } // namespace ARPGFluidGeometry

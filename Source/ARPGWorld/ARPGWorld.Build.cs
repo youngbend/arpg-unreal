@@ -39,11 +39,17 @@ public class ARPGWorld : ModuleRules
 		// pulled the whole GeometryProcessing include graph into ARPGWorld's
 		// dependents for nothing. UDeveloperSettings is likewise only the
 		// settings object's own base class.
+		//
+		// GeometryFramework is UDynamicMeshComponent, which a fluid body draws
+		// itself with. It stays private on the same rule: the body's header names
+		// the component as a forward declaration only, so nothing downstream has
+		// to know how a puddle is rendered in order to ask where one is.
 		PrivateDependencyModuleNames.AddRange(new string[] {
 			"GameplayTasks",
 			"DeveloperSettings",
 			"GeometryCore",
-			"GeometryAlgorithms"
+			"GeometryAlgorithms",
+			"GeometryFramework"
 		});
 	}
 }

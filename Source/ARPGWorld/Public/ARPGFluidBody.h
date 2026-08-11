@@ -10,6 +10,9 @@ class UARPGElementalVolumeComponent;
 class UARPGFluidDefinition;
 class UARPGSolidDefinition;
 class UBoxComponent;
+class UDynamicMeshComponent;
+class UMaterialInterface;
+class UPrimitiveComponent;
 
 /**
  * Shared behaviour of anything that IS an outline lying on the ground.
@@ -17,8 +20,13 @@ class UBoxComponent;
  * A BODY IS ITS POLYGON. The ring (world XY, one simple outer ring) is the
  * single source of truth, and everything else is rebuilt from it whenever it
  * changes: the trigger bounds, the elemental volume's energy, whether it counts
- * as a reservoir. Storing anything derived alongside it is how the two get out
- * of step.
+ * as a reservoir, and the mesh you can see. Storing anything derived alongside it
+ * is how the two get out of step.
+ *
+ * THE RING IS ALSO THE ONLY THING THAT REPLICATES. Nothing sends mesh data: a
+ * client receives the outline and rebuilds the identical surface and collision
+ * from it, because both are pure functions of the polygon. That is what makes a
+ * floe two players can stand on cost a few dozen FVector2Ds on the wire.
  */
 UCLASS(Abstract)
 class ARPGWORLD_API AARPGFluidBody : public AActor
@@ -27,6 +35,8 @@ class ARPGWORLD_API AARPGFluidBody : public AActor
 
 public:
 	AARPGFluidBody();
+
+	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
 	/** The outline, in world XY. Setting it rebuilds everything derived. */
 	UFUNCTION(BlueprintCallable, Category = "ARPG|Fluid")
@@ -68,18 +78,68 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<UARPGElementalVolumeComponent> Volume;
 
+	/**
+	 * What you actually see, rebuilt from the ring every time it changes.
+	 *
+	 * A DYNAMIC MESH RATHER THAN THE WATER PLUGIN, and the difference is not a
+	 * preference. Unreal's water bodies are spline-authored level geometry served
+	 * by a water zone -- right for a river someone placed, wrong for a puddle a
+	 * spell made half a second ago and whose outline changes four times a second.
+	 * A body here is already a polygon, so drawing it is a triangulation and an
+	 * extrude, and the water LOOK is entirely the material's job.
+	 */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UDynamicMeshComponent> Surface;
+
 	/** Ground height the body formed at. */
-	UPROPERTY(BlueprintReadOnly, Category = "ARPG|Fluid")
+	UPROPERTY(ReplicatedUsing = OnRep_Body, BlueprintReadOnly, Category = "ARPG|Fluid")
 	float GroundHeight = 0.f;
 
+	/** Triangles in the drawn surface. Zero when there is nothing to see. */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
+	int32 GetSurfaceTriangleCount() const;
+
+	/**
+	 * The drawn surface as a plain primitive, for anything that only wants its
+	 * collision or its bounds.
+	 *
+	 * Here so a caller does not have to depend on GeometryFramework to ask
+	 * whether the floe is walkable -- see the module's own note on why the mesh
+	 * type stays private to ARPGWorld.
+	 */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
+	UPrimitiveComponent* GetSurfaceComponent() const;
+
+	/** What the surface is drawn with, or null if nothing was applied. */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
+	UMaterialInterface* GetSurfaceMaterial() const;
+
 protected:
-	/** Rebuilds the trigger box and the volume from the current ring. */
+	/** Rebuilds the trigger box, the volume, the mesh and the collision. */
 	virtual void RebuildFromRing();
 
 	/** How far the surface sits above the ground. */
 	virtual float GetSurfaceOffset() const { return 0.f; }
 
-	UPROPERTY()
+	/** The definition's material, loaded. Null for a body with nothing authored. */
+	virtual UMaterialInterface* ResolveSurfaceMaterial() const { return nullptr; }
+
+	/** Interior gaps to cut out of the mesh. Only a solid has any. */
+	virtual const TArray<FVector2D>& GetMeshHole() const;
+
+	/**
+	 * Every replicated field lands here, and every one of them rebuilds.
+	 *
+	 * ONE NOTIFY FOR ALL OF THEM on purpose. The ring, the ground height and the
+	 * definition arrive in no guaranteed order, and a rebuild driven by whichever
+	 * came first would size the mesh with a null definition and leave it wrong.
+	 * Rebuilding on each is idempotent and lands on the right answer whenever the
+	 * last one turns up.
+	 */
+	UFUNCTION()
+	void OnRep_Body();
+
+	UPROPERTY(ReplicatedUsing = OnRep_Body)
 	TArray<FVector2D> Ring;
 };
 
@@ -93,8 +153,10 @@ class ARPGWORLD_API AARPGFluidPool : public AARPGFluidBody
 	GENERATED_BODY()
 
 public:
-	UPROPERTY(BlueprintReadOnly, Category = "ARPG|Fluid")
+	UPROPERTY(ReplicatedUsing = OnRep_Body, BlueprintReadOnly, Category = "ARPG|Fluid")
 	TObjectPtr<UARPGFluidDefinition> Definition;
+
+	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
 	/** Configures the pool. Called by the subsystem; nothing else builds one. */
 	void Setup(UARPGFluidDefinition* InDefinition, const TArray<FVector2D>& InRing,
@@ -103,6 +165,7 @@ public:
 protected:
 	virtual void RebuildFromRing() override;
 	virtual float GetSurfaceOffset() const override;
+	virtual UMaterialInterface* ResolveSurfaceMaterial() const override;
 };
 
 /**
@@ -119,12 +182,14 @@ class ARPGWORLD_API AARPGFluidSolid : public AARPGFluidBody
 	GENERATED_BODY()
 
 public:
-	UPROPERTY(BlueprintReadOnly, Category = "ARPG|Fluid")
+	UPROPERTY(ReplicatedUsing = OnRep_Body, BlueprintReadOnly, Category = "ARPG|Fluid")
 	TObjectPtr<UARPGSolidDefinition> Definition;
 
 	/** Interior gaps, kept separate from the outline -- see the class comment. */
-	UPROPERTY(BlueprintReadOnly, Category = "ARPG|Fluid")
+	UPROPERTY(ReplicatedUsing = OnRep_Body, BlueprintReadOnly, Category = "ARPG|Fluid")
 	TArray<FVector2D> HoleRing;
+
+	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
 	void Setup(UARPGSolidDefinition* InDefinition, const TArray<FVector2D>& InRing,
 		float InGroundHeight);
@@ -136,4 +201,6 @@ public:
 protected:
 	virtual void RebuildFromRing() override;
 	virtual float GetSurfaceOffset() const override;
+	virtual UMaterialInterface* ResolveSurfaceMaterial() const override;
+	virtual const TArray<FVector2D>& GetMeshHole() const override { return HoleRing; }
 };

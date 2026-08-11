@@ -4,6 +4,8 @@
 
 #include "CoreMinimal.h"
 
+class UDynamicMeshComponent;
+
 /**
  * Ground-plane polygon maths shared by every part of the fluid system. Port of
  * Godot's fluid_geometry.
@@ -113,4 +115,28 @@ namespace ARPGFluidGeometry
 	 * iteration.
 	 */
 	ARPGWORLD_API TArray<FVector2D> ShrinkToArea(const TArray<FVector2D>& Ring, double TargetArea);
+
+	/**
+	 * The fifth call: turns an outline into something you can SEE.
+	 *
+	 * A slab -- a triangulated cap at TopZ, another at BottomZ, and walls joining
+	 * them -- written straight onto a dynamic mesh component. Give it the same
+	 * ring the body already stores and the drawn shape is the simulated shape by
+	 * construction, with no second representation to fall out of step.
+	 *
+	 * The component takes it in LOCAL space, so Origin is the body's own XY
+	 * centre; everything is emitted relative to that. UVs are still anchored to
+	 * WORLD position, which matters: a pool's centroid moves every time it merges
+	 * or erodes, and local UVs would make the whole surface texture swim sideways
+	 * each tick while the water itself sat still.
+	 *
+	 * A hole is optional and is what a solid keeps -- see IntersectWithHoles. Pass
+	 * an empty ring for a fluid, which never has one.
+	 *
+	 * TopZ == BottomZ is legal and gives a flat cap with no walls, which is what a
+	 * body with no depth is.
+	 */
+	ARPGWORLD_API void BuildSlabMesh(UDynamicMeshComponent* Component,
+		const TArray<FVector2D>& Ring, const TArray<FVector2D>& Hole,
+		const FVector2D& Origin, double BottomZ, double TopZ);
 }

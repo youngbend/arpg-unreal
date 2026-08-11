@@ -6,6 +6,10 @@
 #include "ARPGFluidGeometry.h"
 #include "ARPGMagicElement.h"
 #include "Components/BoxComponent.h"
+#include "Components/DynamicMeshComponent.h"
+#include "DynamicMesh/DynamicMesh3.h"
+#include "Materials/MaterialInterface.h"
+#include "Net/UnrealNetwork.h"
 
 FGameplayTag UARPGFluidDefinition::GetElementTag() const
 {
@@ -37,6 +41,64 @@ AARPGFluidBody::AARPGFluidBody()
 	Volume->SetupAttachment(Bounds);
 	Volume->OverlapSource = Bounds;
 	Volume->bAmbientSource = true;
+
+	Surface = CreateDefaultSubobject<UDynamicMeshComponent>(TEXT("Surface"));
+	Surface->SetupAttachment(Bounds);
+	Surface->SetMobility(EComponentMobility::Movable);
+
+	// NO COLLISION BY DEFAULT, because water is not a thing you stand on. A solid
+	// turns this on for itself, which is the one case where the drawn surface and
+	// the walkable one have to be the same surface.
+	Surface->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+}
+
+void AARPGFluidBody::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+
+	// THE OUTLINE, NOT THE MESH. Everything a client draws and walks on is a pure
+	// function of these two, so a floe costs a few dozen FVector2Ds rather than
+	// vertex buffers, and server and client geometry are identical by construction
+	// instead of by hoping the cook matched.
+	DOREPLIFETIME(AARPGFluidBody, Ring);
+	DOREPLIFETIME(AARPGFluidBody, GroundHeight);
+}
+
+void AARPGFluidBody::OnRep_Body()
+{
+	RebuildFromRing();
+}
+
+const TArray<FVector2D>& AARPGFluidBody::GetMeshHole() const
+{
+	static const TArray<FVector2D> None;
+	return None;
+}
+
+int32 AARPGFluidBody::GetSurfaceTriangleCount() const
+{
+	if (!Surface)
+	{
+		return 0;
+	}
+
+	int32 Count = 0;
+	Surface->ProcessMesh([&Count](const UE::Geometry::FDynamicMesh3& Mesh)
+	{
+		Count = Mesh.TriangleCount();
+	});
+
+	return Count;
+}
+
+UPrimitiveComponent* AARPGFluidBody::GetSurfaceComponent() const
+{
+	return Surface;
+}
+
+UMaterialInterface* AARPGFluidBody::GetSurfaceMaterial() const
+{
+	return Surface ? Surface->GetMaterial(0) : nullptr;
 }
 
 void AARPGFluidBody::SetRing(const TArray<FVector2D>& NewRing)
@@ -60,6 +122,13 @@ void AARPGFluidBody::RebuildFromRing()
 {
 	if (Ring.Num() < 3)
 	{
+		// NOT a bare return, now that there is something drawn. A body with no
+		// outline left has to stop being visible: the subsystem destroys an eroded
+		// pool, but a client can see the emptied ring replicate before the
+		// destruction reaches it, and the difference between the two is a puddle
+		// hanging in the air until the actor finally goes.
+		ARPGFluidGeometry::BuildSlabMesh(Surface, Ring, GetMeshHole(),
+			FVector2D::ZeroVector, /*BottomZ=*/0.f, /*TopZ=*/0.f);
 		return;
 	}
 
@@ -80,6 +149,20 @@ void AARPGFluidBody::RebuildFromRing()
 		FMath::Max(1.f, SurfaceOffset * 4.f + 100.f)));
 
 	Volume->SurfaceHeightOffset = SurfaceOffset;
+
+	// THE SAME RING that decides everything else decides what you see, so the
+	// drawn shape cannot drift from the simulated one -- there is only one shape.
+	// Local space, because the actor sits at the centroid at ground height.
+	ARPGFluidGeometry::BuildSlabMesh(Surface, Ring, GetMeshHole(), Centre,
+		/*BottomZ=*/0.f, /*TopZ=*/SurfaceOffset);
+
+	// Re-applied on every rebuild rather than once at setup: on a client the
+	// definition arrives by replication and may land after the first ring, so
+	// there is no single moment that is reliably "after we know what this is".
+	if (UMaterialInterface* Material = ResolveSurfaceMaterial())
+	{
+		Surface->SetMaterial(0, Material);
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -103,6 +186,21 @@ void AARPGFluidPool::Setup(UARPGFluidDefinition* InDefinition, const TArray<FVec
 float AARPGFluidPool::GetSurfaceOffset() const
 {
 	return Definition ? Definition->Depth : 0.f;
+}
+
+UMaterialInterface* AARPGFluidPool::ResolveSurfaceMaterial() const
+{
+	return Definition ? Definition->SurfaceMaterial.LoadSynchronous() : nullptr;
+}
+
+void AARPGFluidPool::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+
+	// The definition is an ASSET, so this replicates as a stable path rather than
+	// as an object -- which is what lets a client size, colour and texture the
+	// body from the same numbers the server used.
+	DOREPLIFETIME(AARPGFluidPool, Definition);
 }
 
 void AARPGFluidPool::RebuildFromRing()
@@ -152,6 +250,23 @@ float AARPGFluidSolid::GetSurfaceOffset() const
 	return Definition ? Definition->Thickness : 0.f;
 }
 
+UMaterialInterface* AARPGFluidSolid::ResolveSurfaceMaterial() const
+{
+	return Definition ? Definition->SurfaceMaterial.LoadSynchronous() : nullptr;
+}
+
+void AARPGFluidSolid::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+
+	DOREPLIFETIME(AARPGFluidSolid, Definition);
+
+	// The hole matters on the client as much as the outline does: it is a gap you
+	// can fall through, so a client that meshed and collided the slab without it
+	// would let a player stand on air over the melted-out middle.
+	DOREPLIFETIME(AARPGFluidSolid, HoleRing);
+}
+
 void AARPGFluidSolid::RebuildFromRing()
 {
 	Super::RebuildFromRing();
@@ -168,14 +283,29 @@ void AARPGFluidSolid::RebuildFromRing()
 	Volume->bReservoir = false;
 	Volume->bAmbientSource = false;
 
-	if (Definition->bStandable)
+	if (!Definition->bStandable)
 	{
-		// Blocks rather than overlaps, so a character walks ON it. Note the
-		// bounds are a BOX: standing off the polygon but inside the box is
-		// possible, which is why anything that cares asks IsStandableAt.
-		Bounds->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
-		Bounds->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
+		Surface->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		return;
 	}
+
+	// THE DRAWN SURFACE IS THE WALKABLE ONE. This used to block pawns with the
+	// BOUNDS BOX, which is the polygon's rectangle -- so a player could stand off
+	// the floe and inside the box, in mid-air over open water. That was tolerable
+	// only while nothing was drawn; the moment the slab is visible, the gap
+	// between what you see and what holds you up is the bug you notice first.
+	//
+	// Complex-as-simple, because a slab with an eroded hole through it is not
+	// convex and there is nothing to approximate it with that keeps the hole.
+	Surface->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+	Surface->SetCollisionObjectType(ECC_WorldDynamic);
+	Surface->SetCollisionResponseToAllChannels(ECR_Block);
+	Surface->EnableComplexAsSimpleCollision();
+
+	// Recooked on every melt tick, which is 4Hz per floe by default. Cheap for a
+	// slab of a few hundred triangles, and the alternative -- collision lagging
+	// the visible edge as it erodes -- is a player standing on water.
+	Surface->UpdateCollision(/*bOnlyIfPending=*/false);
 }
 
 bool AARPGFluidSolid::IsStandableAt(FVector WorldPoint) const

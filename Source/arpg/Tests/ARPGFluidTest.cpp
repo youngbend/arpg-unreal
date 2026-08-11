@@ -18,6 +18,7 @@
 #include "Components/SphereComponent.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
+#include "Materials/Material.h"
 
 /**
  * Persistent fluids.
@@ -374,6 +375,171 @@ bool FARPGFluidRainTest::RunTest(const FString& Parameters)
 	// Literally the same operation with the sign flipped, which is the entire
 	// reason a body is a polygon rather than a grid or a heightfield.
 	TestTrue(TEXT("Rain grows the pool"), Pool->GetArea() > Initial);
+
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// Surface
+//
+// A body is a polygon, and until this landed that was ALL it was: the fluid
+// system had every operation on a shape and no way to see one. The mesh is the
+// same ring the simulation uses, so there is no second representation to drift.
+// ---------------------------------------------------------------------------
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFluidSurfaceTest,
+	"ARPG.World.Fluid.Surface.APoolIsDrawnFromItsOwnOutline",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGFluidSurfaceTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+	UARPGFluidDefinition* WaterDefinition = MakeWater(GetTransientPackage(), Water);
+
+	// A real, always-loaded engine material rather than a transient one, so the
+	// soft pointer has something with a stable path to resolve.
+	WaterDefinition->SurfaceMaterial = UMaterial::GetDefaultMaterial(MD_Surface);
+	Fluids->Definitions = { WaterDefinition };
+
+	AARPGFluidPool* Pool = Fluids->Deposit(FVector(0, 0, 0), 200.f, TAG_Element_Water);
+	if (!Pool)
+	{
+		AddError(TEXT("Setup: no pool was deposited."));
+		return false;
+	}
+
+	TestTrue(TEXT("A deposited pool has a surface to see"),
+		Pool->GetSurfaceTriangleCount() > 0);
+
+	// A SLAB, not a flat cap: the depth is what gives the water an edge. Two caps
+	// plus a wall quad per ring segment is strictly more than the cap alone.
+	const int32 Triangles = Pool->GetSurfaceTriangleCount();
+	TestTrue(TEXT("And is a slab rather than a flat sheet"), Triangles > 2 * Pool->GetRing().Num());
+
+	TestEqual(TEXT("Drawn with the material its definition names"),
+		Pool->GetSurfaceMaterial(), static_cast<UMaterialInterface*>(UMaterial::GetDefaultMaterial(MD_Surface)));
+
+	// The mesh follows the simulation, because it IS the simulation's ring. Rain
+	// is an outward offset, so the outline it produces has to reach the mesh.
+	Fluids->bRaining = true;
+	Fluids->StepSimulation(1.f);
+
+	TestTrue(TEXT("A grown pool still has a surface"), Pool->GetSurfaceTriangleCount() > 0);
+
+	// Eroded to nothing: the surface has to GO. The subsystem destroys a pool this
+	// small, but a client sees the emptied outline replicate first, and a bare
+	// early return there leaves a puddle hanging in the air until it catches up.
+	Pool->SetRing(TArray<FVector2D>());
+	TestEqual(TEXT("An outline with nothing left draws nothing"),
+		Pool->GetSurfaceTriangleCount(), 0);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFluidReplicationTest,
+	"ARPG.World.Fluid.Surface.TheOutlineIsAllThatTravels",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGFluidReplicationTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	// NOTHING SENDS MESH DATA. A client is given the outline, the ground height
+	// and the definition, and everything it draws and walks on is rebuilt from
+	// those three -- so they are the three that have to carry the Net flag. This
+	// asserts the wiring, because the failure mode is silent: the actor still
+	// replicates, the client just receives an empty ring and renders nothing.
+	for (const TCHAR* Name : { TEXT("Ring"), TEXT("GroundHeight") })
+	{
+		const FProperty* Property = AARPGFluidBody::StaticClass()->FindPropertyByName(Name);
+		TestTrue(FString::Printf(TEXT("A body replicates its %s"), Name),
+			Property && Property->HasAnyPropertyFlags(CPF_Net));
+	}
+
+	const FProperty* PoolDefinition = AARPGFluidPool::StaticClass()->FindPropertyByName(TEXT("Definition"));
+	TestTrue(TEXT("A pool replicates its definition"),
+		PoolDefinition && PoolDefinition->HasAnyPropertyFlags(CPF_Net));
+
+	const FProperty* Hole = AARPGFluidSolid::StaticClass()->FindPropertyByName(TEXT("HoleRing"));
+	TestTrue(TEXT("A solid replicates its hole, which is a gap you can fall through"),
+		Hole && Hole->HasAnyPropertyFlags(CPF_Net));
+
+	// And the rebuild genuinely needs nothing else. Setup is server-only, so this
+	// assigns exactly what replication would and asks the body to build itself.
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	AARPGFluidPool* Pool = Scope.World->SpawnActor<AARPGFluidPool>(
+		AARPGFluidPool::StaticClass(), FTransform::Identity, Params);
+
+	Pool->Definition = MakeWater(GetTransientPackage(), Water);
+	Pool->GroundHeight = 250.f;
+	Pool->SetRing(ARPGFluidGeometry::MakeCircle(FVector2D(400, 0), 150.0));
+
+	TestTrue(TEXT("A body given only replicated state draws itself"),
+		Pool->GetSurfaceTriangleCount() > 0);
+	TestEqual(TEXT("At the height it was told"), Pool->GetActorLocation().Z, 250.f, 1.f);
+	TestTrue(TEXT("And knows where it is"), Pool->ContainsPoint(FVector(400, 0, 250)));
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFluidSolidSurfaceTest,
+	"ARPG.World.Fluid.Surface.AFloeIsWalkedOnWhereItIsDrawn",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGFluidSolidSurfaceTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGMagicElement* Ice = MakeElement(GetTransientPackage(), TAG_Element_Ice);
+
+	UARPGSolidDefinition* IceDefinition = NewObject<UARPGSolidDefinition>();
+	IceDefinition->Element = Ice;
+	IceDefinition->Thickness = 30.f;
+	IceDefinition->bStandable = true;
+
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	AARPGFluidSolid* Floe = Scope.World->SpawnActor<AARPGFluidSolid>(
+		AARPGFluidSolid::StaticClass(), FTransform::Identity, Params);
+
+	// A slab with a melted-through gap in the middle, which is the case a solid
+	// keeps holes for at all.
+	Floe->HoleRing = ARPGFluidGeometry::MakeCircle(FVector2D::ZeroVector, 60.0);
+	Floe->Setup(IceDefinition, ARPGFluidGeometry::MakeCircle(FVector2D::ZeroVector, 300.0), 0.f);
+
+	TestTrue(TEXT("A floe has a surface"), Floe->GetSurfaceTriangleCount() > 0);
+
+	// THE DRAWN SURFACE IS THE WALKABLE ONE. This used to block pawns with the
+	// bounds BOX -- the polygon's rectangle -- so a player could stand off the floe
+	// and inside the box, in mid-air over open water. Invisible while nothing was
+	// drawn; the first thing you notice once the slab is there.
+	TestNotEqual(TEXT("Its mesh carries the collision"),
+		Floe->GetSurfaceComponent()->GetCollisionEnabled(), ECollisionEnabled::NoCollision);
+	TestEqual(TEXT("And its broadphase box has gone back to being broadphase"),
+		Floe->Bounds->GetCollisionResponseToChannel(ECC_Pawn), ECR_Overlap);
+
+	// Which agrees with the gameplay answer, and both know about the hole.
+	TestTrue(TEXT("You can stand on the slab"),
+		Floe->IsStandableAt(FVector(200, 0, Floe->GetSurfaceHeight())));
+	TestFalse(TEXT("But not down the hole through it"),
+		Floe->IsStandableAt(FVector(0, 0, Floe->GetSurfaceHeight())));
+
+	// A sheet of frost is not something you stand on, and says so the same way.
+	IceDefinition->bStandable = false;
+	Floe->SetRing(ARPGFluidGeometry::MakeCircle(FVector2D::ZeroVector, 300.0));
+
+	TestEqual(TEXT("An unstandable solid carries no collision at all"),
+		Floe->GetSurfaceComponent()->GetCollisionEnabled(), ECollisionEnabled::NoCollision);
 
 	return true;
 }

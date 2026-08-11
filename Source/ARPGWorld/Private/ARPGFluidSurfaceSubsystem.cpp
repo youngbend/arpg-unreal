@@ -440,11 +440,14 @@ bool UARPGFluidSurfaceSubsystem::TrySolidify(UARPGElementalVolumeComponent* A,
 		return false;
 	}
 
-	Solid->Setup(SolidDefinition, FrozenRing, Pool->GetSurfaceHeight());
-
 	// Only the largest hole is carried: a solid keeps its gaps, but tracking an
 	// arbitrary set of them buys nothing a single dominant gap does not, and
 	// each extra ring is another thing erosion has to keep clean.
+	//
+	// SET BEFORE Setup, which is what builds the slab's mesh and its collision.
+	// Assigning it afterwards -- which is what this did while a hole only affected
+	// IsStandableAt -- now leaves a floe drawn and walkable straight over its own
+	// gap until something else happens to rebuild it.
 	if (Holes.Num() > 0)
 	{
 		int32 Largest = 0;
@@ -458,6 +461,8 @@ bool UARPGFluidSurfaceSubsystem::TrySolidify(UARPGElementalVolumeComponent* A,
 		}
 		Solid->HoleRing = Holes[Largest];
 	}
+
+	Solid->Setup(SolidDefinition, FrozenRing, Pool->GetSurfaceHeight());
 
 	ActiveSolids.Add(Solid);
 
@@ -617,15 +622,19 @@ void UARPGFluidSurfaceSubsystem::TickWeather(float DeltaTime)
 			continue;
 		}
 
-		Solid->SetRing(Next);
-
 		// The outer edge shrinks while the hole WIDENS -- both are erosion, and
 		// keeping the rings apart is what makes that fall out rather than
 		// needing a special case.
+		//
+		// Widened BEFORE the ring is set, because setting the ring is what rebuilds
+		// the mesh and the collision, and both read the hole. The other order draws
+		// this tick's outline around last tick's gap.
 		if (Solid->HoleRing.Num() >= 3)
 		{
 			Solid->HoleRing = ARPGFluidGeometry::OffsetRing(
 				Solid->HoleRing, Solid->Definition->MeltRate * DeltaTime);
 		}
+
+		Solid->SetRing(Next);
 	}
 }
