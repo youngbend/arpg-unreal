@@ -182,21 +182,22 @@ void UARPGElementalReactionSubsystem::Resolve(UARPGElementalVolumeComponent* A,
 		UARPGElementalVolumeComponent* Charge = bAIsCharge ? A : B;
 		UARPGElementalVolumeComponent* Medium = bAIsCharge ? B : A;
 
-		// NOT THROUGH THE ICE. A floe floating on a pool roofs over the water
-		// beneath it, and the pool's own collider knows nothing about that -- so
-		// a bolt that struck the ice would enter the river underneath and
+		// NOT THROUGH THE ICE. A floe floating on a body of water roofs over what
+		// is beneath it, and the water's own collider knows nothing about that --
+		// so a bolt that struck the ice would enter the water underneath and
 		// conduct from there. What it hit was the ice.
 		//
 		// Asked at the CHARGE's own position, because that is where the strike
-		// landed.
+		// landed. And asked for ANY medium, not only a reservoir: a floe forms on
+		// whatever was frozen, and a pool is only a reservoir once it has gathered
+		// past a threshold -- so gating on that meant ice on an ordinary puddle
+		// roofed nothing at all, which is the common case rather than the rare
+		// one. The query walks the live solids and is free when there are none.
 		bool bRoofed = false;
-		if (Medium->bReservoir)
+		if (const UARPGFluidSurfaceSubsystem* Fluids =
+				GetWorld()->GetSubsystem<UARPGFluidSurfaceSubsystem>())
 		{
-			if (const UARPGFluidSurfaceSubsystem* Fluids =
-					GetWorld()->GetSubsystem<UARPGFluidSurfaceSubsystem>())
-			{
-				bRoofed = Fluids->IsCoveredBySolid(Charge->GetVolumeLocation());
-			}
+			bRoofed = Fluids->IsCoveredBySolid(Charge->GetVolumeLocation());
 		}
 
 		if (!bRoofed && Medium->Conductivity > 0.f)

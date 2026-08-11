@@ -204,6 +204,10 @@ FLUIDS = [
         # body of water, which is the point at which "bottomless" is honest.
         "reservoir_area": 800000.0,
         "energy_per_area": 0.001,
+        # High: water is what lightning travels through, and the Conduct row in
+        # the combination table is what says so. This is only how well THIS
+        # substance carries it -- lava would be near zero.
+        "conductivity": 0.85,
         "rain_growth_rate": 4.5,
         "evaporation_rate": 1.5,
         # Generous on purpose: two casts into the same spot are ONE puddle, and
@@ -248,6 +252,7 @@ def main():
         fluid.set_editor_property("minimum_area", spec["minimum_area"])
         fluid.set_editor_property("reservoir_area", spec["reservoir_area"])
         fluid.set_editor_property("energy_per_area", spec["energy_per_area"])
+        fluid.set_editor_property("conductivity", spec["conductivity"])
         fluid.set_editor_property("rain_growth_rate", spec["rain_growth_rate"])
         fluid.set_editor_property("evaporation_rate", spec["evaporation_rate"])
         fluid.set_editor_property("merge_distance", spec["merge_distance"])

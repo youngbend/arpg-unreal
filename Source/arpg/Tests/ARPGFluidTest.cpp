@@ -4,6 +4,7 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
+#include "ARPGConductionSubsystem.h"
 #include "ARPGDischargeContext.h"
 #include "ARPGDischargeEffect.h"
 #include "ARPGElementPalette.h"
@@ -641,6 +642,178 @@ bool FARPGFluidMeltTest::RunTest(const FString& Parameters)
 
 	TestEqual(TEXT("Melted through, the floe is gone"), Fluids->GetSolids().Num(), 0);
 	TestEqual(TEXT("And left water behind it"), Fluids->GetPools().Num(), 1);
+
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// Conduction through real bodies
+//
+// The phase 6 gate is "lightning floods a puddle chain and hurts a second
+// player standing in it", and the conduction cases that prove the chain do it
+// with hand-built volumes whose Conductivity they set themselves. Nothing ever
+// set it on a deposited pool -- the volume's default is 0 and no definition
+// carried the number -- so the gate did not hold for actual puddles.
+// ---------------------------------------------------------------------------
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFluidConductChainTest,
+	"ARPG.World.Fluid.Conduction.APuddleChainCarriesACharge",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGFluidConductChainTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+	UARPGElementalReactionSubsystem* Reactions =
+		Scope.World->GetSubsystem<UARPGElementalReactionSubsystem>();
+	UARPGConductionSubsystem* Conduction = Scope.World->GetSubsystem<UARPGConductionSubsystem>();
+
+	if (!Conduction)
+	{
+		AddError(TEXT("Setup: no conduction subsystem in the test world."));
+		return false;
+	}
+
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+	UARPGMagicElement* Lightning = MakeElement(GetTransientPackage(), TAG_Element_Lightning);
+
+	UARPGFluidDefinition* WaterDefinition = MakeWater(GetTransientPackage(), Water);
+	WaterDefinition->EvaporationRate = 0.f;
+
+	// Zero, so three deposits stay three BODIES rather than merging into one --
+	// the chain is the point, and a merge would make it a single puddle.
+	WaterDefinition->MergeDistance = 0.f;
+
+	Fluids->Definitions = { WaterDefinition };
+
+	// Lightning TRAVELS THROUGH water rather than reacting with it. One row.
+	UARPGMagicCombinationTable* Table = NewObject<UARPGMagicCombinationTable>();
+	UARPGMagicCombinationEntry* Entry = NewObject<UARPGMagicCombinationEntry>(Table);
+	Entry->RequiredElements.AddTag(TAG_Element_Lightning);
+	Entry->RequiredElements.AddTag(TAG_Element_Water);
+	Entry->Result = Lightning;
+	Entry->Mode = EARPGReactionMode::Conduct;
+	Entry->Scope = static_cast<int32>(EARPGCombinationScope::Collision);
+	Table->Entries.Add(Entry);
+
+	Reactions->CombinationTable = Table;
+	Conduction->CombinationTable = Table;
+	Conduction->DistanceLoss = 0.f;   // isolate the per-hop conductivity term
+
+	// Three puddles in a row, each overlapping the next. Nothing authors the
+	// connection -- touching IS the connection.
+	AARPGFluidPool* Near = Fluids->Deposit(FVector(0, 0, 0), 100.f, TAG_Element_Water);
+	AARPGFluidPool* Middle = Fluids->Deposit(FVector(150, 0, 0), 100.f, TAG_Element_Water);
+	AARPGFluidPool* Far = Fluids->Deposit(FVector(300, 0, 0), 100.f, TAG_Element_Water);
+
+	if (Fluids->GetPools().Num() != 3)
+	{
+		AddError(TEXT("Setup: expected three separate pools."));
+		return false;
+	}
+
+	// THE THING THAT WAS MISSING, and nobody sets it here: it comes off the
+	// definition, which is the only place a designer could ever have put it.
+	TestTrue(TEXT("A deposited pool carries a charge without anyone saying so"),
+		Near->Volume->Conductivity > 0.f);
+
+	// NOTHING PRIMES THE OVERLAPS HERE, and that is the point of the graph:
+	// GetOverlappingVolumes runs a live physics query rather than reading the
+	// component's cached overlap list. The cache is maintained as a side effect of
+	// MOVEMENT and so is empty for anything standing still -- which is every
+	// puddle in the game.
+	const double NearArea = Near->GetArea();
+
+	UARPGElementalVolumeComponent* Bolt =
+		MakeShard(Scope.World, Lightning, FVector(0, 0, 0), 100.f);
+	Bolt->SetEnergy(200.f);
+
+	Reactions->Resolve(Bolt, Near->Volume);
+
+	// The gate: the charge runs the WHOLE chain, from the puddle it struck to the
+	// one two hops away.
+	TestEqual(TEXT("The charge floods every touching puddle"),
+		Conduction->GetLastReachedCount(), 3);
+
+	// A MEDIUM IS A CARRIER, NOT A REACTANT. The bolt is spent delivering itself
+	// into the water; the water is neither consumed nor boiled -- which is what
+	// went wrong when Conductivity was zero, because the pair then fell through to
+	// an ordinary energy trade and ate the puddle instead of running through it.
+	TestEqual(TEXT("The bolt is spent entering the water"), Bolt->GetEnergy(), 0.f);
+	TestEqual(TEXT("And the puddle it entered is untouched"), Near->GetArea(), NearArea, 1.0);
+	TestNull(TEXT("With no product popped at the contact"), Reactions->GetLastProduct());
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFluidNotThroughIceTest,
+	"ARPG.World.Fluid.Conduction.NotThroughTheIce",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGFluidNotThroughIceTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+	UARPGElementalReactionSubsystem* Reactions =
+		Scope.World->GetSubsystem<UARPGElementalReactionSubsystem>();
+	UARPGConductionSubsystem* Conduction = Scope.World->GetSubsystem<UARPGConductionSubsystem>();
+
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+	UARPGMagicElement* Ice = MakeElement(GetTransientPackage(), TAG_Element_Ice);
+	UARPGMagicElement* Lightning = MakeElement(GetTransientPackage(), TAG_Element_Lightning);
+
+	UARPGFluidDefinition* WaterDefinition = MakeWater(GetTransientPackage(), Water);
+	WaterDefinition->EvaporationRate = 0.f;
+
+	// Both relationships in the one table, because both are relationships: the
+	// same asset says ice freezes water and lightning travels through it.
+	UARPGMagicCombinationTable* Table = MakeFreezeTable(Ice);
+
+	UARPGMagicCombinationEntry* Conducts = NewObject<UARPGMagicCombinationEntry>(Table);
+	Conducts->RequiredElements.AddTag(TAG_Element_Lightning);
+	Conducts->RequiredElements.AddTag(TAG_Element_Water);
+	Conducts->Result = Lightning;
+	Conducts->Mode = EARPGReactionMode::Conduct;
+	Conducts->Scope = static_cast<int32>(EARPGCombinationScope::Collision);
+	Table->Entries.Add(Conducts);
+
+	Fluids->Definitions = { WaterDefinition };
+	Fluids->Solids = { MakeIce(Ice) };
+	Fluids->CombinationTable = Table;
+	Reactions->CombinationTable = Table;
+	Conduction->CombinationTable = Table;
+
+	AARPGFluidPool* Pool = Fluids->Deposit(FVector(0, 0, 0), 300.f, TAG_Element_Water);
+
+	// Freeze the middle of it into a floe you could stand on.
+	UARPGElementalVolumeComponent* Shard = MakeShard(Scope.World, Ice, FVector(0, 0, 0), 150.f);
+	if (!Fluids->TrySolidify(Pool->Volume, Shard))
+	{
+		AddError(TEXT("Setup: nothing froze."));
+		return false;
+	}
+
+	// A bolt striking the ice, not the water.
+	UARPGElementalVolumeComponent* Bolt =
+		MakeShard(Scope.World, Lightning, FVector(0, 0, 0), 60.f);
+	Bolt->SetEnergy(200.f);
+
+	Reactions->Resolve(Bolt, Pool->Volume);
+
+	// WHAT IT HIT WAS THE ICE. A floe roofs the water beneath it, and the pool's
+	// own collider knows nothing about that -- so without the check the bolt
+	// enters the water under the slab and floods it. Standing on the floe is how
+	// you cross an electrified pool.
+	//
+	// Asked for ANY medium now, not only a reservoir: a floe forms on whatever it
+	// froze, and a pool is only a reservoir once it has gathered past a threshold,
+	// so gating on that roofed nothing in the ordinary case.
+	TestEqual(TEXT("A bolt that struck the ice conducts nowhere"),
+		Conduction->GetLastReachedCount(), 0);
 
 	return true;
 }

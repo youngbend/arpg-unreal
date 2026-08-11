@@ -1074,6 +1074,38 @@ reaction can take, and both callers were asking the same three questions.
 
 4 new cases -- 2 under `ARPG.World.Reaction`, 2 under `ARPG.World.Fluid.Reaction`.
 
+**A FIFTH CORRECTION: a puddle did not conduct.** The conduction subsystem is
+sound and four cases prove the chain -- but every one of them sets
+`Conductivity` on its volumes by hand, and nothing ever set it on a deposited
+pool. The volume's own default is 0, `AARPGFluidBody` never touched it, and
+`UARPGFluidDefinition` had no field for it, so there was no authoring surface
+either. The conduction filter drops any neighbour at 0, so a chain of real
+puddles fell out of its own graph. That is the phase 6 gate -- *lightning floods
+a puddle chain and hurts a second player standing in it* -- failing on the half
+of itself that phase 6 deferred to phase 10 and phase 10 did not pick up.
+
+It failed in the wrong direction, too. With `Conductivity` at 0 the Conduct
+branch is skipped; amplification is correctly excluded for a Conduct row, so the
+pair lands in the ordinary energy exchange with the row's `Result` -- Lightning
+-- treated as a product. So a bolt into a puddle popped a second lightning
+effect, spent both sides, and (once a reaction took ground) boiled some of the
+puddle away, while nobody standing in it was shocked. It looked like something
+happened.
+
+- `Conductivity` moves onto the fluid definition and is applied in
+  `RebuildFromRing`. Which charges a body carries is still a Conduct row in the
+  shared table; this is only how well this substance does it.
+- A solid's is set to 0 EXPLICITLY. Ice not conducting is the point -- NOT
+  THROUGH THE ICE is a rule about the slab roofing the water, and a conductive
+  slab would carry the bolt into the pool it floats on and defeat itself.
+- **The roofing check widened from reservoirs to any medium.** It was asked only
+  when `Medium->bReservoir`, and a pool is only a reservoir past a threshold --
+  so ice on an ordinary puddle roofed nothing, which is the common case rather
+  than the rare one.
+
+2 new cases under `ARPG.World.Fluid.Conduction`, and they use REAL deposited
+pools rather than hand-built volumes, which is the whole reason this survived.
+
 **Phase 11 -- code complete. Not in the original ten: this is the layer that
 makes the other ten reachable from a controller.** The modal control scheme, the
 speed tiers, the buffering, and auto-sheathe. 13 new cases; 99 pass in total.

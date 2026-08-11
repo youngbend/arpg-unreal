@@ -309,6 +309,13 @@ void AARPGFluidPool::RebuildFromRing()
 
 	// Damping in proportion: a fireball hitting a lake should hiss, not explode.
 	Volume->Absorption = Volume->bReservoir ? 0.9f : 0.3f;
+
+	// AND IT CARRIES A CHARGE. From the definition rather than left at the
+	// volume's default of zero, which is what a puddle silently had: the
+	// conduction subsystem filters neighbours on Conductivity > 0, so a chain of
+	// real deposited pools dropped out of its own graph entirely. The tests set it
+	// by hand, which is exactly why nobody noticed.
+	Volume->Conductivity = Definition->Conductivity;
 }
 
 // ---------------------------------------------------------------------------
@@ -380,6 +387,13 @@ void AARPGFluidSolid::RebuildFromRing()
 	Volume->SetEnergy(GetArea() * GetSurfaceEnergyDensity());
 	Volume->bReservoir = false;
 	Volume->bAmbientSource = false;
+
+	// AND IT DOES NOT CARRY A CHARGE, stated rather than left to the volume's
+	// default, because the value matters and the reason is not obvious. A floe is
+	// how you cross an electrified river safely: NOT THROUGH THE ICE is a rule
+	// about the slab ROOFING the water, and a conductive slab would carry the bolt
+	// into the pool it is floating on and defeat its own point.
+	Volume->Conductivity = 0.f;
 
 	if (!Definition->bStandable)
 	{

@@ -61,6 +61,24 @@ public:
 		meta = (ClampMin = "0.0"))
 	float EnergyPerArea = 0.001f;
 
+	/**
+	 * 0-1. How well a body of this carries a charge that conducts THROUGH it.
+	 *
+	 * WHICH charges it carries is not a property of the fluid: that is a Conduct
+	 * row in the shared combination table. This is only how well this particular
+	 * substance does it, and lava should be near zero where water is high.
+	 *
+	 * Nothing used to set this on a pool at all -- the volume's own default is 0,
+	 * and no definition carried the number -- so a real deposited puddle silently
+	 * refused to conduct while the conduction tests, which set it by hand, passed.
+	 * That is the phase 6 gate ("lightning floods a puddle chain and hurts a
+	 * second player standing in it") failing on the one part of itself that phase
+	 * 6 could not yet build.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Body",
+		meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float Conductivity = 0.85f;
+
 	/** Outward offset per second while it is raining. 0 means rain does nothing. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weather",
 		meta = (ClampMin = "0.0"))
