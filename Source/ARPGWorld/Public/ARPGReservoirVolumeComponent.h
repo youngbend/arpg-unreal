@@ -4,7 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "ARPGElementalVolumeComponent.h"
-#include "ARPGFreezableSurface.h"
+#include "ARPGElementalSurface.h"
 #include "ARPGReservoirVolumeComponent.generated.h"
 
 class UWaterBodyComponent;
@@ -36,18 +36,18 @@ class UWaterBodyComponent;
  */
 UCLASS(ClassGroup = (ARPG), meta = (BlueprintSpawnableComponent))
 class ARPGWORLD_API UARPGReservoirVolumeComponent : public UARPGElementalVolumeComponent,
-	public IARPGFreezableSurface
+	public IARPGElementalSurface
 {
 	GENERATED_BODY()
 
 public:
 	UARPGReservoirVolumeComponent();
 
-	//~ IARPGFreezableSurface
-	virtual TArray<FVector2D> GetFreezableFootprint(const FVector2D& Centre, double Radius) const override;
-	virtual float GetFreezableSurfaceHeight(const FVector2D& At) const override;
-	virtual bool ConsumeFreezableArea(double Area) override;
-	//~ End IARPGFreezableSurface
+	//~ IARPGElementalSurface
+	virtual TArray<FVector2D> GetSurfaceFootprint(const FVector2D& Centre, double Radius) const override;
+	virtual float GetSurfaceLevelAt(const FVector2D& At) const override;
+	virtual bool ConsumeSurfaceArea(double Area) override;
+	//~ End IARPGElementalSurface
 
 	/**
 	 * How many directions the footprint march samples.

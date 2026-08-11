@@ -7,7 +7,7 @@
 #include "ARPGFluidBody.h"
 #include "ARPGFluidDefinition.h"
 #include "ARPGFluidGeometry.h"
-#include "ARPGFreezableSurface.h"
+#include "ARPGElementalSurface.h"
 #include "ARPGMagicCombinationTable.h"
 #include "ARPGMagicElement.h"
 #include "ARPGWorld.h"
@@ -36,19 +36,19 @@ namespace
 	 * owns its volume, so the surface is the actor above it. One rule, asked in
 	 * one place, rather than every caller knowing which shape it has.
 	 */
-	IARPGFreezableSurface* FindFreezable(UARPGElementalVolumeComponent* Volume)
+	IARPGElementalSurface* FindSurface(UARPGElementalVolumeComponent* Volume)
 	{
 		if (!Volume)
 		{
 			return nullptr;
 		}
 
-		if (IARPGFreezableSurface* Direct = Cast<IARPGFreezableSurface>(Volume))
+		if (IARPGElementalSurface* Direct = Cast<IARPGElementalSurface>(Volume))
 		{
 			return Direct;
 		}
 
-		return Cast<IARPGFreezableSurface>(Volume->GetOwner());
+		return Cast<IARPGElementalSurface>(Volume->GetOwner());
 	}
 }
 
@@ -404,14 +404,14 @@ bool UARPGFluidSurfaceSubsystem::TrySolidify(UARPGElementalVolumeComponent* A,
 	// frozen. That used to mean "is literally an AARPGFluidPool", which quietly
 	// restricted freezing to bodies this subsystem had spawned: an authored river,
 	// the case the reservoir idea exists for, failed the cast and fell through to
-	// an ordinary energy trade. See IARPGFreezableSurface.
-	IARPGFreezableSurface* Surface = FindFreezable(A);
+	// an ordinary energy trade. See IARPGElementalSurface.
+	IARPGElementalSurface* Surface = FindSurface(A);
 	UARPGElementalVolumeComponent* Agent = B;
 	UARPGElementalVolumeComponent* Frozen = A;
 
 	if (!Surface)
 	{
-		Surface = FindFreezable(B);
+		Surface = FindSurface(B);
 		Agent = A;
 		Frozen = B;
 	}
@@ -441,7 +441,7 @@ bool UARPGFluidSurfaceSubsystem::TrySolidify(UARPGElementalVolumeComponent* A,
 	// Bounded by the contact rather than asked for whole, because a river is
 	// kilometres long and only the metre the shard touched is a candidate. A pool
 	// ignores the bound and hands back its ring.
-	const TArray<FVector2D> Footprint = Surface->GetFreezableFootprint(AgentCentre, AgentRadius);
+	const TArray<FVector2D> Footprint = Surface->GetSurfaceFootprint(AgentCentre, AgentRadius);
 
 	// THE OVERLAP, not the whole surface and not the whole shard. Freezing exactly
 	// where the two met is the entire reason a body is a polygon rather than a
@@ -467,7 +467,7 @@ bool UARPGFluidSurfaceSubsystem::TrySolidify(UARPGElementalVolumeComponent* A,
 	FActorSpawnParameters Params;
 	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
-	const float SurfaceHeight = Surface->GetFreezableSurfaceHeight(Centre);
+	const float SurfaceHeight = Surface->GetSurfaceLevelAt(Centre);
 
 	AARPGFluidSolid* Solid = World->SpawnActor<AARPGFluidSolid>(
 		AARPGFluidSolid::StaticClass(),
@@ -507,15 +507,11 @@ bool UARPGFluidSurfaceSubsystem::TrySolidify(UARPGElementalVolumeComponent* A,
 	// The fluid is genuinely used up -- unless it is bottomless, which is the
 	// surface's own answer to give. A puddle shrinks and may be finished by this;
 	// a river takes nothing and is never finished.
-	if (Surface->ConsumeFreezableArea(FrozenArea))
+	if (Surface->ConsumeSurfaceArea(FrozenArea))
 	{
 		// Only this subsystem's own bodies are its to retire. Anything else that
 		// reports itself used up owns its own lifetime.
-		if (AARPGFluidPool* Spent = Cast<AARPGFluidPool>(Surface->_getUObject()))
-		{
-			Pools.Remove(Spent);
-			Spent->Destroy();
-		}
+		RetireBody(Cast<AARPGFluidBody>(Surface->_getUObject()));
 	}
 
 	// Spent freezing it.
@@ -526,6 +522,48 @@ bool UARPGFluidSurfaceSubsystem::TrySolidify(UARPGElementalVolumeComponent* A,
 		*SolidDefinition->GetElementTag().ToString());
 
 	return true;
+}
+
+void UARPGFluidSurfaceSubsystem::RetireBody(AARPGFluidBody* Body)
+{
+	if (!IsValid(Body))
+	{
+		return;
+	}
+
+	if (AARPGFluidPool* Pool = Cast<AARPGFluidPool>(Body))
+	{
+		Pools.Remove(Pool);
+		Pool->Destroy();
+		return;
+	}
+
+	AARPGFluidSolid* Solid = Cast<AARPGFluidSolid>(Body);
+	if (!Solid)
+	{
+		return;
+	}
+
+	// A SOLID RETURNS ITS WATER, rather than the fluid simply vanishing when a
+	// floe goes. Right here rather than only in the melt tick, because a floe now
+	// has two ways to reach nothing -- eroding away over time, and a fire spell
+	// taking the last of it -- and only one of them used to put the water back.
+	//
+	// Null MeltsInto is correct for obsidian, which is permanent rock rather than
+	// frozen lava.
+	if (Solid->Definition && Solid->Definition->MeltsInto)
+	{
+		const TArray<FVector2D>& Ring = Solid->GetRing();
+		const FVector2D Centre = ARPGFluidGeometry::PolygonCentroid(Ring);
+		const double Radius = FMath::Sqrt(
+			FMath::Max(1.0, ARPGFluidGeometry::PolygonArea(Ring)) / PI);
+
+		DepositRing(ARPGFluidGeometry::MakeCircle(Centre, Radius),
+			Solid->GroundHeight, Solid->Definition->MeltsInto);
+	}
+
+	ActiveSolids.Remove(Solid);
+	Solid->Destroy();
 }
 
 // ---------------------------------------------------------------------------
@@ -643,20 +681,7 @@ void UARPGFluidSurfaceSubsystem::TickWeather(float DeltaTime)
 
 		if (ARPGFluidGeometry::PolygonArea(Next) < Solid->Definition->MinimumArea)
 		{
-			// Melting returns its area to the fluid it came from, rather than
-			// the water simply vanishing when a floe goes.
-			if (Solid->Definition->MeltsInto)
-			{
-				const FVector2D Centre = ARPGFluidGeometry::PolygonCentroid(Solid->GetRing());
-				const double Radius = FMath::Sqrt(
-					FMath::Max(1.0, ARPGFluidGeometry::PolygonArea(Solid->GetRing())) / PI);
-
-				DepositRing(ARPGFluidGeometry::MakeCircle(Centre, Radius),
-					Solid->GroundHeight, Solid->Definition->MeltsInto);
-			}
-
-			ActiveSolids.RemoveAt(Index);
-			Solid->Destroy();
+			RetireBody(Solid);
 			continue;
 		}
 

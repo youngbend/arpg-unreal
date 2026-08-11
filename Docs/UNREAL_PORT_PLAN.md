@@ -1034,6 +1034,46 @@ for free, and the whole path is testable with a plain box and no plugin.
 3 new cases under `ARPG.World.Fluid.Reservoir`, including a shard wider than a
 narrow river freezing a patch that stops at the bank.
 
+**A FOURTH CORRECTION: nothing could reach the reaction solver, and a reaction
+changed nothing about a body.** Two gaps that read as one bug from outside --
+elemental collisions simply did not happen in game.
+
+- **A cast spell was not made of anything.** It carried no elemental volume and,
+  worse, no primitive collider at all: `UARPGHitboxComponent` is a scene
+  component that sweeps by hand, deliberately, because an overlap volume moving
+  fast enough passes between frames. Reactions are detected by physics overlap.
+  So the whole of phase 6 -- matched projectiles, surplus, lopsided rates, a
+  reservoir hissing rather than exploding -- was true, tested, and unreachable.
+  `AARPGDischargeEffect` now carries a sphere and a volume, driven by
+  `ReactionRadius` and energised from the context's `ComputedDamage`.
+- **A collision PRODUCT is the one thing that must not react.** It is born at
+  the contact point, inside whichever volume survived, and two different
+  elements neutralise even with no recipe -- so a steam cloud would eat the
+  fireball's surplus, which is what `SurplusSurvivesAtReducedPower` protects.
+- **A reaction now takes GROUND.** Spending a pool's energy used to change
+  nothing: the pool recomputes energy from area on the next weather tick and
+  silently discarded it, so a fireball into a puddle made steam and left the
+  puddle full size. A floe was worse -- it carried no energy at all, so the
+  solver bailed at its own zero-energy guard and fire did nothing to ice.
+  `IARPGElementalSurface` gains an energy density, and a body converts the spend
+  back into area at that rate. The combination table's consumption rates
+  therefore already decide how fast fire eats water and ice, with no second set
+  of numbers.
+- **And it takes ground rather than SCALE.** Without a hook a body fell to the
+  volume component's default projectile reaction, which scales the actor by the
+  cube root of what is left and destroys it outright at zero -- so a reacting
+  pool had its mesh, trigger box and outline disagreeing within a frame, and
+  could destroy itself behind the subsystem's back. `AARPGFluidBody` implements
+  `IARPGElementalReactive`, and retirement moved into one `RetireBody` that both
+  the melt tick and the reaction path go through -- which is also how a floe
+  melted by fire returns its water, something only the tick used to do.
+
+The interface is `IARPGElementalSurface` rather than the `IARPGFreezableSurface`
+it was one correction ago: a floe is not freezable, but it does have area a
+reaction can take, and both callers were asking the same three questions.
+
+4 new cases -- 2 under `ARPG.World.Reaction`, 2 under `ARPG.World.Fluid.Reaction`.
+
 **Phase 11 -- code complete. Not in the original ten: this is the layer that
 makes the other ten reachable from a controller.** The modal control scheme, the
 speed tiers, the buffering, and auto-sheathe. 13 new cases; 99 pass in total.

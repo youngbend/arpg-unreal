@@ -8,6 +8,7 @@
 #include "ARPGFluidSurfaceSubsystem.generated.h"
 
 class AARPGDischargeEffect;
+class AARPGFluidBody;
 class AARPGFluidPool;
 class AARPGFluidSolid;
 class UARPGElementalVolumeComponent;
@@ -147,6 +148,18 @@ public:
 	/** Runs one weather step immediately, bypassing the tick rate. */
 	UFUNCTION(BlueprintCallable, Category = "ARPG|Fluid")
 	void StepSimulation(float DeltaTime);
+
+	/**
+	 * Retires a body that has nothing left: drops it from the register and
+	 * destroys it, and a melting solid returns its water on the way out.
+	 *
+	 * PUBLIC because a body reports its own exhaustion. A reaction that boils the
+	 * last of a puddle away resolves inside the volume component, far from here,
+	 * and the alternative -- letting the body call Destroy on itself -- leaves the
+	 * subsystem holding a pointer to it until something notices.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "ARPG|Fluid")
+	void RetireBody(AARPGFluidBody* Body);
 
 private:
 	UARPGFluidDefinition* FindDefinition(FGameplayTag ElementTag) const;

@@ -74,7 +74,7 @@ double UARPGReservoirVolumeComponent::MarchToEdge(const FVector2D& Centre,
 	return Inside;
 }
 
-TArray<FVector2D> UARPGReservoirVolumeComponent::GetFreezableFootprint(const FVector2D& Centre,
+TArray<FVector2D> UARPGReservoirVolumeComponent::GetSurfaceFootprint(const FVector2D& Centre,
 	double Radius) const
 {
 	TArray<FVector2D> Footprint;
@@ -104,12 +104,12 @@ TArray<FVector2D> UARPGReservoirVolumeComponent::GetFreezableFootprint(const FVe
 	return Footprint;
 }
 
-float UARPGReservoirVolumeComponent::GetFreezableSurfaceHeight(const FVector2D& At) const
+float UARPGReservoirVolumeComponent::GetSurfaceLevelAt(const FVector2D& At) const
 {
 	return GetSurfaceHeightAt(FVector(At.X, At.Y, 0.f));
 }
 
-bool UARPGReservoirVolumeComponent::ConsumeFreezableArea(double Area)
+bool UARPGReservoirVolumeComponent::ConsumeSurfaceArea(double Area)
 {
 	// A RIVER DOES NOT RUN OUT. Consume already refuses to spend a reservoir's
 	// energy and there is a test named for it; freezing was the one path that

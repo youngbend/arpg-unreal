@@ -4,7 +4,8 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
-#include "ARPGFreezableSurface.h"
+#include "ARPGElementalReactive.h"
+#include "ARPGElementalSurface.h"
 #include "ARPGFluidBody.generated.h"
 
 class UARPGElementalVolumeComponent;
@@ -30,12 +31,38 @@ class UPrimitiveComponent;
  * floe two players can stand on cost a few dozen FVector2Ds on the wire.
  */
 UCLASS(Abstract)
-class ARPGWORLD_API AARPGFluidBody : public AActor
+class ARPGWORLD_API AARPGFluidBody : public AActor, public IARPGElementalSurface,
+	public IARPGElementalReactive
 {
 	GENERATED_BODY()
 
 public:
 	AARPGFluidBody();
+
+	//~ IARPGElementalSurface. A body is small enough to hand back whole, so the
+	// contact bound is ignored -- the caller clips against the agent anyway.
+	virtual TArray<FVector2D> GetSurfaceFootprint(const FVector2D& Centre, double Radius) const override;
+	virtual float GetSurfaceLevelAt(const FVector2D& At) const override;
+	virtual bool ConsumeSurfaceArea(double Area) override;
+	virtual float GetSurfaceEnergyDensity() const override { return 0.f; }
+	//~ End IARPGElementalSurface
+
+	/**
+	 * A REACTION TAKES GROUND, NOT SCALE.
+	 *
+	 * Without this hook a body gets UARPGElementalVolumeComponent's default
+	 * reaction, which is written for a projectile: it scales the actor down by the
+	 * cube root of what is left, and destroys it outright once spent. Both are
+	 * wrong here and the second is worse than wrong -- a scaled pool has its mesh,
+	 * its trigger box and its outline disagreeing within a frame, and a pool
+	 * destroyed from inside Consume leaves the subsystem still holding it.
+	 *
+	 * What a fireball does to a puddle is boil some of it away, so that is what
+	 * this does: convert the energy spent into area at the body's own density and
+	 * take it off.
+	 */
+	virtual void OnElementalReaction_Implementation(float Consumed, float Remaining,
+		UARPGMagicElement* Product) override;
 
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
@@ -122,6 +149,9 @@ protected:
 	/** How far the surface sits above the ground. */
 	virtual float GetSurfaceOffset() const { return 0.f; }
 
+	/** Below this area the body is not worth keeping. From its definition. */
+	virtual double GetMinimumArea() const { return 0.0; }
+
 	/** The definition's material, loaded. Null for a body with nothing authored. */
 	virtual UMaterialInterface* ResolveSurfaceMaterial() const { return nullptr; }
 
@@ -149,7 +179,7 @@ protected:
  * Godot's FluidPool.
  */
 UCLASS()
-class ARPGWORLD_API AARPGFluidPool : public AARPGFluidBody, public IARPGFreezableSurface
+class ARPGWORLD_API AARPGFluidPool : public AARPGFluidBody
 {
 	GENERATED_BODY()
 
@@ -159,12 +189,9 @@ public:
 
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
-	//~ IARPGFreezableSurface. A pool is small enough to hand back whole, so the
-	// contact is ignored -- the caller intersects with the agent anyway.
-	virtual TArray<FVector2D> GetFreezableFootprint(const FVector2D& Centre, double Radius) const override;
-	virtual float GetFreezableSurfaceHeight(const FVector2D& At) const override;
-	virtual bool ConsumeFreezableArea(double Area) override;
-	//~ End IARPGFreezableSurface
+	/** A lake is bottomless, so freezing and boiling both take nothing from it. */
+	virtual bool ConsumeSurfaceArea(double Area) override;
+	virtual float GetSurfaceEnergyDensity() const override;
 
 	/** Configures the pool. Called by the subsystem; nothing else builds one. */
 	void Setup(UARPGFluidDefinition* InDefinition, const TArray<FVector2D>& InRing,
@@ -173,6 +200,7 @@ public:
 protected:
 	virtual void RebuildFromRing() override;
 	virtual float GetSurfaceOffset() const override;
+	virtual double GetMinimumArea() const override;
 	virtual UMaterialInterface* ResolveSurfaceMaterial() const override;
 };
 
@@ -206,9 +234,12 @@ public:
 	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
 	bool IsStandableAt(FVector WorldPoint) const;
 
+	virtual float GetSurfaceEnergyDensity() const override;
+
 protected:
 	virtual void RebuildFromRing() override;
 	virtual float GetSurfaceOffset() const override;
+	virtual double GetMinimumArea() const override;
 	virtual UMaterialInterface* ResolveSurfaceMaterial() const override;
 	virtual const TArray<FVector2D>& GetMeshHole() const override { return HoleRing; }
 };

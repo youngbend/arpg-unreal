@@ -141,6 +141,23 @@ public:
 		meta = (ClampMin = "0.0"))
 	float MinimumArea = 2500.f;
 
+	/**
+	 * How much energy a unit of this slab's area is worth, which is what lets a
+	 * fire spell MELT it rather than merely waiting for MeltRate to.
+	 *
+	 * A slab used to carry no energy at all -- "a thing you stand on, not a body
+	 * you react with" -- and the consequence was that the reaction solver bailed
+	 * at its own guard against zero-energy volumes, so a fireball thrown at an ice
+	 * floe did precisely nothing.
+	 *
+	 * Higher than water's on purpose: ice takes more energy to shift per unit of
+	 * ground than the same ground of open water, so one fireball opens a hole
+	 * rather than clearing the floe.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Body",
+		meta = (ClampMin = "0.0"))
+	float EnergyPerArea = 0.002f;
+
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Presentation")
 	TSoftObjectPtr<UMaterialInterface> SurfaceMaterial;
 

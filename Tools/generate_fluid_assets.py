@@ -225,6 +225,12 @@ SOLIDS = [
         "melt_rate": 0.5,
         "melts_into": "DA_Fluid_Water",
         "minimum_area": 2500.0,
+        # Twice water's, so a fireball opens a hole in a floe rather than
+        # clearing it: ice takes more energy to shift per unit of ground than the
+        # same ground of open water does. This is also what makes a floe
+        # meltable AT ALL -- a slab used to carry no energy, so the reaction
+        # solver bailed at its zero-energy guard and fire did nothing to ice.
+        "energy_per_area": 0.002,
         "surface": "M_ARPG_Ice_Placeholder",
     },
 ]
@@ -258,6 +264,7 @@ def main():
         set_bool(solid, "standable", spec["standable"])
         solid.set_editor_property("melt_rate", spec["melt_rate"])
         solid.set_editor_property("minimum_area", spec["minimum_area"])
+        solid.set_editor_property("energy_per_area", spec["energy_per_area"])
         solid.set_editor_property("surface_material", surfaces[spec["surface"]])
 
         # Melting RETURNS its area to the fluid it came from rather than the

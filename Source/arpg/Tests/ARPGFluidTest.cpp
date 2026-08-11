@@ -6,6 +6,8 @@
 
 #include "ARPGDischargeContext.h"
 #include "ARPGDischargeEffect.h"
+#include "ARPGElementPalette.h"
+#include "ARPGElementalReactionSubsystem.h"
 #include "ARPGElementalVolumeComponent.h"
 #include "ARPGFluidBody.h"
 #include "ARPGFluidDefinition.h"
@@ -479,6 +481,166 @@ bool FARPGFluidRainTest::RunTest(const FString& Parameters)
 	// Literally the same operation with the sign flipped, which is the entire
 	// reason a body is a polygon rather than a grid or a heightfield.
 	TestTrue(TEXT("Rain grows the pool"), Pool->GetArea() > Initial);
+
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// Reactions taking ground
+//
+// A reaction that spent a body's energy used to change nothing about the body.
+// A fireball into a puddle made steam and left the puddle exactly as big,
+// because a pool recomputes its energy from its area on the next weather tick
+// and quietly discarded whatever had been spent. A floe was worse: it carried no
+// energy at all, so the solver bailed at its own zero-energy guard and a fire
+// spell thrown at ice did nothing whatsoever.
+// ---------------------------------------------------------------------------
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFluidBoilTest,
+	"ARPG.World.Fluid.Reaction.FireBoilsAPuddleAway",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGFluidBoilTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+	UARPGMagicElement* Steam = MakeElement(GetTransientPackage(), TAG_Element_Steam);
+
+	UARPGFluidDefinition* WaterDefinition = MakeWater(GetTransientPackage(), Water);
+	WaterDefinition->EvaporationRate = 0.f;   // isolate boiling from drying
+	WaterDefinition->MinimumArea = 1000.f;
+	WaterDefinition->EnergyPerArea = 0.001f;
+
+	Fluids->Definitions = { WaterDefinition };
+
+	AARPGFluidPool* Pool = Fluids->Deposit(FVector(0, 0, 0), 300.f, TAG_Element_Water);
+	if (!Pool)
+	{
+		AddError(TEXT("Setup: no pool was deposited."));
+		return false;
+	}
+
+	const double Before = Pool->GetArea();
+
+	// Energy is area times density, so the pool is worth exactly this much.
+	TestEqual(TEXT("A pool is worth its area"),
+		Pool->Volume->GetEnergy(), static_cast<float>(Before * 0.001), 0.01f);
+
+	// A fireball spending a quarter of it. Consume is the path the reaction solver
+	// takes, and what it triggers is the body's own reaction hook.
+	const float Spend = static_cast<float>(Before * 0.001 * 0.25);
+	const FVector BeforeScale = Pool->GetActorScale3D();
+
+	Pool->Volume->Consume(Spend, Steam);
+
+	// THE SPEND CONVERTED BACK INTO GROUND. Which means the combination table's
+	// consumption rates already decide how fast fire eats water, with no second
+	// set of numbers anywhere.
+	TestEqual(TEXT("A quarter of the energy is a quarter of the puddle"),
+		Pool->GetArea(), Before * 0.75, Before * 0.02);
+
+	// A REACTION TAKES GROUND, NOT SCALE. Without the hook a body falls to the
+	// default projectile reaction, which shrinks the actor's transform -- leaving
+	// the mesh, the trigger box and the outline disagreeing inside one frame.
+	TestEqual(TEXT("And the actor is not scaled like a fireball"),
+		Pool->GetActorScale3D(), BeforeScale);
+
+	// And its energy tracks the ground it has left, rather than the two drifting
+	// apart until the next weather tick resets one of them.
+	TestEqual(TEXT("Energy follows the area down"),
+		Pool->Volume->GetEnergy(), static_cast<float>(Pool->GetArea() * 0.001), 0.01f);
+
+	// The rest of it. Boiled past the floor, the pool is gone -- and gone from the
+	// subsystem's register too, which the default reaction's own Destroy would
+	// not have managed.
+	Pool->Volume->Consume(Pool->Volume->GetEnergy(), Steam);
+
+	TestEqual(TEXT("Boiled away entirely, no pool is left"), Fluids->GetPools().Num(), 0);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFluidMeltTest,
+	"ARPG.World.Fluid.Reaction.FireMeltsAFloeBackIntoWater",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGFluidMeltTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+	UARPGElementalReactionSubsystem* Reactions =
+		Scope.World->GetSubsystem<UARPGElementalReactionSubsystem>();
+
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+	UARPGMagicElement* Ice = MakeElement(GetTransientPackage(), TAG_Element_Ice);
+	UARPGMagicElement* Fire = MakeElement(GetTransientPackage(), TAG_Element_Fire);
+
+	// A palette, so the product resolves to the shared placeholder rather than
+	// warning that it would be invisible.
+	Water->Palette = NewObject<UARPGElementPalette>();
+
+	UARPGFluidDefinition* WaterDefinition = MakeWater(GetTransientPackage(), Water);
+	WaterDefinition->EvaporationRate = 0.f;
+	WaterDefinition->MinimumArea = 1000.f;
+
+	UARPGSolidDefinition* IceDefinition = MakeIce(Ice);
+	IceDefinition->MeltsInto = WaterDefinition;
+	IceDefinition->EnergyPerArea = 0.002f;
+
+	Fluids->Definitions = { WaterDefinition };
+	Fluids->Solids = { IceDefinition };
+
+	// Fire + ice MELTS, in the Collision scope. Nothing in C++ knows that; this
+	// row is the whole declaration, same as every other relationship.
+	UARPGMagicCombinationTable* Table = NewObject<UARPGMagicCombinationTable>();
+	UARPGMagicCombinationEntry* Entry = NewObject<UARPGMagicCombinationEntry>(Table);
+	Entry->RequiredElements.AddTag(TAG_Element_Fire);
+	Entry->RequiredElements.AddTag(TAG_Element_Ice);
+	Entry->Result = Water;
+	Entry->Scope = static_cast<int32>(EARPGCombinationScope::Collision);
+	Table->Entries.Add(Entry);
+
+	Reactions->CombinationTable = Table;
+	Reactions->MinMagnitude = 0.f;
+	Fluids->CombinationTable = Table;
+
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	AARPGFluidSolid* Floe = Scope.World->SpawnActor<AARPGFluidSolid>(
+		AARPGFluidSolid::StaticClass(), FTransform::Identity, Params);
+
+	Floe->Setup(IceDefinition, ARPGFluidGeometry::MakeCircle(FVector2D::ZeroVector, 200.0), 0.f);
+
+	// THE THING THAT USED TO BE ZERO. A slab carried no energy -- "not a body you
+	// react with" -- so Resolve bailed at its guard against zero-energy volumes
+	// and a fireball thrown at ice did nothing at all.
+	const float FloeEnergy = Floe->Volume->GetEnergy();
+	TestTrue(TEXT("A floe is worth something to melt"), FloeEnergy > 0.f);
+
+	// Half the floe's worth of fire.
+	UARPGElementalVolumeComponent* Fireball =
+		MakeShard(Scope.World, Fire, FVector(0, 0, 0), 150.f);
+	Fireball->SetEnergy(FloeEnergy * 0.5f);
+
+	const double BeforeArea = Floe->GetArea();
+	Reactions->Resolve(Floe->Volume, Fireball);
+
+	TestTrue(TEXT("Fire meeting ice melts some of it"), Floe->GetArea() < BeforeArea);
+	TestSamePtr(TEXT("Producing water"), Reactions->GetLastProduct(), Water);
+
+	// The rest of it. A floe that reaches nothing RETURNS ITS WATER rather than
+	// the fluid simply vanishing -- which the melt tick already did, and which the
+	// reaction path had no way of doing until retirement moved into one place.
+	Floe->Volume->Consume(Floe->Volume->GetEnergy(), Water);
+
+	TestEqual(TEXT("Melted through, the floe is gone"), Fluids->GetSolids().Num(), 0);
+	TestEqual(TEXT("And left water behind it"), Fluids->GetPools().Num(), 1);
 
 	return true;
 }

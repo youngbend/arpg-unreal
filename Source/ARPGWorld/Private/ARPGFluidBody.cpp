@@ -4,6 +4,7 @@
 #include "ARPGElementalVolumeComponent.h"
 #include "ARPGFluidDefinition.h"
 #include "ARPGFluidGeometry.h"
+#include "ARPGFluidSurfaceSubsystem.h"
 #include "ARPGMagicElement.h"
 #include "Components/BoxComponent.h"
 #include "Components/DynamicMeshComponent.h"
@@ -73,6 +74,65 @@ const TArray<FVector2D>& AARPGFluidBody::GetMeshHole() const
 {
 	static const TArray<FVector2D> None;
 	return None;
+}
+
+TArray<FVector2D> AARPGFluidBody::GetSurfaceFootprint(const FVector2D& Centre, double Radius) const
+{
+	return Ring;
+}
+
+float AARPGFluidBody::GetSurfaceLevelAt(const FVector2D& At) const
+{
+	return GetSurfaceHeight();
+}
+
+bool AARPGFluidBody::ConsumeSurfaceArea(double Area)
+{
+	if (Area <= 0.0)
+	{
+		return false;
+	}
+
+	const double Remaining = FMath::Max(0.0, GetArea() - Area);
+
+	if (Remaining < GetMinimumArea())
+	{
+		return true;
+	}
+
+	// The body keeps its SHAPE and loses the area, rather than having the region
+	// cut out of it: a liquid flows back over a hole, and a slab that lost its
+	// middle to a fireball would be a ring of ice standing on nothing.
+	SetRing(ARPGFluidGeometry::ShrinkToArea(Ring, Remaining));
+	return false;
+}
+
+void AARPGFluidBody::OnElementalReaction_Implementation(float Consumed, float Remaining,
+	UARPGMagicElement* Product)
+{
+	const float Density = GetSurfaceEnergyDensity();
+
+	// Amplified rather than spent, or a body nothing can eat -- a river, or one
+	// whose definition never gave it a density. Either way there is no ground to
+	// take, and saying so here is what keeps the default projectile reaction
+	// (scale the actor, destroy it at zero) away from a body of fluid.
+	if (Consumed <= 0.f || Density <= 0.f)
+	{
+		return;
+	}
+
+	// THE SPEND, CONVERTED BACK INTO GROUND. Energy is area times density, so the
+	// inverse is the honest amount boiled or melted away -- which means the
+	// combination table's consumption rates already decide how fast a fireball
+	// eats a puddle, with no second set of numbers to keep in step.
+	if (ConsumeSurfaceArea(Consumed / Density))
+	{
+		if (UARPGFluidSurfaceSubsystem* Fluids =
+				GetWorld() ? GetWorld()->GetSubsystem<UARPGFluidSurfaceSubsystem>() : nullptr)
+		{
+			Fluids->RetireBody(this);
+		}
+	}
 }
 
 int32 AARPGFluidBody::GetSurfaceTriangleCount() const
@@ -203,45 +263,28 @@ void AARPGFluidPool::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLi
 	DOREPLIFETIME(AARPGFluidPool, Definition);
 }
 
-TArray<FVector2D> AARPGFluidPool::GetFreezableFootprint(const FVector2D& Centre, double Radius) const
+bool AARPGFluidPool::ConsumeSurfaceArea(double Area)
 {
-	return Ring;
-}
-
-float AARPGFluidPool::GetFreezableSurfaceHeight(const FVector2D& At) const
-{
-	return GetSurfaceHeight();
-}
-
-bool AARPGFluidPool::ConsumeFreezableArea(double Area)
-{
-	if (!Definition)
+	// A POOL BIG ENOUGH TO BE A RESERVOIR IS NOT DEPLETED, by freezing or by
+	// boiling. bReservoir is how this codebase says bottomless everywhere else --
+	// Consume refuses to spend one, and there is a test named for it -- and these
+	// were the paths that took ground off a body already agreed to be endless.
+	if (!Definition || Volume->bReservoir)
 	{
 		return false;
 	}
 
-	// A POOL BIG ENOUGH TO BE A RESERVOIR IS NOT DEPLETED EITHER. bReservoir is
-	// how this codebase says bottomless everywhere else -- Consume refuses to
-	// spend one, and there is a test named for it -- and freezing was the single
-	// path that took area off a body it had already agreed could not run out.
-	// Freeze a lake enough times and it used to vanish.
-	if (Volume->bReservoir)
-	{
-		return false;
-	}
+	return Super::ConsumeSurfaceArea(Area);
+}
 
-	// The fluid is genuinely USED UP. Subtracting the frozen region would leave a
-	// hole, and a liquid flows back over a hole -- so the pool keeps its shape and
-	// loses the area instead, which is what ShrinkToArea is for.
-	const double Remaining = FMath::Max(0.0, GetArea() - Area);
+float AARPGFluidPool::GetSurfaceEnergyDensity() const
+{
+	return Definition ? Definition->EnergyPerArea : 0.f;
+}
 
-	if (Remaining < Definition->MinimumArea)
-	{
-		return true;
-	}
-
-	SetRing(ARPGFluidGeometry::ShrinkToArea(Ring, Remaining));
-	return false;
+double AARPGFluidPool::GetMinimumArea() const
+{
+	return Definition ? Definition->MinimumArea : 0.0;
 }
 
 void AARPGFluidPool::RebuildFromRing()
@@ -291,6 +334,16 @@ float AARPGFluidSolid::GetSurfaceOffset() const
 	return Definition ? Definition->Thickness : 0.f;
 }
 
+float AARPGFluidSolid::GetSurfaceEnergyDensity() const
+{
+	return Definition ? Definition->EnergyPerArea : 0.f;
+}
+
+double AARPGFluidSolid::GetMinimumArea() const
+{
+	return Definition ? Definition->MinimumArea : 0.0;
+}
+
 UMaterialInterface* AARPGFluidSolid::ResolveSurfaceMaterial() const
 {
 	return Definition ? Definition->SurfaceMaterial.LoadSynchronous() : nullptr;
@@ -317,10 +370,14 @@ void AARPGFluidSolid::RebuildFromRing()
 		return;
 	}
 
-	// A slab is a thing you stand on, not a body you react with, so its volume
-	// carries no energy -- it is there to be conducted through and to be seen,
-	// not to trade in a collision.
-	Volume->SetEnergy(0.f);
+	// A SLAB CAN BE MELTED, so it carries energy in proportion to its area exactly
+	// as a pool does. This used to be flatly zero -- "a thing you stand on, not a
+	// body you react with" -- and the consequence was that Resolve bailed at its
+	// own guard against zero-energy volumes, so a fireball thrown at an ice floe
+	// did nothing at all. Melting was purely a matter of waiting.
+	//
+	// Still not an ambient source: standing on ice does not wet you.
+	Volume->SetEnergy(GetArea() * GetSurfaceEnergyDensity());
 	Volume->bReservoir = false;
 	Volume->bAmbientSource = false;
 
