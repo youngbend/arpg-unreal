@@ -173,13 +173,25 @@ public:
 	 * @param BelowReach extends the test downward by the querying thing's own
 	 *        reach, so a character is in the water when their FEET are, not
 	 *        their centre, and a projectile when its underside has touched.
+	 *
+	 * VIRTUAL, because the base answer is a BOX. That is honest for a spell and
+	 * for the straight box a river was authored as, and badly wrong for anything
+	 * that bends: the axis-aligned bounds of a curving river cover the whole
+	 * valley, so everyone in it would read as standing in the water. A subclass
+	 * that has a better shape to ask -- a water body with a spline -- answers
+	 * from that instead. See UARPGWaterBodyVolumeComponent.
 	 */
 	UFUNCTION(BlueprintPure, Category = "ARPG|Volume")
-	bool ContainsPoint(FVector WorldPoint, float BelowReach = 0.f) const;
+	virtual bool ContainsPoint(FVector WorldPoint, float BelowReach = 0.f) const;
 
-	/** Waterline for a reservoir, the top of the bounds otherwise. */
+	/**
+	 * Waterline for a reservoir, the top of the bounds otherwise.
+	 *
+	 * Virtual for the same reason and with a sharper case: one authored offset
+	 * cannot express a river running DOWNHILL.
+	 */
 	UFUNCTION(BlueprintPure, Category = "ARPG|Volume")
-	float GetSurfaceHeightAt(FVector WorldPoint) const;
+	virtual float GetSurfaceHeightAt(FVector WorldPoint) const;
 
 	/**
 	 * Where this volume actually IS: the centre of its collider, not of the

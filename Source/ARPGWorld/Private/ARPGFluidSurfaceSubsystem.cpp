@@ -7,6 +7,7 @@
 #include "ARPGFluidBody.h"
 #include "ARPGFluidDefinition.h"
 #include "ARPGFluidGeometry.h"
+#include "ARPGFreezableSurface.h"
 #include "ARPGMagicCombinationTable.h"
 #include "ARPGMagicElement.h"
 #include "ARPGWorld.h"
@@ -25,6 +26,30 @@ namespace
 	 * the ground and wetting nothing.
 	 */
 	constexpr float GroundProbeLift = 100.f;
+
+	/**
+	 * The freezable surface behind a volume.
+	 *
+	 * Two places to look, and both are legitimate. A RESERVOIR volume IS the
+	 * surface -- a river is a component bolted onto whatever actor the level
+	 * happens to use, and there is no ARPG actor class to reach for. A fluid POOL
+	 * owns its volume, so the surface is the actor above it. One rule, asked in
+	 * one place, rather than every caller knowing which shape it has.
+	 */
+	IARPGFreezableSurface* FindFreezable(UARPGElementalVolumeComponent* Volume)
+	{
+		if (!Volume)
+		{
+			return nullptr;
+		}
+
+		if (IARPGFreezableSurface* Direct = Cast<IARPGFreezableSurface>(Volume))
+		{
+			return Direct;
+		}
+
+		return Cast<IARPGFreezableSurface>(Volume->GetOwner());
+	}
 }
 
 void UARPGFluidSurfaceSubsystem::Initialize(FSubsystemCollectionBase& Collection)
@@ -375,18 +400,23 @@ bool UARPGFluidSurfaceSubsystem::TrySolidify(UARPGElementalVolumeComponent* A,
 		return false;
 	}
 
-	// One side has to actually be a body lying on the ground -- that is what
-	// there is to freeze.
-	AARPGFluidPool* Pool = Cast<AARPGFluidPool>(A->GetOwner());
+	// One side has to be a SURFACE -- something with an extent lying there to be
+	// frozen. That used to mean "is literally an AARPGFluidPool", which quietly
+	// restricted freezing to bodies this subsystem had spawned: an authored river,
+	// the case the reservoir idea exists for, failed the cast and fell through to
+	// an ordinary energy trade. See IARPGFreezableSurface.
+	IARPGFreezableSurface* Surface = FindFreezable(A);
 	UARPGElementalVolumeComponent* Agent = B;
+	UARPGElementalVolumeComponent* Frozen = A;
 
-	if (!Pool)
+	if (!Surface)
 	{
-		Pool = Cast<AARPGFluidPool>(B->GetOwner());
+		Surface = FindFreezable(B);
 		Agent = A;
+		Frozen = B;
 	}
 
-	if (!Pool || !Agent->OverlapSource)
+	if (!Surface || !Agent->OverlapSource)
 	{
 		return false;
 	}
@@ -403,16 +433,22 @@ bool UARPGFluidSurfaceSubsystem::TrySolidify(UARPGElementalVolumeComponent* A,
 
 	// The agent's own footprint, so a big shard freezes more than a small one.
 	const FBoxSphereBounds AgentBounds = Agent->OverlapSource->Bounds;
-	const TArray<FVector2D> AgentRing = ARPGFluidGeometry::MakeCircle(
-		FVector2D(AgentBounds.Origin.X, AgentBounds.Origin.Y),
-		FMath::Max(AgentBounds.BoxExtent.X, AgentBounds.BoxExtent.Y));
+	const FVector2D AgentCentre(AgentBounds.Origin.X, AgentBounds.Origin.Y);
+	const double AgentRadius = FMath::Max(AgentBounds.BoxExtent.X, AgentBounds.BoxExtent.Y);
 
-	// THE OVERLAP, not the whole pool and not the whole shard. Freezing exactly
+	const TArray<FVector2D> AgentRing = ARPGFluidGeometry::MakeCircle(AgentCentre, AgentRadius);
+
+	// Bounded by the contact rather than asked for whole, because a river is
+	// kilometres long and only the metre the shard touched is a candidate. A pool
+	// ignores the bound and hands back its ring.
+	const TArray<FVector2D> Footprint = Surface->GetFreezableFootprint(AgentCentre, AgentRadius);
+
+	// THE OVERLAP, not the whole surface and not the whole shard. Freezing exactly
 	// where the two met is the entire reason a body is a polygon rather than a
 	// disc or a grid cell.
 	TArray<FVector2D> FrozenRing;
 	TArray<TArray<FVector2D>> Holes;
-	ARPGFluidGeometry::IntersectWithHoles(Pool->GetRing(), AgentRing, FrozenRing, Holes);
+	ARPGFluidGeometry::IntersectWithHoles(Footprint, AgentRing, FrozenRing, Holes);
 
 	const double FrozenArea = ARPGFluidGeometry::PolygonArea(FrozenRing);
 	if (FrozenArea < SolidDefinition->MinimumArea)
@@ -431,9 +467,11 @@ bool UARPGFluidSurfaceSubsystem::TrySolidify(UARPGElementalVolumeComponent* A,
 	FActorSpawnParameters Params;
 	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
+	const float SurfaceHeight = Surface->GetFreezableSurfaceHeight(Centre);
+
 	AARPGFluidSolid* Solid = World->SpawnActor<AARPGFluidSolid>(
 		AARPGFluidSolid::StaticClass(),
-		FTransform(FVector(Centre.X, Centre.Y, Pool->GetSurfaceHeight())), Params);
+		FTransform(FVector(Centre.X, Centre.Y, SurfaceHeight)), Params);
 
 	if (!Solid)
 	{
@@ -462,29 +500,29 @@ bool UARPGFluidSurfaceSubsystem::TrySolidify(UARPGElementalVolumeComponent* A,
 		Solid->HoleRing = Holes[Largest];
 	}
 
-	Solid->Setup(SolidDefinition, FrozenRing, Pool->GetSurfaceHeight());
+	Solid->Setup(SolidDefinition, FrozenRing, SurfaceHeight);
 
 	ActiveSolids.Add(Solid);
 
-	// The fluid is genuinely USED UP. Subtracting the frozen region would leave
-	// a hole, and a liquid flows back over a hole -- so the pool keeps its shape
-	// and loses the area instead, which is what ShrinkToArea is for.
-	const double Remaining = FMath::Max(0.0, ARPGFluidGeometry::PolygonArea(Pool->GetRing()) - FrozenArea);
-	if (Remaining < Pool->Definition->MinimumArea)
+	// The fluid is genuinely used up -- unless it is bottomless, which is the
+	// surface's own answer to give. A puddle shrinks and may be finished by this;
+	// a river takes nothing and is never finished.
+	if (Surface->ConsumeFreezableArea(FrozenArea))
 	{
-		Pools.Remove(Pool);
-		Pool->Destroy();
-	}
-	else
-	{
-		Pool->SetRing(ARPGFluidGeometry::ShrinkToArea(Pool->GetRing(), Remaining));
+		// Only this subsystem's own bodies are its to retire. Anything else that
+		// reports itself used up owns its own lifetime.
+		if (AARPGFluidPool* Spent = Cast<AARPGFluidPool>(Surface->_getUObject()))
+		{
+			Pools.Remove(Spent);
+			Spent->Destroy();
+		}
 	}
 
 	// Spent freezing it.
 	Agent->Consume(Agent->GetEnergy(), Entry->Result);
 
 	UE_LOG(LogARPGWorld, Log, TEXT("Froze %.0f square units of '%s' into '%s'."),
-		FrozenArea, *Pool->Definition->GetElementTag().ToString(),
+		FrozenArea, *Frozen->Element->ElementTag.ToString(),
 		*SolidDefinition->GetElementTag().ToString());
 
 	return true;

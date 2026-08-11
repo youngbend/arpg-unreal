@@ -14,6 +14,7 @@
 #include "ARPGGameplayTags.h"
 #include "ARPGMagicCombinationTable.h"
 #include "ARPGMagicElement.h"
+#include "ARPGReservoirVolumeComponent.h"
 #include "Components/BoxComponent.h"
 #include "Components/SphereComponent.h"
 #include "Engine/Engine.h"
@@ -69,6 +70,13 @@ namespace ARPGFluidTestUtils
 		Definition->EvaporationRate = 10.f;
 		Definition->RainGrowthRate = 10.f;
 		Definition->MergeDistance = 200.f;
+
+		// AN ORDINARY PUDDLE unless a test says otherwise. The class default is
+		// 200000 square cm, which a 300-radius test pool quietly exceeds -- and a
+		// pool that has become a reservoir is bottomless, so freezing stops
+		// depleting it and the deposit tests would be asserting on the wrong body.
+		Definition->ReservoirArea = 100000000.f;
+
 		return Definition;
 	}
 
@@ -97,6 +105,102 @@ namespace ARPGFluidTestUtils
 		Box->SetWorldLocation(FVector(0, 0, Height - 10.f)); // top face AT Height
 
 		return Ground;
+	}
+
+	/**
+	 * The Solidify row that makes ice and water freeze, and nothing else.
+	 *
+	 * NOTHING IN C++ KNOWS THAT WATER FREEZES -- this row, Surface-scoped, is the
+	 * whole declaration, and it is the same table every other relationship uses.
+	 */
+	UARPGMagicCombinationTable* MakeFreezeTable(UARPGMagicElement* Ice)
+	{
+		UARPGMagicCombinationTable* Table = NewObject<UARPGMagicCombinationTable>();
+
+		UARPGMagicCombinationEntry* Entry = NewObject<UARPGMagicCombinationEntry>(Table);
+		Entry->RequiredElements.AddTag(TAG_Element_Ice);
+		Entry->RequiredElements.AddTag(TAG_Element_Water);
+		Entry->Result = Ice;
+		Entry->Mode = EARPGReactionMode::Solidify;
+		Entry->Scope = static_cast<int32>(EARPGCombinationScope::Surface);
+		Table->Entries.Add(Entry);
+
+		return Table;
+	}
+
+	UARPGSolidDefinition* MakeIce(UARPGMagicElement* Element)
+	{
+		UARPGSolidDefinition* Definition = NewObject<UARPGSolidDefinition>();
+		Definition->Element = Element;
+		Definition->Thickness = 30.f;
+		Definition->bStandable = true;
+		Definition->MeltRate = 0.f;
+		Definition->MinimumArea = 100.f;
+		return Definition;
+	}
+
+	/** An ice shard, as a volume with a sphere for its reach. */
+	UARPGElementalVolumeComponent* MakeShard(UWorld* World, UARPGMagicElement* Ice,
+		FVector At, float Radius)
+	{
+		FActorSpawnParameters Params;
+		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		AActor* Actor = World->SpawnActor<AActor>(AActor::StaticClass(), FTransform(At), Params);
+
+		USphereComponent* Sphere = NewObject<USphereComponent>(Actor);
+		Sphere->SetSphereRadius(Radius);
+		Sphere->SetMobility(EComponentMobility::Movable);
+		Sphere->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+		Actor->SetRootComponent(Sphere);
+		Sphere->RegisterComponent();
+		Sphere->SetWorldLocation(At);
+
+		UARPGElementalVolumeComponent* Volume = NewObject<UARPGElementalVolumeComponent>(Actor);
+		Volume->Element = Ice;
+		Volume->OverlapSource = Sphere;
+		Volume->SetupAttachment(Sphere);
+		Volume->RegisterComponent();
+		Volume->SetEnergy(50.f);
+
+		return Volume;
+	}
+
+	/**
+	 * A river: authored, static, and NOT a fluid pool.
+	 *
+	 * A tall box whose waterline sits well below its top, which is how a body of
+	 * water is authored -- see UARPGElementalVolumeComponent. This is the base
+	 * reservoir rather than the water-body one on purpose: the freezing logic is
+	 * written against ContainsPoint, so it can be exercised in full without the
+	 * Water plugin, and a spline body only makes the containment more accurate.
+	 */
+	UARPGReservoirVolumeComponent* MakeRiver(UWorld* World, UARPGMagicElement* Water,
+		FVector Centre, FVector Extent)
+	{
+		FActorSpawnParameters Params;
+		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		AActor* Actor = World->SpawnActor<AActor>(AActor::StaticClass(), FTransform(Centre), Params);
+
+		UBoxComponent* Box = NewObject<UBoxComponent>(Actor);
+		Box->SetBoxExtent(Extent);
+		Box->SetMobility(EComponentMobility::Movable);
+		Box->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+		Actor->SetRootComponent(Box);
+		Box->RegisterComponent();
+		Box->SetWorldLocation(Centre);
+
+		UARPGReservoirVolumeComponent* River = NewObject<UARPGReservoirVolumeComponent>(Actor);
+		River->Element = Water;
+		River->OverlapSource = Box;
+		River->SetupAttachment(Box);
+		River->RegisterComponent();
+		River->SetEnergy(10000.f);
+
+		// The waterline, relative to the volume -- well under the top of the box,
+		// which reaches up so a spell arriving from above still enters.
+		River->SurfaceHeightOffset = 0.f;
+
+		return River;
 	}
 
 	/**
@@ -375,6 +479,172 @@ bool FARPGFluidRainTest::RunTest(const FString& Parameters)
 	// Literally the same operation with the sign flipped, which is the entire
 	// reason a body is a polygon rather than a grid or a heightfield.
 	TestTrue(TEXT("Rain grows the pool"), Pool->GetArea() > Initial);
+
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// Reservoirs
+//
+// A river is AUTHORED and STATIC where a puddle is spawned and reshaped, so it
+// is not a fluid pool and should not become one. What makes it part of the
+// elemental world is a volume saying what it is made of -- and until this
+// landed, the one thing it could not do was freeze.
+// ---------------------------------------------------------------------------
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFluidFreezeRiverTest,
+	"ARPG.World.Fluid.Reservoir.ARiverFreezesWithoutRunningOut",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGFluidFreezeRiverTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+	UARPGMagicElement* Ice = MakeElement(GetTransientPackage(), TAG_Element_Ice);
+
+	Fluids->Solids = { MakeIce(Ice) };
+	Fluids->CombinationTable = MakeFreezeTable(Ice);
+
+	// Wide, and 7m deep as the original was, with the waterline at the volume's
+	// own height rather than the top of the box.
+	UARPGReservoirVolumeComponent* River =
+		MakeRiver(Scope.World, Water, FVector(0, 0, 0), FVector(2000, 400, 350));
+
+	// The defaults are what being a reservoir MEANS, rather than a checklist.
+	TestTrue(TEXT("A river is bottomless"), River->bReservoir);
+	TestTrue(TEXT("And something you stand in"), River->bAmbientSource);
+	TestTrue(TEXT("And carries a charge"), River->Conductivity > 0.f);
+
+	UARPGElementalVolumeComponent* Shard = MakeShard(Scope.World, Ice, FVector(0, 0, 0), 150.f);
+
+	// THE CASE THAT USED TO FAIL. TrySolidify required one side to literally be an
+	// AARPGFluidPool, so a river fell through to an ordinary energy trade and an
+	// ice shard into it made ice and no floe.
+	TestTrue(TEXT("Ice meeting a river freezes it"), Fluids->TrySolidify(River, Shard));
+	TestEqual(TEXT("Producing one floe"), Fluids->GetSolids().Num(), 1);
+
+	// AND THE RIVER DOES NOT RUN OUT, which is what bReservoir means everywhere
+	// else in the codebase -- Consume already refuses to spend one, and there is a
+	// reaction test named for it. Freezing was the path that forgot.
+	TestEqual(TEXT("A river does not run out"), River->GetEnergy(), 10000.f);
+	TestEqual(TEXT("And no pool was invented to hold it"), Fluids->GetPools().Num(), 0);
+
+	// Freezing it again still works, because there is still a river there.
+	UARPGElementalVolumeComponent* Second = MakeShard(Scope.World, Ice, FVector(600, 0, 0), 150.f);
+	TestTrue(TEXT("And can be frozen again"), Fluids->TrySolidify(River, Second));
+	TestEqual(TEXT("Making a second floe"), Fluids->GetSolids().Num(), 2);
+
+	// The shard is spent either way -- it is the thing that was used up.
+	TestEqual(TEXT("The shard is spent"), Shard->GetEnergy(), 0.f);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFluidFreezeEdgeTest,
+	"ARPG.World.Fluid.Reservoir.AFrozenPatchStopsAtTheBank",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGFluidFreezeEdgeTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+	UARPGMagicElement* Ice = MakeElement(GetTransientPackage(), TAG_Element_Ice);
+
+	Fluids->Solids = { MakeIce(Ice) };
+	Fluids->CombinationTable = MakeFreezeTable(Ice);
+
+	// A NARROW river -- 100cm to either side of centre -- and a shard far wider
+	// than it. The frozen patch has to stop at the water, not spread over both
+	// banks, and the footprint march is what makes that fall out: it asks
+	// ContainsPoint outward until the water stops.
+	UARPGReservoirVolumeComponent* River =
+		MakeRiver(Scope.World, Water, FVector(0, 0, 0), FVector(2000, 100, 350));
+
+	UARPGElementalVolumeComponent* Shard = MakeShard(Scope.World, Ice, FVector(0, 0, 0), 500.f);
+
+	TestTrue(TEXT("A shard across a narrow river still freezes it"),
+		Fluids->TrySolidify(River, Shard));
+
+	if (Fluids->GetSolids().Num() != 1)
+	{
+		AddError(TEXT("Setup: expected exactly one floe."));
+		return false;
+	}
+
+	AARPGFluidSolid* Floe = Fluids->GetSolids()[0];
+
+	TestTrue(TEXT("You can stand on it mid-river"),
+		Floe->IsStandableAt(FVector(0, 0, Floe->GetSurfaceHeight())));
+
+	// The bank is 100 out; the shard reached 500. A patch that ignored containment
+	// would happily have frozen dry ground 400cm from the water.
+	TestFalse(TEXT("But not out on the bank the shard also covered"),
+		Floe->IsStandableAt(FVector(0, 400, Floe->GetSurfaceHeight())));
+
+	// A shard that misses the water entirely freezes nothing at all, which the old
+	// bounding-box answer would have got wrong for anything that bends.
+	UARPGElementalVolumeComponent* Missed =
+		MakeShard(Scope.World, Ice, FVector(0, 1500, 0), 100.f);
+
+	TestFalse(TEXT("A shard that struck the bank freezes nothing"),
+		Fluids->TrySolidify(River, Missed));
+	TestEqual(TEXT("So there is still one floe"), Fluids->GetSolids().Num(), 1);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFluidReservoirPoolTest,
+	"ARPG.World.Fluid.Reservoir.APoolBigEnoughToBeOneIsNotDepleted",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGFluidReservoirPoolTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+	UARPGMagicElement* Ice = MakeElement(GetTransientPackage(), TAG_Element_Ice);
+
+	UARPGFluidDefinition* WaterDefinition = MakeWater(GetTransientPackage(), Water);
+	WaterDefinition->EvaporationRate = 0.f;   // isolate freezing from drying
+
+	// Low enough that the lake below crosses it. bReservoir is a THRESHOLD rather
+	// than a flag, so the same asset describes a splash and a lake.
+	WaterDefinition->ReservoirArea = 10000.f;
+
+	Fluids->Definitions = { WaterDefinition };
+	Fluids->Solids = { MakeIce(Ice) };
+	Fluids->CombinationTable = MakeFreezeTable(Ice);
+
+	AARPGFluidPool* Lake = Fluids->Deposit(FVector(0, 0, 0), 400.f, TAG_Element_Water);
+	if (!Lake)
+	{
+		AddError(TEXT("Setup: no lake was deposited."));
+		return false;
+	}
+
+	TestTrue(TEXT("Setup: it is big enough to be a reservoir"), Lake->Volume->bReservoir);
+	const double Before = Lake->GetArea();
+
+	UARPGElementalVolumeComponent* Shard = MakeShard(Scope.World, Ice, FVector(200, 0, 0), 150.f);
+	TestTrue(TEXT("A lake freezes"), Fluids->TrySolidify(Lake->Volume, Shard));
+
+	// The same rule, reached the other way: a pool that has gathered enough to be
+	// bottomless is bottomless, and freezing it must not eat it. This used to
+	// shrink -- and destroy, once enough had been frozen off -- a body it had
+	// already agreed could not run out.
+	TestEqual(TEXT("A lake is not shrunk by freezing"), Lake->GetArea(), Before, 1.0);
+	TestEqual(TEXT("And is still there"), Fluids->GetPools().Num(), 1);
 
 	return true;
 }

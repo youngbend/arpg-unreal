@@ -990,6 +990,50 @@ flat number and nothing queries back into it.
 
 3 new cases under `ARPG.World.Fluid.Surface`.
 
+**A THIRD CORRECTION: only a pool could be frozen.** `TrySolidify` required one
+side to literally be an `AARPGFluidPool`, which quietly meant only a body this
+subsystem had spawned. An authored river -- the case the whole RESERVOIR idea
+exists for -- failed the cast and fell through to an ordinary energy trade, so an
+ice shard into a river made ice and no floe. And a pool that had grown past
+`ReservoirArea` *was* frozen, but was then shrunk by the frozen area and
+destroyed once enough had been taken: a body the code had already agreed was
+bottomless, depleted by the one path that forgot to ask.
+
+`IARPGFreezableSurface` replaces the cast with the three questions freezing
+actually asks -- what shape are you near where I hit you, how high is the surface,
+and take this much away. A puddle answers with its ring and shrinks; a reservoir
+answers with a patch around the contact and takes nothing. `bReservoir` becomes
+one implementation rather than a branch nobody wrote.
+
+**Rivers use the Water plugin, and that is the OPPOSITE call from puddles for a
+consistent reason.** The line is not water against not-water; it is AUTHORED AND
+STATIC against SPAWNED AND RESHAPED. Water bodies are spline-authored level
+geometry served by a water zone, which is exactly a river and exactly not a
+puddle. A river is therefore never an `AARPGFluidPool`: it is an
+`AWaterBodyRiver` with a `UARPGWaterBodyVolumeComponent` on it, and the fluid
+subsystem never hears about it.
+
+Two things the plugin supplies that a box has to guess:
+
+- **Containment.** The base `ContainsPoint` is axis-aligned bounds. For the
+  straight box a river was authored as that is roughly honest; for a spline that
+  bends it covers the whole valley, so everyone in it reads as standing in water
+  -- soaked, shocked, and detonating fireballs over dry ground. Both it and
+  `GetSurfaceHeightAt` are now virtual, and the water body answers from the same
+  query that drives its own buoyancy.
+- **A waterline that varies.** One authored offset cannot describe a river
+  running downhill. That was a standing note on `GetSurfaceHeightAt` saying phase
+  10 would replace it; phase 10 did not, and this does.
+
+**Freezing is written against containment, not against a shape.** The footprint
+is found by marching outward from the contact until the water stops, asking only
+`ContainsPoint` -- so `UARPGReservoirVolumeComponent` needs no knowledge of
+splines or boxes, a subclass that answers containment better gets a better patch
+for free, and the whole path is testable with a plain box and no plugin.
+
+3 new cases under `ARPG.World.Fluid.Reservoir`, including a shard wider than a
+narrow river freezing a patch that stops at the bank.
+
 **Phase 11 -- code complete. Not in the original ten: this is the layer that
 makes the other ten reachable from a controller.** The modal control scheme, the
 speed tiers, the buffering, and auto-sheathe. 13 new cases; 99 pass in total.

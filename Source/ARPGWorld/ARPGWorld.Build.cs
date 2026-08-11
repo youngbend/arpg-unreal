@@ -44,12 +44,19 @@ public class ARPGWorld : ModuleRules
 		// itself with. It stays private on the same rule: the body's header names
 		// the component as a forward declaration only, so nothing downstream has
 		// to know how a puddle is rendered in order to ask where one is.
+		//
+		// Water is the plugin's spline-authored bodies, and it is deliberately
+		// only reached by UARPGWaterBodyVolumeComponent. A river is AUTHORED and
+		// STATIC, which is what water bodies are for; a puddle is spawned and
+		// reshaped four times a second, which is what the fluid subsystem is for.
+		// Nothing outside that one class should have to know which it is holding.
 		PrivateDependencyModuleNames.AddRange(new string[] {
 			"GameplayTasks",
 			"DeveloperSettings",
 			"GeometryCore",
 			"GeometryAlgorithms",
-			"GeometryFramework"
+			"GeometryFramework",
+			"Water"
 		});
 	}
 }

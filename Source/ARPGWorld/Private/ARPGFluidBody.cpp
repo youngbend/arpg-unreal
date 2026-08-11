@@ -203,6 +203,47 @@ void AARPGFluidPool::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLi
 	DOREPLIFETIME(AARPGFluidPool, Definition);
 }
 
+TArray<FVector2D> AARPGFluidPool::GetFreezableFootprint(const FVector2D& Centre, double Radius) const
+{
+	return Ring;
+}
+
+float AARPGFluidPool::GetFreezableSurfaceHeight(const FVector2D& At) const
+{
+	return GetSurfaceHeight();
+}
+
+bool AARPGFluidPool::ConsumeFreezableArea(double Area)
+{
+	if (!Definition)
+	{
+		return false;
+	}
+
+	// A POOL BIG ENOUGH TO BE A RESERVOIR IS NOT DEPLETED EITHER. bReservoir is
+	// how this codebase says bottomless everywhere else -- Consume refuses to
+	// spend one, and there is a test named for it -- and freezing was the single
+	// path that took area off a body it had already agreed could not run out.
+	// Freeze a lake enough times and it used to vanish.
+	if (Volume->bReservoir)
+	{
+		return false;
+	}
+
+	// The fluid is genuinely USED UP. Subtracting the frozen region would leave a
+	// hole, and a liquid flows back over a hole -- so the pool keeps its shape and
+	// loses the area instead, which is what ShrinkToArea is for.
+	const double Remaining = FMath::Max(0.0, GetArea() - Area);
+
+	if (Remaining < Definition->MinimumArea)
+	{
+		return true;
+	}
+
+	SetRing(ARPGFluidGeometry::ShrinkToArea(Ring, Remaining));
+	return false;
+}
+
 void AARPGFluidPool::RebuildFromRing()
 {
 	Super::RebuildFromRing();

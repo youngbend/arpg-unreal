@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "ARPGFreezableSurface.h"
 #include "ARPGFluidBody.generated.h"
 
 class UARPGElementalVolumeComponent;
@@ -148,7 +149,7 @@ protected:
  * Godot's FluidPool.
  */
 UCLASS()
-class ARPGWORLD_API AARPGFluidPool : public AARPGFluidBody
+class ARPGWORLD_API AARPGFluidPool : public AARPGFluidBody, public IARPGFreezableSurface
 {
 	GENERATED_BODY()
 
@@ -157,6 +158,13 @@ public:
 	TObjectPtr<UARPGFluidDefinition> Definition;
 
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+
+	//~ IARPGFreezableSurface. A pool is small enough to hand back whole, so the
+	// contact is ignored -- the caller intersects with the agent anyway.
+	virtual TArray<FVector2D> GetFreezableFootprint(const FVector2D& Centre, double Radius) const override;
+	virtual float GetFreezableSurfaceHeight(const FVector2D& At) const override;
+	virtual bool ConsumeFreezableArea(double Area) override;
+	//~ End IARPGFreezableSurface
 
 	/** Configures the pool. Called by the subsystem; nothing else builds one. */
 	void Setup(UARPGFluidDefinition* InDefinition, const TArray<FVector2D>& InRing,
