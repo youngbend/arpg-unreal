@@ -795,6 +795,66 @@ bool FARPGSolidFieldBoundedTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGSolidFieldCacheTest,
+	"ARPG.World.Fluid.Ice.TotalsStayTrueWithoutBeingSweptFor",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGSolidFieldCacheTest::RunTest(const FString& Parameters)
+{
+	// Area, volume, centroid and occupancy are cached rather than swept for on
+	// every read -- the buoyancy tick wants all four every frame, and sweeping a
+	// 2500-cell floe four times a frame was the single most expensive thing in
+	// this system. Cheap is only useful if it is also RIGHT, so this walks the
+	// grid by hand and compares.
+	auto SweptCellCount = [](const FARPGSolidField& Field)
+	{
+		int32 Count = 0;
+		for (int32 Y = 0; Y < Field.CountY; ++Y)
+		{
+			for (int32 X = 0; X < Field.CountX; ++X)
+			{
+				Count += Field.IsIced(X, Y) ? 1 : 0;
+			}
+		}
+		return Count;
+	};
+
+	FARPGSolidField Field;
+	Field.BuildFrom(ARPGFluidGeometry::MakeCircle(FVector2D::ZeroVector, 300.0), 20.f, 30.f);
+
+	TestEqual(TEXT("A fresh field's count is its cells"),
+		Field.IcedCellCount(), SweptCellCount(Field));
+	TestEqual(TEXT("And its volume is area times thickness"),
+		Field.IceVolume(), Field.IcedArea() * 30.0, Field.IcedArea() * 0.02);
+
+	// Melting through changes the count, so the cache has to move with it.
+	Field.MeltBowl(FVector2D::ZeroVector, 120.f, 60.f);
+
+	TestEqual(TEXT("Melting through updates the count"),
+		Field.IcedCellCount(), SweptCellCount(Field));
+	TestTrue(TEXT("Which went down"), Field.IcedCellCount() < Field.CountX * Field.CountY);
+
+	// Thinning changes volume without changing occupancy.
+	const int32 BeforeCells = Field.IcedCellCount();
+	const double BeforeVolume = Field.IceVolume();
+
+	Field.MeltUniform(2.f, 0.f);
+
+	TestEqual(TEXT("Thinning leaves the count alone"), Field.IcedCellCount(), BeforeCells);
+	TestTrue(TEXT("But takes volume"), Field.IceVolume() < BeforeVolume);
+
+	// TRANSLATION MOVES THE CENTROID WITHOUT A SWEEP, which is the whole reason
+	// drifting is one vector add rather than a rebuild.
+	const FVector2D Before = Field.IcedCentroid();
+	Field.Translate(FVector2D(500, -250));
+
+	TestEqual(TEXT("Sliding the field slides its centroid"),
+		Field.IcedCentroid(), Before + FVector2D(500, -250));
+	TestEqual(TEXT("And costs it no cells"), Field.IcedCellCount(), BeforeCells);
+
+	return true;
+}
+
 // ---------------------------------------------------------------------------
 // Floating
 //
@@ -1156,6 +1216,133 @@ bool FARPGFluidHeavySolidTest::RunTest(const FString& Parameters)
 
 	TestEqual(TEXT("And no reaction can eat permanent rock"), Slab->GetArea(), Before, 1.0);
 	TestEqual(TEXT("So it is still there"), Fluids->GetSolids().Num(), 1);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFluidBudgetTest,
+	"ARPG.World.Fluid.Pools.TheWorldKeepsOnlySoManyBodies",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGFluidBudgetTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+	UARPGFluidDefinition* WaterDefinition = MakeWater(GetTransientPackage(), Water);
+	WaterDefinition->EvaporationRate = 0.f;
+	WaterDefinition->MergeDistance = 0.f;   // every deposit is its own body
+	WaterDefinition->MinimumArea = 100.f;
+
+	Fluids->Definitions = { WaterDefinition };
+	Fluids->MaxBodiesOfEachKind = 5;
+
+	// NOTHING ELSE BOUNDS THIS. A deposit that merges is free; one that lands
+	// clear of every pool spawns another actor with a mesh, a collider and a
+	// replicated outline. A player walking a field casting water makes one per
+	// cast, forever.
+	for (int32 Index = 0; Index < 12; ++Index)
+	{
+		Fluids->Deposit(FVector(Index * 2000, 0, 0), 100.f + Index * 10.f, TAG_Element_Water);
+	}
+
+	TestEqual(TEXT("Twelve deposits made twelve bodies"), Fluids->GetPools().Num(), 12);
+
+	// The budget is applied on the simulation step rather than at the moment of
+	// depositing, so a burst of casts is never refused mid-fight -- it settles.
+	Fluids->StepSimulation(0.1f);
+
+	TestEqual(TEXT("The next step brings it back inside the budget"),
+		Fluids->GetPools().Num(), 5);
+
+	// AND THE SMALLEST WENT. Cheapest to lose, least likely to be the one someone
+	// is standing in, and the deposits above got larger as they went.
+	for (AARPGFluidPool* Kept : Fluids->GetPools())
+	{
+		TestTrue(TEXT("What survived is one of the larger bodies"),
+			Kept->GetArea() > ARPGFluidGeometry::PolygonArea(
+				ARPGFluidGeometry::MakeCircle(FVector2D::ZeroVector, 150.0)));
+	}
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFluidBudgetRiderTest,
+	"ARPG.World.Fluid.Pools.CullingAPoolTakesWhatWasFloatingOnIt",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGFluidBudgetRiderTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+	UARPGMagicElement* Ice = MakeElement(GetTransientPackage(), TAG_Element_Ice);
+
+	UARPGFluidDefinition* WaterDefinition = MakeWater(GetTransientPackage(), Water);
+	WaterDefinition->EvaporationRate = 0.f;
+	WaterDefinition->MergeDistance = 0.f;
+	WaterDefinition->MinimumArea = 100.f;
+
+	Fluids->Definitions = { WaterDefinition };
+	Fluids->Solids = { MakeIce(Ice) };
+	Fluids->CombinationTable = MakeFreezeTable(Ice);
+
+	// The one that will be culled: smallest, and carrying a floe.
+	AARPGFluidPool* Doomed = Fluids->Deposit(FVector(0, 0, 0), 120.f, TAG_Element_Water);
+	UARPGElementalVolumeComponent* Shard = MakeShard(Scope.World, Ice, FVector(0, 0, 0), 100.f);
+	if (!Fluids->TrySolidify(Doomed->Volume, Shard) || Fluids->GetSolids().Num() != 1)
+	{
+		AddError(TEXT("Setup: nothing froze."));
+		return false;
+	}
+
+	for (int32 Index = 1; Index <= 3; ++Index)
+	{
+		Fluids->Deposit(FVector(Index * 3000, 0, 0), 400.f, TAG_Element_Water);
+	}
+
+	Fluids->MaxBodiesOfEachKind = 3;
+	Fluids->StepSimulation(0.1f);
+
+	TestEqual(TEXT("The smallest pool was culled"), Fluids->GetPools().Num(), 3);
+	TestFalse(TEXT("And it was the one carrying the floe"),
+		Fluids->GetPools().Contains(Doomed));
+
+	// A CULL IS NOT A RETIREMENT, but a floe is not an independent object either.
+	// Dropping the water and leaving the ice hanging over dry ground is the one
+	// visible artefact this whole economy could produce.
+	TestEqual(TEXT("The floe went with the water it was riding"),
+		Fluids->GetSolids().Num(), 0);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFluidSignificanceTest,
+	"ARPG.World.Fluid.Pools.DistantBodiesStopPayingForThemselves",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGFluidSignificanceTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+	Fluids->SignificanceDistance = 1000.f;
+
+	// NOBODY WATCHING MEANS EVERYTHING MATTERS. A dedicated server with no local
+	// viewer -- and every fixture in this file -- would otherwise quietly switch
+	// the whole system off, which is an optimisation that shows up as tests
+	// passing for the wrong reason.
+	Fluids->StepSimulation(0.1f);
+
+	TestTrue(TEXT("With no viewer at all, everything is significant"),
+		Fluids->IsSignificantAt(FVector(100000, 0, 0)));
 
 	return true;
 }

@@ -77,6 +77,17 @@ struct ARPGWORLD_API FARPGSolidField
 
 	bool IsValidField() const { return CountX > 0 && CountY > 0 && Top.Num() == CountX * CountY; }
 
+	/**
+	 * Recomputes the cached totals. Call after writing cells directly.
+	 *
+	 * WHY THEY ARE CACHED AT ALL. Area, volume, centroid and occupancy are each a
+	 * full sweep of the grid, and the buoyancy tick wants all four EVERY FRAME --
+	 * so a 2500-cell floe was doing ten thousand cell visits per frame to answer
+	 * questions whose answers only change when something writes to it. Writing is
+	 * rare and reading is constant, so the totals live with the data.
+	 */
+	void Refresh();
+
 	int32 Index(int32 X, int32 Y) const { return Y * CountX + X; }
 
 	/** Cell containing a world XY, or (-1,-1) when it is off the grid. */
@@ -98,19 +109,19 @@ struct ARPGWORLD_API FARPGSolidField
 	float TopAt(const FVector2D& World) const;
 
 	/** Total plan area still carrying ice, in square cm. */
-	double IcedArea() const;
+	double IcedArea() const { return CachedArea; }
 
 	/** Total volume of ice, in cubic cm. What buoyancy weighs. */
-	double IceVolume() const;
+	double IceVolume() const { return CachedVolume; }
 
 	/** Occupancy-weighted centre of what is left. */
-	FVector2D IcedCentroid() const;
+	FVector2D IcedCentroid() const { return CachedCentroid; }
 
 	/** How far the ice reaches from a point along a direction. */
 	double SupportDistance(const FVector2D& From, const FVector2D& Direction) const;
 
 	/** Cells still carrying ice. Zero means the slab is gone. */
-	int32 IcedCellCount() const;
+	int32 IcedCellCount() const { return CachedCells; }
 
 	// --- Writing ---------------------------------------------------------------
 
@@ -156,5 +167,25 @@ struct ARPGWORLD_API FARPGSolidField
 	double MeltUniform(float FromTop, float FromBottom);
 
 	/** Slides the whole field. Cells are untouched -- only where it sits changes. */
-	void Translate(const FVector2D& Delta) { Origin += Delta; }
+	void Translate(const FVector2D& Delta) { Origin += Delta; CachedCentroid += Delta; }
+
+private:
+	/**
+	 * Totals, kept with the data rather than swept for on every read.
+	 *
+	 * Transient and rebuilt by Refresh: they are pure functions of the cells, so
+	 * sending them would be sending the same information twice and inviting the
+	 * two copies to disagree. A client rebuilds them when the field arrives.
+	 */
+	UPROPERTY(Transient)
+	double CachedArea = 0.0;
+
+	UPROPERTY(Transient)
+	double CachedVolume = 0.0;
+
+	UPROPERTY(Transient)
+	FVector2D CachedCentroid = FVector2D::ZeroVector;
+
+	UPROPERTY(Transient)
+	int32 CachedCells = 0;
 };

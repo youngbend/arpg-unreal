@@ -81,6 +81,48 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Fluid")
 	bool bRaining = false;
 
+	// --- Keeping the cost down -------------------------------------------------
+
+	/**
+	 * Beyond this from every viewer, a body stops paying for itself.
+	 *
+	 * WHAT STOPS AND WHAT DOES NOT. A distant body keeps SIMULATING -- it still
+	 * melts and evaporates on the weather tick, because coming back to a pool that
+	 * should have dried up an hour ago is a bug you cannot see happening. What
+	 * stops is everything that exists for the player: the per-frame buoyancy
+	 * settle, the mesh rebuild and, most of all, the collision cook.
+	 *
+	 * Generous by default. This is a safety rail against a hundred puddles across
+	 * a field, not an LOD system.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Fluid",
+		meta = (ClampMin = "0.0"))
+	float SignificanceDistance = 8000.f;
+
+	/**
+	 * How many bodies of each kind the world will keep.
+	 *
+	 * NOTHING ELSE BOUNDS THIS. A deposit that merges into an existing pool is
+	 * free, but one that lands clear of every pool spawns another actor -- so a
+	 * player walking a field casting water makes one per cast, forever, each with
+	 * a mesh, a collider and a replicated outline. Past the cap the smallest is
+	 * retired, which is both the cheapest to lose and the least likely to be
+	 * noticed.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Fluid",
+		meta = (ClampMin = "1"))
+	int32 MaxBodiesOfEachKind = 48;
+
+	/**
+	 * Is anything close enough to this to be worth presenting?
+	 *
+	 * Asked by a body's own tick. Viewer positions are gathered once per weather
+	 * tick rather than per body per frame, which is the whole point of asking the
+	 * subsystem rather than each body walking the player list itself.
+	 */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
+	bool IsSignificantAt(FVector WorldPosition) const;
+
 	// --- Depositing -----------------------------------------------------------
 
 	/**
@@ -211,6 +253,17 @@ private:
 
 	/** So "nothing is configured to pool" is said once rather than every cast. */
 	mutable bool bWarnedNoDefinitions = false;
+
+	/** Destroys everything floating on a pool that is about to stop existing. */
+	void DropRiders(AARPGFluidPool* Pool);
+
+	/** Refreshes ViewerLocations. Once per weather tick, not once per body. */
+	void GatherViewers();
+
+	/** Drops the smallest bodies until the register is back inside its cap. */
+	void EnforceBudget();
+
+	TArray<FVector> ViewerLocations;
 
 	float TickAccumulator = 0.f;
 };

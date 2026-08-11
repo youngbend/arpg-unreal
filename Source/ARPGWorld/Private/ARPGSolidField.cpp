@@ -65,61 +65,34 @@ float FARPGSolidField::TopAt(const FVector2D& World) const
 	return Cell.X >= 0 ? Top[Index(Cell.X, Cell.Y)] * ToCm : 0.f;
 }
 
-int32 FARPGSolidField::IcedCellCount() const
+void FARPGSolidField::Refresh()
 {
-	int32 Count = 0;
-	for (int32 Y = 0; Y < CountY; ++Y)
-	{
-		for (int32 X = 0; X < CountX; ++X)
-		{
-			Count += IsIced(X, Y) ? 1 : 0;
-		}
-	}
-	return Count;
-}
-
-double FARPGSolidField::IcedArea() const
-{
-	return IcedCellCount() * static_cast<double>(CellSize) * CellSize;
-}
-
-double FARPGSolidField::IceVolume() const
-{
-	double Volume = 0.0;
 	const double CellArea = static_cast<double>(CellSize) * CellSize;
 
-	for (int32 Y = 0; Y < CountY; ++Y)
-	{
-		for (int32 X = 0; X < CountX; ++X)
-		{
-			if (IsIced(X, Y))
-			{
-				Volume += ThicknessAt(X, Y) * CellArea;
-			}
-		}
-	}
-
-	return Volume;
-}
-
-FVector2D FARPGSolidField::IcedCentroid() const
-{
 	FVector2D Sum = FVector2D::ZeroVector;
-	int32 Count = 0;
+	CachedCells = 0;
+	CachedVolume = 0.0;
 
+	// ONE SWEEP for all four answers, and only when something has written. The
+	// buoyancy tick asks for every one of them every frame; sweeping per question
+	// per frame is what made a floe cost its whole grid ten times over per tick.
 	for (int32 Y = 0; Y < CountY; ++Y)
 	{
 		for (int32 X = 0; X < CountX; ++X)
 		{
-			if (IsIced(X, Y))
+			if (!IsIced(X, Y))
 			{
-				Sum += CentreOf(X, Y);
-				++Count;
+				continue;
 			}
+
+			++CachedCells;
+			CachedVolume += ThicknessAt(X, Y) * CellArea;
+			Sum += CentreOf(X, Y);
 		}
 	}
 
-	return Count > 0 ? Sum / Count : Origin;
+	CachedArea = CachedCells * CellArea;
+	CachedCentroid = CachedCells > 0 ? Sum / CachedCells : Origin;
 }
 
 double FARPGSolidField::SupportDistance(const FVector2D& From, const FVector2D& Direction) const
@@ -187,6 +160,8 @@ void FARPGSolidField::BuildFrom(const TArray<FVector2D>& Ring, float InCellSize,
 			}
 		}
 	}
+
+	Refresh();
 }
 
 bool FARPGSolidField::Refreeze(const TArray<FVector2D>& Ring, float WaterlineZ, float MinimumGain)
@@ -227,6 +202,11 @@ bool FARPGSolidField::Refreeze(const TArray<FVector2D>& Ring, float WaterlineZ, 
 			Top[At] = NewTop;
 			bGained = true;
 		}
+	}
+
+	if (bGained)
+	{
+		Refresh();
 	}
 
 	return bGained;
@@ -285,6 +265,11 @@ double FARPGSolidField::MeltBowl(const FVector2D& At, float Radius, float Depth)
 		}
 	}
 
+	if (Removed > 0.0)
+	{
+		Refresh();
+	}
+
 	return Removed;
 }
 
@@ -323,6 +308,11 @@ double FARPGSolidField::MeltUniform(float FromTop, float FromBottom)
 		Bottom[Cell] = NewBottom;
 
 		Removed += (Before - FMath::Max(0.f, (NewTop - NewBottom) * ToCm)) * CellArea;
+	}
+
+	if (Removed > 0.0)
+	{
+		Refresh();
 	}
 
 	return Removed;

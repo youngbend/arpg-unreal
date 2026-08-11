@@ -1201,6 +1201,63 @@ which of them behaves how is data.
 
 1 new case under `ARPG.World.Fluid.Floating`.
 
+**A SIXTH CORRECTION: nothing bounded what any of this cost.** Asked how culling
+was handled, the honest answer was that it was not -- no tick interval, no draw
+distance, no cap on how many bodies a session could accumulate. But the missing
+culling was the smaller half of it. The bigger half was a per-frame cost nobody
+had put there on purpose.
+
+- **A floe was sweeping its whole grid four times a frame.** `Tick` asked the
+  field for its cell count, its centroid, its volume and its area, and every one
+  of those walked all the cells. A ten-metre floe at 20cm cells is 2500 cells, so
+  that is 10,000 cell visits per floe per frame plus a physics box overlap --
+  paid whether or not anything had changed, which for a floe nobody is standing
+  on is always. The totals are now cached on the field and recomputed in ONE
+  sweep on write. `Translate` moves the cached centroid rather than invalidating
+  it, because sliding a floe cannot change what is iced.
+- **The caches are `Transient`, so a client gets them empty**, which is why
+  `RebuildFromRing` refreshes before it reads. A replicated field arriving with
+  four zeroed totals would have put every floe on the client at the origin with
+  no buoyancy -- the precise failure mode of caching a derived value across the
+  wire.
+- **Distance now decides what a body presents, not whether it exists.** A body
+  beyond `SignificanceDistance` of every viewer keeps SIMULATING -- it still
+  melts and evaporates on the weather tick, because walking back to a pool that
+  should have dried up an hour ago is a bug you cannot watch happen. What stops
+  is everything that exists for the player: the buoyancy settle, and above all
+  the collision cook, which is the single most expensive thing in the system and
+  was being run on floes over the horizon.
+- **Viewers are gathered once per weather tick**, not once per body per frame,
+  and the pawn is preferred over the view target so a floe you are standing on
+  keeps its collision while the camera is elsewhere. **No viewer means everything
+  is significant** -- a dedicated server and every fixture in the test file would
+  otherwise switch the whole system off, which is an optimisation that shows up
+  as tests passing for the wrong reason.
+- **`MaxBodiesOfEachKind` is the backstop.** A deposit that merges into a nearby
+  pool is free, but one that lands clear of every pool spawns another actor with
+  a mesh, a collider and a replicated outline -- so a player crossing a field
+  casting water makes one per cast, forever. Past the cap the smallest goes:
+  cheapest to lose, least likely to be the one someone is standing in. Applied on
+  the simulation step rather than at the moment of depositing, so a burst of
+  casts is never refused mid-fight; it settles.
+- **A cull is not a retirement**, and keeping them separate mattered twice.
+  Retiring a solid returns its water, which under a budget cull would answer "too
+  many bodies" by making another one -- so a cull simply drops it. But a culled
+  POOL still has to take its floe with it, exactly as a retired one does: ice
+  left hanging over dry ground is the one visible artefact this economy could
+  produce, and that rider-shedding is now a shared step rather than living inside
+  the one path that used to be the only way a pool could go.
+
+What is still owed is the wire. A floe's field is the heaviest thing this system
+replicates and it still goes across whole; dirty-region updates remain the
+obvious next economy, and no amount of culling changes that, because
+significance is about presentation and replication is about relevance.
+
+4 new cases under `ARPG.World.Fluid.Ice` and `ARPG.World.Fluid.Pools`, one of
+which hand-sweeps a grid and compares it against the cache after every kind of
+write, because a cache that agrees with its source only when freshly built is
+the failure worth testing for.
+
 **Phase 11 -- code complete. Not in the original ten: this is the layer that
 makes the other ten reachable from a controller.** The modal control scheme, the
 speed tiers, the buffering, and auto-sheathe. 13 new cases; 99 pass in total.

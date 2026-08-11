@@ -13,6 +13,8 @@
 #include "ARPGWorld.h"
 #include "ARPGWorldSettings.h"
 #include "Engine/World.h"
+#include "GameFramework/Pawn.h"
+#include "GameFramework/PlayerController.h"
 
 namespace
 {
@@ -525,6 +527,25 @@ void UARPGFluidSurfaceSubsystem::NoteReactionContact(UARPGElementalVolumeCompone
 	}
 }
 
+void UARPGFluidSurfaceSubsystem::DropRiders(AARPGFluidPool* Pool)
+{
+	// ANYTHING FLOATING ON IT GOES TOO. Nothing linked a floe's life to the water
+	// under it, so boiling a pool out from beneath one -- which fire can now do --
+	// left ice hanging in the air over dry ground. A floe is not an independent
+	// object; it is a thing riding a surface, and there is no surface left to
+	// ride. True however the pool went, which is why this is not inlined into the
+	// one path that used to be the only way for a pool to go.
+	for (int32 Index = ActiveSolids.Num() - 1; Index >= 0; --Index)
+	{
+		AARPGFluidSolid* Riding = ActiveSolids[Index];
+		if (IsValid(Riding) && Riding->FloatsOn.GetObject() == Pool)
+		{
+			ActiveSolids.RemoveAt(Index);
+			Riding->Destroy();
+		}
+	}
+}
+
 void UARPGFluidSurfaceSubsystem::RetireBody(AARPGFluidBody* Body)
 {
 	if (!IsValid(Body))
@@ -535,22 +556,7 @@ void UARPGFluidSurfaceSubsystem::RetireBody(AARPGFluidBody* Body)
 	if (AARPGFluidPool* Pool = Cast<AARPGFluidPool>(Body))
 	{
 		Pools.Remove(Pool);
-
-		// AND ANYTHING FLOATING ON IT. Nothing linked a floe's life to the water
-		// under it, so boiling a pool out from beneath one -- which fire can now
-		// do -- left ice hanging in the air over dry ground. A floe is not an
-		// independent object; it is a thing riding a surface, and there is no
-		// surface left to ride.
-		for (int32 Index = ActiveSolids.Num() - 1; Index >= 0; --Index)
-		{
-			AARPGFluidSolid* Riding = ActiveSolids[Index];
-			if (IsValid(Riding) && Riding->FloatsOn.GetObject() == Pool)
-			{
-				ActiveSolids.RemoveAt(Index);
-				Riding->Destroy();
-			}
-		}
-
+		DropRiders(Pool);
 		Pool->Destroy();
 		return;
 	}
@@ -614,9 +620,130 @@ bool UARPGFluidSurfaceSubsystem::IsCoveredBySolid(FVector WorldPosition) const
 // Weather
 // ---------------------------------------------------------------------------
 
+void UARPGFluidSurfaceSubsystem::GatherViewers()
+{
+	ViewerLocations.Reset();
+
+	const UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
+	{
+		const APlayerController* Controller = It->Get();
+		if (!Controller)
+		{
+			continue;
+		}
+
+		// The PAWN where there is one, so a body near the player counts even while
+		// the camera is somewhere else -- a floe you are standing on has to keep
+		// its collision whatever you are looking at.
+		if (const APawn* Pawn = Controller->GetPawn())
+		{
+			ViewerLocations.Add(Pawn->GetActorLocation());
+		}
+		else if (const AActor* ViewTarget = Controller->GetViewTarget())
+		{
+			ViewerLocations.Add(ViewTarget->GetActorLocation());
+		}
+	}
+}
+
+bool UARPGFluidSurfaceSubsystem::IsSignificantAt(FVector WorldPosition) const
+{
+	// NOBODY WATCHING MEANS EVERYTHING MATTERS. A dedicated server with no local
+	// viewer, and every automation fixture, would otherwise quietly switch the
+	// whole system off -- which is the kind of optimisation that only shows up as
+	// a test that passes for the wrong reason.
+	if (ViewerLocations.Num() == 0)
+	{
+		return true;
+	}
+
+	const float ReachSq = SignificanceDistance * SignificanceDistance;
+
+	for (const FVector& Viewer : ViewerLocations)
+	{
+		if (FVector::DistSquared(Viewer, WorldPosition) <= ReachSq)
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
+void UARPGFluidSurfaceSubsystem::EnforceBudget()
+{
+	// THE SMALLEST GOES. It is the cheapest thing to lose and the least likely to
+	// be the one the player is standing in -- and losing something is the point:
+	// nothing else in the system bounds how many bodies a session accumulates.
+	//
+	// NOT VIA RetireBody, deliberately. Retiring is a body reaching its natural
+	// end, and a solid that reaches its end puts its water back -- which under a
+	// budget cull would answer "too many bodies" by making another one. This is
+	// the world giving up on something, so it simply goes.
+	auto Trim = [this](auto& Register, const TCHAR* Kind)
+	{
+		while (Register.Num() > MaxBodiesOfEachKind)
+		{
+			int32 Smallest = INDEX_NONE;
+			double LeastArea = TNumericLimits<double>::Max();
+
+			for (int32 Index = 0; Index < Register.Num(); ++Index)
+			{
+				if (!IsValid(Register[Index]))
+				{
+					Smallest = Index;
+					break;
+				}
+
+				const double Area = Register[Index]->GetArea();
+				if (Area < LeastArea)
+				{
+					LeastArea = Area;
+					Smallest = Index;
+				}
+			}
+
+			if (Smallest == INDEX_NONE)
+			{
+				break;
+			}
+
+			UE_LOG(LogARPGWorld, Verbose,
+				TEXT("Over the %s budget, so the smallest one goes."), Kind);
+
+			AARPGFluidBody* Spent = Register[Smallest];
+			Register.RemoveAt(Smallest);
+
+			// Whatever was riding it goes with it, exactly as when a pool is
+			// retired -- a culled pool leaving its floe over dry ground would be
+			// the one visible artefact this whole economy could produce.
+			if (AARPGFluidPool* Pool = Cast<AARPGFluidPool>(Spent))
+			{
+				DropRiders(Pool);
+			}
+
+			if (IsValid(Spent))
+			{
+				Spent->Destroy();
+			}
+		}
+	};
+
+	Trim(Pools, TEXT("pool"));
+	Trim(ActiveSolids, TEXT("solid"));
+}
+
 void UARPGFluidSurfaceSubsystem::StepSimulation(float DeltaTime)
 {
+	GatherViewers();
 	TickWeather(DeltaTime);
+	EnforceBudget();
 }
 
 void UARPGFluidSurfaceSubsystem::Tick(float DeltaTime)

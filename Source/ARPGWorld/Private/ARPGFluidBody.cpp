@@ -52,6 +52,12 @@ AARPGFluidBody::AARPGFluidBody()
 	// turns this on for itself, which is the one case where the drawn surface and
 	// the walkable one have to be the same surface.
 	Surface->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+
+	// A PUDDLE IS NOT A LANDMARK. Frustum culling comes free from the component's
+	// own bounds, but nothing stops fifty of them being submitted from across a
+	// valley -- and at that range a body is a few pixels of tinted ground. The
+	// engine fades it out instead.
+	Surface->SetCullDistance(15000.f);
 }
 
 void AARPGFluidBody::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -430,6 +436,13 @@ void AARPGFluidSolid::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutL
 
 void AARPGFluidSolid::RebuildFromRing()
 {
+	// THE TOTALS ARE TRANSIENT, so a client that has just received the field has
+	// the cells and none of the sums. Rebuilding is a write-time cost and this is
+	// only ever reached on a write -- the per-frame tick reads the cache and never
+	// comes through here -- so paying for one sweep is what makes the cache safe
+	// to trust everywhere else.
+	Field.Refresh();
+
 	if (!Definition || !Field.IsValidField() || Field.IcedCellCount() == 0)
 	{
 		ARPGFluidGeometry::BuildFieldMesh(Surface, FARPGSolidField(), FVector2D::ZeroVector);
@@ -481,7 +494,19 @@ void AARPGFluidSolid::RebuildFromRing()
 	Surface->SetCollisionObjectType(ECC_WorldDynamic);
 	Surface->SetCollisionResponseToAllChannels(ECR_Block);
 	Surface->EnableComplexAsSimpleCollision();
-	Surface->UpdateCollision(/*bOnlyIfPending=*/false);
+
+	// COOKING IS THE EXPENSIVE PART, and it is worth exactly nothing for a slab
+	// nobody can reach. A melting floe rebuilds four times a second, and cooking a
+	// triangle mesh that often for every floe in the level is the one cost in this
+	// system that scales with things the player will never touch. Deferred rather
+	// than skipped: the flag stays set, so the first rebuild near a player cooks.
+	const UARPGFluidSurfaceSubsystem* Fluids =
+		GetWorld() ? GetWorld()->GetSubsystem<UARPGFluidSurfaceSubsystem>() : nullptr;
+
+	if (!Fluids || Fluids->IsSignificantAt(GetActorLocation()))
+	{
+		Surface->UpdateCollision(/*bOnlyIfPending=*/false);
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -638,6 +663,21 @@ void AARPGFluidSolid::Tick(float DeltaTime)
 	if (!HasAuthority() || !Definition || !FloatsOn || Field.IcedCellCount() == 0)
 	{
 		return;
+	}
+
+	// NOBODY NEAR IT, NOBODY PAYING FOR IT. Settling and drifting exist entirely
+	// for someone watching or standing on it: a floe two hundred metres away that
+	// bobs and slides is a physics query and a transform update per frame, per
+	// floe, for something nobody can perceive. It keeps MELTING, because that
+	// happens on the weather tick and is the state that has to stay honest.
+	if (const UARPGFluidSurfaceSubsystem* Fluids =
+			GetWorld() ? GetWorld()->GetSubsystem<UARPGFluidSurfaceSubsystem>() : nullptr)
+	{
+		if (!Fluids->IsSignificantAt(GetActorLocation()))
+		{
+			Surface->ComponentVelocity = FVector::ZeroVector;
+			return;
+		}
 	}
 
 	const FVector2D Centre = Field.IcedCentroid();
