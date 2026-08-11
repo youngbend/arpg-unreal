@@ -161,6 +161,18 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "ARPG|Fluid")
 	void RetireBody(AARPGFluidBody* Body);
 
+	/**
+	 * Tells whichever side is a slab WHERE a reaction touched it.
+	 *
+	 * The reaction hook reports how much energy was spent and nothing about where.
+	 * For a puddle that is complete -- a liquid loses ground uniformly. For ice it
+	 * is the whole behaviour, because melting at the point of impact is what makes
+	 * a fireball cut an angle out of one edge instead of thinning the whole floe.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "ARPG|Fluid")
+	void NoteReactionContact(UARPGElementalVolumeComponent* A, UARPGElementalVolumeComponent* B,
+		FVector Contact);
+
 private:
 	UARPGFluidDefinition* FindDefinition(FGameplayTag ElementTag) const;
 	UARPGSolidDefinition* FindSolidDefinition(FGameplayTag ElementTag) const;

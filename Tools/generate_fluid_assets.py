@@ -235,6 +235,13 @@ SOLIDS = [
         # meltable AT ALL -- a slab used to carry no energy, so the reaction
         # solver bailed at its zero-energy guard and fire did nothing to ice.
         "energy_per_area": 0.002,
+        # 20cm cells. The one resolution knob a floe has: triangles, collision
+        # cook and replication all scale with the cell count, and a hole cannot
+        # be finer than this. Fine enough that a bowl reads as a bowl.
+        "cell_size": 20.0,
+        # Narrow and deep enough that one fireball drills through a 30cm slab
+        # rather than dishing it.
+        "melt_radius": 90.0,
         # --- Floating ---
         #
         # Archimedes, with two knobs traded for feel. Real ice is 0.00092 and
@@ -286,6 +293,8 @@ def main():
         solid.set_editor_property("melt_rate", spec["melt_rate"])
         solid.set_editor_property("minimum_area", spec["minimum_area"])
         solid.set_editor_property("energy_per_area", spec["energy_per_area"])
+        solid.set_editor_property("cell_size", spec["cell_size"])
+        solid.set_editor_property("melt_radius", spec["melt_radius"])
         solid.set_editor_property("density", spec["density"])
         solid.set_editor_property("occupant_mass", spec["occupant_mass"])
         solid.set_editor_property("load_response", spec["load_response"])

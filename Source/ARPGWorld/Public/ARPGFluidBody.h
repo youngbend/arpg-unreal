@@ -6,6 +6,7 @@
 #include "GameFramework/Actor.h"
 #include "ARPGElementalReactive.h"
 #include "ARPGElementalSurface.h"
+#include "ARPGIceField.h"
 #include "ARPGFluidBody.generated.h"
 
 class UARPGElementalVolumeComponent;
@@ -88,7 +89,7 @@ public:
 	const TArray<FVector2D>& GetRing() const { return Ring; }
 
 	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
-	double GetArea() const;
+	virtual double GetArea() const;
 
 	/**
 	 * Is this world point genuinely inside?
@@ -288,9 +289,51 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "ARPG|Fluid")
 	void UpdateAnchoring();
 
-	/** Interior gaps, kept separate from the outline -- see the class comment. */
+	/**
+	 * WHAT THE SLAB ACTUALLY IS. See FARPGIceField.
+	 *
+	 * The outline it froze with was only the seed; from then on the ice is a
+	 * heightfield, because everything interesting that happens to a floe happens
+	 * in the third dimension -- a bowl melted at an angle into one edge, a step
+	 * where new ice formed at the waterline a load had pushed the surface down to,
+	 * a hole where the top met the bottom.
+	 */
 	UPROPERTY(ReplicatedUsing = OnRep_Body, BlueprintReadOnly, Category = "ARPG|Fluid")
-	TArray<FVector2D> HoleRing;
+	FARPGIceField Field;
+
+	/**
+	 * Melts a bowl into the slab at a world point, deepest at the centre.
+	 *
+	 * WHERE IT WAS HIT, which is the whole difference between ice and a puddle: a
+	 * liquid loses ground uniformly because it has no third dimension to lose it
+	 * in, and a slab does. At the edge the bowl runs off the side and leaves an
+	 * angled cut; in the middle, deep enough, it opens a hole.
+	 *
+	 * @return volume of ice removed, in cubic cm.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "ARPG|Fluid")
+	double MeltAt(const FVector2D& Where, float Radius, float Depth);
+
+	/** Thins the slab from both faces at once. Ambient warmth, and holes widen free. */
+	UFUNCTION(BlueprintCallable, Category = "ARPG|Fluid")
+	double MeltUniformly(float FromTop, float FromBottom);
+
+	/**
+	 * Where the last reaction touched this slab, in world XY.
+	 *
+	 * THE HOOK CANNOT CARRY A POSITION. OnElementalReaction reports how much
+	 * energy was spent and nothing about where, which is fine for a puddle -- a
+	 * liquid loses ground uniformly wherever it was hit -- and is the entire
+	 * difference for a slab, because melting WHERE the fireball landed is the
+	 * behaviour. The reaction solver knows the contact point and leaves it here on
+	 * its way past; the hook takes it and clears it.
+	 */
+	void NoteContactAt(const FVector2D& Where) { PendingContact = Where; bHasPendingContact = true; }
+
+	/** Thins the whole slab, and reports when there is too little left to be one. */
+	virtual bool ConsumeSurfaceArea(double Area) override;
+
+	virtual double GetArea() const override;
 
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
@@ -309,7 +352,7 @@ protected:
 	virtual double GetMinimumArea() const override;
 	virtual float GetVerticalOffset() const override { return -Draft; }
 	virtual UMaterialInterface* ResolveSurfaceMaterial() const override;
-	virtual const TArray<FVector2D>& GetMeshHole() const override { return HoleRing; }
+
 
 	/** The depth it WANTS to be riding at, from Archimedes and what is aboard. */
 	float ComputeTargetDraft() const;
@@ -321,4 +364,7 @@ protected:
 	bool HasRoomToward(const FVector2D& Direction) const;
 
 	int32 OccupantCount = 0;
+
+	FVector2D PendingContact = FVector2D::ZeroVector;
+	bool bHasPendingContact = false;
 };

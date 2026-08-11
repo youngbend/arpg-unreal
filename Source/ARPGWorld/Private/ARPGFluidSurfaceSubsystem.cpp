@@ -478,28 +478,6 @@ bool UARPGFluidSurfaceSubsystem::TrySolidify(UARPGElementalVolumeComponent* A,
 		return false;
 	}
 
-	// Only the largest hole is carried: a solid keeps its gaps, but tracking an
-	// arbitrary set of them buys nothing a single dominant gap does not, and
-	// each extra ring is another thing erosion has to keep clean.
-	//
-	// SET BEFORE Setup, which is what builds the slab's mesh and its collision.
-	// Assigning it afterwards -- which is what this did while a hole only affected
-	// IsStandableAt -- now leaves a floe drawn and walkable straight over its own
-	// gap until something else happens to rebuild it.
-	if (Holes.Num() > 0)
-	{
-		int32 Largest = 0;
-		for (int32 Index = 1; Index < Holes.Num(); ++Index)
-		{
-			if (ARPGFluidGeometry::PolygonArea(Holes[Index])
-				> ARPGFluidGeometry::PolygonArea(Holes[Largest]))
-			{
-				Largest = Index;
-			}
-		}
-		Solid->HoleRing = Holes[Largest];
-	}
-
 	// WHAT IT RIDES. A floe is not an independent object: it asks this for the
 	// waterline under it, for the current carrying it, and for where the water
 	// stops. Set before Setup, which is what first places it.
@@ -531,6 +509,20 @@ bool UARPGFluidSurfaceSubsystem::TrySolidify(UARPGElementalVolumeComponent* A,
 		*SolidDefinition->GetElementTag().ToString());
 
 	return true;
+}
+
+void UARPGFluidSurfaceSubsystem::NoteReactionContact(UARPGElementalVolumeComponent* A,
+	UARPGElementalVolumeComponent* B, FVector Contact)
+{
+	const FVector2D Where(Contact.X, Contact.Y);
+
+	for (UARPGElementalVolumeComponent* Side : { A, B })
+	{
+		if (AARPGFluidSolid* Slab = Side ? Cast<AARPGFluidSolid>(Side->GetOwner()) : nullptr)
+		{
+			Slab->NoteContactAt(Where);
+		}
+	}
 }
 
 void UARPGFluidSurfaceSubsystem::RetireBody(AARPGFluidBody* Body)
@@ -578,10 +570,9 @@ void UARPGFluidSurfaceSubsystem::RetireBody(AARPGFluidBody* Body)
 	// frozen lava.
 	if (Solid->Definition && Solid->Definition->MeltsInto)
 	{
-		const TArray<FVector2D>& Ring = Solid->GetRing();
-		const FVector2D Centre = ARPGFluidGeometry::PolygonCentroid(Ring);
+		const FVector2D Centre = Solid->Field.IcedCentroid();
 		const double Radius = FMath::Sqrt(
-			FMath::Max(1.0, ARPGFluidGeometry::PolygonArea(Ring)) / PI);
+			FMath::Max(1.0, Solid->Field.IcedArea()) / PI);
 
 		DepositRing(ARPGFluidGeometry::MakeCircle(Centre, Radius),
 			Solid->GroundHeight, Solid->Definition->MeltsInto);
@@ -701,33 +692,23 @@ void UARPGFluidSurfaceSubsystem::TickWeather(float DeltaTime)
 			continue; // permanent -- obsidian is rock, not frozen lava
 		}
 
-		const TArray<FVector2D> Next = ARPGFluidGeometry::OffsetRing(
-			Solid->GetRing(), -Solid->Definition->MeltRate * DeltaTime);
+		// AMBIENT MELT IS A THINNING, not an inward offset of an outline. Both
+		// faces at once, because a floe in water melts from underneath as much as
+		// from above -- and every hole in it widens for free, since a hole is just
+		// the cells where the two faces have already met. No ring to offset, no
+		// slit to round into arcs, nothing that can grow.
+		const float Thinning = Solid->Definition->MeltRate * DeltaTime;
+		Solid->MeltUniformly(Thinning * 0.5f, Thinning * 0.5f);
 
-		if (ARPGFluidGeometry::PolygonArea(Next) < Solid->Definition->MinimumArea)
+		if (Solid->GetArea() < Solid->Definition->MinimumArea)
 		{
 			RetireBody(Solid);
 			continue;
 		}
 
-		// The outer edge shrinks while the hole WIDENS -- both are erosion, and
-		// keeping the rings apart is what makes that fall out rather than
-		// needing a special case.
-		//
-		// Widened BEFORE the ring is set, because setting the ring is what rebuilds
-		// the mesh and the collision, and both read the hole. The other order draws
-		// this tick's outline around last tick's gap.
-		if (Solid->HoleRing.Num() >= 3)
-		{
-			Solid->HoleRing = ARPGFluidGeometry::OffsetRing(
-				Solid->HoleRing, Solid->Definition->MeltRate * DeltaTime);
-		}
-
-		Solid->SetRing(Next);
-
 		// A floe that has narrowed enough to come free of the banks COMES FREE.
-		// Here rather than per frame: this is the tick that changes its outline,
-		// and it costs a containment probe per direction.
+		// Here rather than per frame: this is the tick that changes its shape, and
+		// it costs a containment probe per direction.
 		Solid->UpdateAnchoring();
 	}
 }

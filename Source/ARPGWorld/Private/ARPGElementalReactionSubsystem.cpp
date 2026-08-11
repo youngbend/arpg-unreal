@@ -287,6 +287,16 @@ void UARPGElementalReactionSubsystem::Resolve(UARPGElementalVolumeComponent* A,
 	// destroy its owner from inside Consume.
 	AActor* SourceActor = A->SourceActor ? A->SourceActor.Get() : B->SourceActor.Get();
 
+	// WHERE, for anything that cares. A puddle does not -- a liquid loses ground
+	// uniformly -- but a slab of ice melts at the point the fireball struck it,
+	// and OnElementalReaction has no room to say so. Left here rather than
+	// threaded through the hook's signature, which every projectile would then
+	// carry for the sake of one case.
+	if (UARPGFluidSurfaceSubsystem* Fluids = GetWorld()->GetSubsystem<UARPGFluidSurfaceSubsystem>())
+	{
+		Fluids->NoteReactionContact(A, B, Contact);
+	}
+
 	A->Consume(Reacted * RateA, Product);
 	B->Consume(Reacted * RateB, Product);
 

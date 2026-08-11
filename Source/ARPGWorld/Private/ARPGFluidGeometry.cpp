@@ -592,4 +592,100 @@ void BuildSlabMesh(UDynamicMeshComponent* Component, const TArray<FVector2D>& Ri
 	Component->NotifyMeshUpdated();
 }
 
+void BuildFieldMesh(UDynamicMeshComponent* Component, const FARPGIceField& Field,
+	const FVector2D& Origin)
+{
+	using namespace UE::Geometry;
+
+	if (!Component)
+	{
+		return;
+	}
+
+	FDynamicMesh3 Mesh;
+	Mesh.EnableVertexNormals(FVector3f::UnitZ());
+	Mesh.EnableVertexUVs(FVector2f::Zero());
+
+	if (!Field.IsValidField())
+	{
+		Component->SetMesh(MoveTemp(Mesh));
+		Component->NotifyMeshUpdated();
+		return;
+	}
+
+	const float Half = Field.CellSize * 0.5f;
+
+	// A CELL AT A TIME, and that is the point. Nothing here triangulates an
+	// outline, so nothing here can grow: the worst case is a fixed handful of
+	// triangles per cell however many spells have landed on the floe. The Godot
+	// pathology this replaced was unbounded by construction.
+	for (int32 Y = 0; Y < Field.CountY; ++Y)
+	{
+		for (int32 X = 0; X < Field.CountX; ++X)
+		{
+			if (!Field.IsIced(X, Y))
+			{
+				continue;
+			}
+
+			const int32 At = Field.Index(X, Y);
+			const FVector2D Centre = Field.CentreOf(X, Y) - Origin;
+
+			const double TopZ = Field.Top[At] * 0.1;
+			const double BottomZ = Field.Bottom[At] * 0.1;
+
+			const FVector2D Corners[4] = {
+				Centre + FVector2D(-Half, -Half),
+				Centre + FVector2D(Half, -Half),
+				Centre + FVector2D(Half, Half),
+				Centre + FVector2D(-Half, Half)
+			};
+
+			int32 TopVerts[4];
+			int32 BottomVerts[4];
+
+			for (int32 Corner = 0; Corner < 4; ++Corner)
+			{
+				TopVerts[Corner] = AppendSurfaceVertex(Mesh, Origin,
+					Corners[Corner].X, Corners[Corner].Y, TopZ);
+				BottomVerts[Corner] = AppendSurfaceVertex(Mesh, Origin,
+					Corners[Corner].X, Corners[Corner].Y, BottomZ);
+			}
+
+			Mesh.AppendTriangle(TopVerts[0], TopVerts[1], TopVerts[2]);
+			Mesh.AppendTriangle(TopVerts[0], TopVerts[2], TopVerts[3]);
+
+			Mesh.AppendTriangle(BottomVerts[0], BottomVerts[2], BottomVerts[1]);
+			Mesh.AppendTriangle(BottomVerts[0], BottomVerts[3], BottomVerts[2]);
+
+			// A WALL ONLY WHERE THE ICE STOPS. Between two iced cells there is
+			// nothing to see and a face there would be interior geometry the
+			// collision cook has to chew through for no reason. The neighbours
+			// that are missing are the silhouette -- and the rim of a hole is the
+			// same test, which is how a hole gets its inside face without being a
+			// thing anyone tracked.
+			static const FIntPoint Steps[4] = { {0, -1}, {1, 0}, {0, 1}, {-1, 0} };
+
+			for (int32 Side = 0; Side < 4; ++Side)
+			{
+				if (Field.IsIced(X + Steps[Side].X, Y + Steps[Side].Y))
+				{
+					continue;
+				}
+
+				const int32 A = Side;
+				const int32 B = (Side + 1) % 4;
+
+				Mesh.AppendTriangle(TopVerts[A], BottomVerts[A], BottomVerts[B]);
+				Mesh.AppendTriangle(TopVerts[A], BottomVerts[B], TopVerts[B]);
+			}
+		}
+	}
+
+	FMeshNormals::QuickComputeVertexNormals(Mesh);
+
+	Component->SetMesh(MoveTemp(Mesh));
+	Component->NotifyMeshUpdated();
+}
+
 } // namespace ARPGFluidGeometry

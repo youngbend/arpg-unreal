@@ -4,6 +4,7 @@
 #include "ARPGElementalVolumeComponent.h"
 #include "ARPGFluidDefinition.h"
 #include "ARPGFluidGeometry.h"
+#include "ARPGIceField.h"
 #include "ARPGFluidSurfaceSubsystem.h"
 #include "ARPGMagicElement.h"
 #include "Components/BoxComponent.h"
@@ -371,7 +372,14 @@ void AARPGFluidSolid::Setup(UARPGSolidDefinition* InDefinition, const TArray<FVe
 		Volume->Element = Definition->Element;
 	}
 
-	SetRing(InRing);
+	// THE OUTLINE IS ONLY THE SEED. Where the two things overlapped is a genuinely
+	// two-dimensional question and stays a polygon clip; what the slab becomes
+	// afterwards -- melted at an angle, refrozen at a lower level, holed through --
+	// is not, and that is what the field is for.
+	Field.BuildFrom(InRing, Definition ? Definition->CellSize : 20.f,
+		Definition ? Definition->Thickness : 30.f);
+
+	RebuildFromRing();
 }
 
 float AARPGFluidSolid::GetSurfaceOffset() const
@@ -408,34 +416,51 @@ void AARPGFluidSolid::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutL
 	// The hole matters on the client as much as the outline does: it is a gap you
 	// can fall through, so a client that meshed and collided the slab without it
 	// would let a player stand on air over the melted-out middle.
-	DOREPLIFETIME(AARPGFluidSolid, HoleRing);
+	// THE FIELD, which is the slab. Millimetre integers rather than floats for
+	// exactly this reason -- see FARPGIceField -- and even so it is the heaviest
+	// thing this system puts on the wire, so a floe replicates at a modest rate
+	// and dirty-region updates are the obvious next economy.
+	DOREPLIFETIME(AARPGFluidSolid, Field);
 }
 
 void AARPGFluidSolid::RebuildFromRing()
 {
-	Super::RebuildFromRing();
-
-	if (!Definition)
+	if (!Definition || !Field.IsValidField() || Field.IcedCellCount() == 0)
 	{
+		ARPGFluidGeometry::BuildFieldMesh(Surface, FARPGIceField(), FVector2D::ZeroVector);
+		Surface->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 		return;
 	}
 
-	// A SLAB CAN BE MELTED, so it carries energy in proportion to its area exactly
-	// as a pool does. This used to be flatly zero -- "a thing you stand on, not a
-	// body you react with" -- and the consequence was that Resolve bailed at its
-	// own guard against zero-energy volumes, so a fireball thrown at an ice floe
-	// did nothing at all. Melting was purely a matter of waiting.
-	//
-	// Still not an ambient source: standing on ice does not wet you.
+	// FROM THE FIELD, not from an outline. Where the ice is, how thick it is and
+	// how high it stands are all one answer now, and the box, the mesh and the
+	// collision are three readings of it.
+	const FVector2D Centre = Field.IcedCentroid();
+	const FVector2D Reach(
+		Field.SupportDistance(Centre, FVector2D(1, 0)),
+		Field.SupportDistance(Centre, FVector2D(0, 1)));
+
+	SetActorLocation(FVector(Centre.X, Centre.Y, GroundHeight + GetVerticalOffset()));
+
+	Bounds->SetBoxExtent(FVector(
+		FMath::Max(1.f, static_cast<float>(Reach.X)),
+		FMath::Max(1.f, static_cast<float>(Reach.Y)),
+		FMath::Max(1.f, Definition->Thickness * 4.f + 100.f)));
+
+	Volume->SurfaceHeightOffset = Definition->Thickness;
+
+	ARPGFluidGeometry::BuildFieldMesh(Surface, Field, Centre);
+
+	if (UMaterialInterface* Material = ResolveSurfaceMaterial())
+	{
+		Surface->SetMaterial(0, Material);
+	}
+
+	// A slab is a thing you stand on and a body you can melt, but never an ambient
+	// source and never a conductor -- see the notes on each.
 	Volume->SetEnergy(GetArea() * GetSurfaceEnergyDensity());
 	Volume->bReservoir = false;
 	Volume->bAmbientSource = false;
-
-	// AND IT DOES NOT CARRY A CHARGE, stated rather than left to the volume's
-	// default, because the value matters and the reason is not obvious. A floe is
-	// how you cross an electrified river safely: NOT THROUGH THE ICE is a rule
-	// about the slab ROOFING the water, and a conductive slab would carry the bolt
-	// into the pool it is floating on and defeat its own point.
 	Volume->Conductivity = 0.f;
 
 	if (!Definition->bStandable)
@@ -444,22 +469,13 @@ void AARPGFluidSolid::RebuildFromRing()
 		return;
 	}
 
-	// THE DRAWN SURFACE IS THE WALKABLE ONE. This used to block pawns with the
-	// BOUNDS BOX, which is the polygon's rectangle -- so a player could stand off
-	// the floe and inside the box, in mid-air over open water. That was tolerable
-	// only while nothing was drawn; the moment the slab is visible, the gap
-	// between what you see and what holds you up is the bug you notice first.
-	//
-	// Complex-as-simple, because a slab with an eroded hole through it is not
-	// convex and there is nothing to approximate it with that keeps the hole.
+	// THE DRAWN SURFACE IS THE WALKABLE ONE, and now that the drawn surface has a
+	// bowl melted into it and a hole through it, so does the collision. Nothing
+	// approximates the other.
 	Surface->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 	Surface->SetCollisionObjectType(ECC_WorldDynamic);
 	Surface->SetCollisionResponseToAllChannels(ECR_Block);
 	Surface->EnableComplexAsSimpleCollision();
-
-	// Recooked on every melt tick, which is 4Hz per floe by default. Cheap for a
-	// slab of a few hundred triangles, and the alternative -- collision lagging
-	// the visible edge as it erodes -- is a player standing on water.
 	Surface->UpdateCollision(/*bOnlyIfPending=*/false);
 }
 
@@ -470,13 +486,15 @@ void AARPGFluidSolid::RebuildFromRing()
 int32 AARPGFluidSolid::CountOccupants() const
 {
 	const UWorld* World = GetWorld();
-	if (!World || Ring.Num() < 3)
+	if (!World || Field.IcedCellCount() == 0)
 	{
 		return 0;
 	}
 
-	const FBox2D Box = ARPGFluidGeometry::PolygonBounds(Ring);
-	const FVector2D Extent = Box.GetExtent();
+	const FVector2D Centre = Field.IcedCentroid();
+	const FVector2D Extent(
+		Field.SupportDistance(Centre, FVector2D(1, 0)),
+		Field.SupportDistance(Centre, FVector2D(0, 1)));
 	const float Top = GetSurfaceHeight();
 
 	// A shallow slice ABOVE the slab, because what is standing on it is not
@@ -494,7 +512,7 @@ int32 AARPGFluidSolid::CountOccupants() const
 	ObjectParams.AddObjectTypesToQuery(ECC_Pawn);
 
 	World->OverlapMultiByObjectType(Overlaps,
-		FVector(Box.GetCenter().X, Box.GetCenter().Y, Top + StandingSlice * 0.5f),
+		FVector(Centre.X, Centre.Y, Top + StandingSlice * 0.5f),
 		FQuat::Identity, ObjectParams,
 		FCollisionShape::MakeBox(FVector(Extent.X, Extent.Y, StandingSlice * 0.5f)), Params);
 
@@ -530,7 +548,7 @@ float AARPGFluidSolid::ComputeTargetDraft() const
 	// density in the system is relative to.
 	static constexpr float WaterDensity = 0.001f;
 
-	const double Area = GetArea();
+	const double Area = Field.IcedArea();
 	if (Area <= 0.0)
 	{
 		return 0.f;
@@ -546,7 +564,12 @@ float AARPGFluidSolid::ComputeTargetDraft() const
 	// thickness ride at the same depth, and correctly so. The load's term does NOT
 	// cancel, so a wider floe takes a person's weight better. Both fall out of the
 	// equation rather than being arranged.
-	const float SlabDraft = Definition->Thickness * (Definition->Density / WaterDensity);
+	// FROM THE FIELD'S REAL VOLUME, so a floe a fireball has thinned rides higher
+	// than one it has not -- which the old uniform Thickness could not express.
+	// Volume over area is the average thickness, so this is still the same
+	// equation, now told the truth about the slab.
+	const float SlabDraft = static_cast<float>(Field.IceVolume() / Area)
+		* (Definition->Density / WaterDensity);
 
 	const float LoadMass = OccupantCount * Definition->OccupantMass * Definition->LoadResponse;
 	const float LoadDraft = LoadMass / (WaterDensity * static_cast<float>(Area));
@@ -558,23 +581,17 @@ float AARPGFluidSolid::ComputeTargetDraft() const
 
 bool AARPGFluidSolid::HasRoomToward(const FVector2D& Direction) const
 {
-	if (!FloatsOn || Ring.Num() < 3)
+	if (!FloatsOn || Field.IcedCellCount() == 0)
 	{
 		return false;
 	}
 
 	// Clear water this far past the edge counts as room. Smaller than a floe and
-	// larger than the wobble in a polygon's outline.
+	// larger than one cell of the grid it is measured on.
 	static constexpr double Clearance = 50.0;
 
-	const FVector2D Centre = ARPGFluidGeometry::PolygonCentroid(Ring);
-
-	// The support function: how far the outline reaches along this direction.
-	double Reach = 0.0;
-	for (const FVector2D& Point : Ring)
-	{
-		Reach = FMath::Max(Reach, FVector2D::DotProduct(Point - Centre, Direction));
-	}
+	const FVector2D Centre = Field.IcedCentroid();
+	const double Reach = Field.SupportDistance(Centre, Direction);
 
 	return FloatsOn->IsSurfaceAt(Centre + Direction * (Reach + Clearance));
 }
@@ -583,7 +600,7 @@ void AARPGFluidSolid::UpdateAnchoring()
 {
 	bAnchored = false;
 
-	if (!FloatsOn || Ring.Num() < 3)
+	if (!FloatsOn || Field.IcedCellCount() == 0)
 	{
 		return;
 	}
@@ -616,12 +633,12 @@ void AARPGFluidSolid::Tick(float DeltaTime)
 
 	// Server only. The draft replicates as a result and the outline carries the
 	// drift, so a client that simulated its own would be fighting both.
-	if (!HasAuthority() || !Definition || !FloatsOn || Ring.Num() < 3)
+	if (!HasAuthority() || !Definition || !FloatsOn || Field.IcedCellCount() == 0)
 	{
 		return;
 	}
 
-	const FVector2D Centre = ARPGFluidGeometry::PolygonCentroid(Ring);
+	const FVector2D Centre = Field.IcedCentroid();
 
 	// The waterline it should be riding, asked of the body it froze out of -- so a
 	// floe on a Water plugin river follows the waves and one on a puddle sits on a
@@ -653,7 +670,11 @@ void AARPGFluidSolid::Tick(float DeltaTime)
 	// test did not catch because it only reaches the shore on one side.
 	if (!Step.IsNearlyZero() && HasRoomToward(Step.GetSafeNormal()))
 	{
-		TranslateRing(Step);
+		// THE FIELD SLIDES, not its cells. Drifting is one vector add, which is
+		// the cheapest operation in the whole system and the reason a floe can be
+		// carried every frame rather than four times a second.
+		Field.Translate(Step);
+		SetActorLocation(GetActorLocation() + FVector(Step.X, Step.Y, 0.f));
 
 		// SO IT CARRIES THE PLAYER. A character standing on a kinematic base is
 		// moved by UCharacterMovementComponent's based movement, and the base's
@@ -667,15 +688,88 @@ void AARPGFluidSolid::Tick(float DeltaTime)
 	}
 }
 
+double AARPGFluidSolid::GetArea() const
+{
+	// The ice that is actually LEFT, which after a fireball is not the outline it
+	// froze with. Energy, buoyancy and retirement all read this.
+	return Field.IcedArea();
+}
+
+double AARPGFluidSolid::MeltAt(const FVector2D& Where, float Radius, float Depth)
+{
+	const double Removed = Field.MeltBowl(Where, Radius, Depth);
+
+	if (Removed > 0.0)
+	{
+		RebuildFromRing();
+		UpdateAnchoring();
+	}
+
+	return Removed;
+}
+
+double AARPGFluidSolid::MeltUniformly(float FromTop, float FromBottom)
+{
+	const double Removed = Field.MeltUniform(FromTop, FromBottom);
+
+	if (Removed > 0.0)
+	{
+		RebuildFromRing();
+	}
+
+	return Removed;
+}
+
+bool AARPGFluidSolid::ConsumeSurfaceArea(double Area)
+{
+	// AN AREA IS NOT WHAT HAPPENS TO A SLAB. A pool loses ground uniformly because
+	// a liquid has no third dimension to lose it in; ice melts WHERE it was hit.
+	// The reaction path calls MeltAt with the contact instead, and this remains
+	// only for anything that still asks in area -- thinning the whole slab by the
+	// depth that much ice would have been.
+	const double Plan = Field.IcedArea();
+	if (Plan <= 0.0 || !Definition)
+	{
+		return true;
+	}
+
+	// WHERE IT WAS HIT, when the solver told us. The volume of ice a reaction is
+	// worth becomes a bowl at the contact: deep in the middle, tapering out, so a
+	// hit at the edge cuts the slab away at an angle and one in the middle opens a
+	// hole through it. Without a contact -- anything that spent this slab without
+	// touching a point on it -- fall back to thinning the whole thing.
+	if (bHasPendingContact)
+	{
+		bHasPendingContact = false;
+
+		// A bowl of this radius and depth removes about half a cylinder's volume,
+		// so the depth that spends the given plan-area of ice is twice as deep as
+		// a flat cut would be.
+		const float Radius = FMath::Max(Definition->CellSize, Definition->MeltRadius);
+		const float Depth = static_cast<float>(2.0 * Area / (PI * Radius * Radius))
+			* Definition->Thickness;
+
+		MeltAt(PendingContact, Radius, Depth);
+	}
+	else
+	{
+		MeltUniformly(static_cast<float>(Area / Plan), 0.f);
+	}
+
+	return Field.IcedCellCount() == 0 || Field.IcedArea() < GetMinimumArea();
+}
+
 bool AARPGFluidSolid::IsStandableAt(FVector WorldPoint) const
 {
-	if (!Definition || !Definition->bStandable || !ContainsPoint(WorldPoint))
+	if (!Definition || !Definition->bStandable)
 	{
 		return false;
 	}
 
-	// Inside the outline AND not down a hole. A floe with a melted-through gap
-	// is a floe with a gap you can fall into -- which is the whole reason a
-	// solid keeps its holes where a pool discards them.
-	return !ARPGFluidGeometry::PolygonContains(HoleRing, FVector2D(WorldPoint.X, WorldPoint.Y));
+	// ONE QUESTION NOW. A hole used to be a second ring the outline had to be
+	// checked against separately, and keeping the two in step was most of the
+	// complexity; here it is simply a cell whose top has met its bottom, so "is
+	// there ice here" is the entire test and a gap you can fall through needs no
+	// special knowledge at all.
+	return Field.IsIcedAt(FVector2D(WorldPoint.X, WorldPoint.Y));
 }

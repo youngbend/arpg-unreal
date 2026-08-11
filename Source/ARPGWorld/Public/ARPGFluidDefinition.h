@@ -176,6 +176,33 @@ public:
 		meta = (ClampMin = "0.0"))
 	float EnergyPerArea = 0.002f;
 
+	/**
+	 * How coarse the slab's heightfield is, in cm.
+	 *
+	 * THE ONLY RESOLUTION KNOB a floe has, and the one that decides what it costs:
+	 * triangles, collision cook and replication all scale with the cell count, and
+	 * the cell count is the slab's area over the square of this. Smaller reads
+	 * smoother and costs quadratically more.
+	 *
+	 * Also the floor on detail: a bowl melted narrower than a cell shows up as one
+	 * cell going down, and a hole cannot be finer than this.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Body",
+		meta = (ClampMin = "5.0"))
+	float CellSize = 20.f;
+
+	/**
+	 * How wide a bowl one fire impact melts, in cm.
+	 *
+	 * The energy decides how DEEP; this decides how broad, and the two together
+	 * are what make a fireball at the edge take an angled bite while the same one
+	 * in the middle drills through. Narrow and deep punches holes; wide and
+	 * shallow dishes the surface.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Melting",
+		meta = (ClampMin = "1.0"))
+	float MeltRadius = 90.f;
+
 	// --- Floating ---------------------------------------------------------------
 	//
 	// A slab frozen on water RIDES it, and how it rides is Archimedes with two

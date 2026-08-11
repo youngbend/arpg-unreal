@@ -1147,6 +1147,42 @@ character on.
 
 4 new cases under `ARPG.World.Fluid.Floating`.
 
+**A SLAB BECAME A SOLID.** A floe was an outline with a thickness, and that is a
+fluid's model wearing a hat: a puddle genuinely is two-dimensional -- pour more in
+and it gets wider, not deeper -- so a polygon is honest for water and a lie for
+ice. Everything interesting that happens to a floe happens in the third
+dimension. `FARPGIceField` replaces the outline with a heightfield: a top and a
+bottom per cell, in slab-local millimetres.
+
+- **A fireball melts a BOWL where it hit**, deepest at the centre and tapering to
+  the rim. At the edge the bowl runs off the side and leaves an angled cut; in
+  the middle, deep enough, it opens a hole. One expression, no case for either.
+- **Refreezing records a STEP.** New ice forms at the surface of the water, so a
+  floe pushed down by a load gains ice BELOW the ice that froze when it was
+  riding light -- and the difference stays in the slab when the load comes off.
+  Cells already proud of the waterline gain nothing, which is what makes that
+  fall out rather than being written.
+- **THREE PROBLEMS DISAPPEARED RATHER THAN BEING SOLVED.** A hole is a cell whose
+  top has met its bottom. It is not a ring, so it cannot be bridged into an
+  outline, cannot leave a zero-width slit for the offsetter to round into arcs,
+  and cannot be culled for not being the largest. The Godot version's fifty
+  vertices becoming 7193 over eighteen melt ticks was that bridging; the holes
+  that vanished mid-melt were that culling. Neither has anywhere to happen.
+- **Cost became a constant.** Melting is a write to the cells under the impact --
+  no boolean, no offsetter, no outline to retriangulate -- and triangle count is
+  bounded by the grid forever. `CellSize` is the one knob, and it is the only
+  thing that decides what a floe costs.
+- **Buoyancy reads the field's real volume**, so a floe a fireball has thinned
+  rides higher than one it has not. Same equation, now told the truth.
+
+The honest cost is the wire: a ten-metre floe at 20cm cells is 2500 cells, and
+even at two int16s each that is the heaviest thing this system replicates.
+Dirty-region updates are the obvious next economy.
+
+3 new cases under `ARPG.World.Fluid.Ice`, one of which reproduces the Godot
+pathology -- forty melt ticks with holes opening -- and asserts the mesh never
+grows.
+
 **Phase 11 -- code complete. Not in the original ten: this is the layer that
 makes the other ten reachable from a controller.** The modal control scheme, the
 speed tiers, the buffering, and auto-sheathe. 13 new cases; 99 pass in total.

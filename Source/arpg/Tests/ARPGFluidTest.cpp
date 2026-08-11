@@ -13,6 +13,7 @@
 #include "ARPGFluidBody.h"
 #include "ARPGFluidDefinition.h"
 #include "ARPGFluidGeometry.h"
+#include "ARPGIceField.h"
 #include "ARPGFluidSurfaceSubsystem.h"
 #include "ARPGGameplayTags.h"
 #include "ARPGMagicCombinationTable.h"
@@ -643,6 +644,153 @@ bool FARPGFluidMeltTest::RunTest(const FString& Parameters)
 
 	TestEqual(TEXT("Melted through, the floe is gone"), Fluids->GetSolids().Num(), 0);
 	TestEqual(TEXT("And left water behind it"), Fluids->GetPools().Num(), 1);
+
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// The slab as a solid
+//
+// A floe is a HEIGHTFIELD, not an outline with a thickness -- see FARPGIceField.
+// Everything interesting that happens to ice happens in the third dimension: a
+// bowl melted at an angle into one edge, a step where new ice formed at the
+// waterline a load had pushed the surface down to, a hole where the two faces
+// met. None of it can be said with a polygon.
+// ---------------------------------------------------------------------------
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGIceFieldMeltTest,
+	"ARPG.World.Fluid.Ice.FireMeltsABowlAndBreaksThrough",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGIceFieldMeltTest::RunTest(const FString& Parameters)
+{
+	FARPGIceField Field;
+	Field.BuildFrom(ARPGFluidGeometry::MakeCircle(FVector2D::ZeroVector, 300.0),
+		/*CellSize=*/20.f, /*Thickness=*/30.f);
+
+	if (!Field.IsValidField() || Field.IcedCellCount() == 0)
+	{
+		AddError(TEXT("Setup: the field did not build."));
+		return false;
+	}
+
+	TestEqual(TEXT("Fresh ice is its full thickness throughout"),
+		Field.ThicknessAt(Field.CellAt(FVector2D::ZeroVector).X,
+			Field.CellAt(FVector2D::ZeroVector).Y), 30.f, 0.2f);
+
+	// A shallow bowl in the middle. Not deep enough to break through.
+	const double Removed = Field.MeltBowl(FVector2D::ZeroVector, 100.f, 10.f);
+
+	TestTrue(TEXT("Melting takes ice away"), Removed > 0.0);
+	TestTrue(TEXT("But a shallow bowl does not break through"),
+		Field.IsIcedAt(FVector2D::ZeroVector));
+
+	// A BOWL, NOT A CYLINDER, which is the whole reason an impact at the edge cuts
+	// at an angle: the centre goes deepest and it tapers to nothing at the rim.
+	const float AtCentre = Field.TopAt(FVector2D::ZeroVector);
+	const float Midway = Field.TopAt(FVector2D(70, 0));
+	const float Outside = Field.TopAt(FVector2D(200, 0));
+
+	TestTrue(TEXT("The centre of the bowl is lowest"), AtCentre < Midway);
+	TestTrue(TEXT("And it slopes up to the untouched ice"), Midway < Outside);
+	TestEqual(TEXT("Which is still at full height"), Outside, 30.f, 0.2f);
+
+	// Deep enough and the top meets the bottom. A HOLE IS NOT A THING ANYONE
+	// TRACKS -- it is a cell with no ice left, which is why it cannot be bridged
+	// into an outline, cannot leave a slit for an offsetter to round into arcs,
+	// and cannot be dropped for not being the largest.
+	Field.MeltBowl(FVector2D::ZeroVector, 100.f, 60.f);
+
+	TestFalse(TEXT("A deep bowl melts clean through"), Field.IsIcedAt(FVector2D::ZeroVector));
+	TestTrue(TEXT("And the ice around it is untouched"), Field.IsIcedAt(FVector2D(200, 0)));
+
+	// TWO HOLES BOTH SURVIVE. Only the largest used to be kept, so a second
+	// fireball made the first hole vanish.
+	Field.MeltBowl(FVector2D(200, 0), 60.f, 60.f);
+
+	TestFalse(TEXT("A second hole opens"), Field.IsIcedAt(FVector2D(200, 0)));
+	TestFalse(TEXT("And the first is still there"), Field.IsIcedAt(FVector2D::ZeroVector));
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGIceFieldRefreezeTest,
+	"ARPG.World.Fluid.Ice.RefreezingLeavesAStepWhereTheIceWasLow",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGIceFieldRefreezeTest::RunTest(const FString& Parameters)
+{
+	const TArray<FVector2D> Whole = ARPGFluidGeometry::MakeCircle(FVector2D::ZeroVector, 300.0);
+
+	FARPGIceField Field;
+	Field.BuildFrom(Whole, /*CellSize=*/20.f, /*Thickness=*/30.f);
+
+	// Zero is the underside the slab started at, so fresh ice tops out at its
+	// thickness and the waterline sits at whatever the draft is.
+	TestEqual(TEXT("Fresh ice tops out at its thickness"),
+		Field.TopAt(FVector2D::ZeroVector), 30.f, 0.2f);
+
+	// Melt a dish, then let it refreeze at a waterline BELOW the original surface
+	// -- which is what a floe carrying a load presents to the water.
+	Field.MeltBowl(FVector2D(150, 0), 120.f, 20.f);
+
+	const float Dished = Field.TopAt(FVector2D(150, 0));
+	TestTrue(TEXT("Setup: the dish is below the surface"), Dished < 25.f);
+
+	Field.Refreeze(Whole, /*WaterlineZ=*/22.f, /*MinimumGain=*/0.5f);
+
+	// THE STEP. New ice forms at the surface of the water, so a floe riding low
+	// gains ice BELOW the ice that froze when it was riding high -- and the
+	// difference stays in the slab when the load comes off and it rises again.
+	TestEqual(TEXT("The dish refroze up to the waterline"),
+		Field.TopAt(FVector2D(150, 0)), 22.f, 0.2f);
+	TestEqual(TEXT("And the ice already proud of it is untouched"),
+		Field.TopAt(FVector2D(-200, 0)), 30.f, 0.2f);
+
+	TestTrue(TEXT("So the surface has a step in it"),
+		Field.TopAt(FVector2D(-200, 0)) > Field.TopAt(FVector2D(150, 0)));
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGIceFieldBoundedTest,
+	"ARPG.World.Fluid.Ice.DetailIsBoundedNoMatterHowMuchHappens",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGIceFieldBoundedTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGMagicElement* Ice = MakeElement(GetTransientPackage(), TAG_Element_Ice);
+	UARPGSolidDefinition* IceDefinition = MakeIce(Ice);
+	IceDefinition->CellSize = 25.f;
+
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	AARPGFluidSolid* Floe = Scope.World->SpawnActor<AARPGFluidSolid>(
+		AARPGFluidSolid::StaticClass(), FTransform::Identity, Params);
+
+	Floe->Setup(IceDefinition, ARPGFluidGeometry::MakeCircle(FVector2D::ZeroVector, 300.0), 0.f);
+
+	const int32 Fresh = Floe->GetSurfaceTriangleCount();
+	TestTrue(TEXT("A fresh floe has a surface"), Fresh > 0);
+
+	// THE GODOT PATHOLOGY, REPRODUCED AND REFUSED. Eighteen melt ticks with holes
+	// in the slab took fifty vertices to seven thousand there, because every
+	// erosion offset a ring that had a bridged hole in it and the offsetter
+	// rounded the slit's ends into new arcs each time. Nothing here can grow: the
+	// mesh is a fixed few triangles per cell, and the cell count never changes.
+	for (int32 Tick = 0; Tick < 40; ++Tick)
+	{
+		Floe->MeltAt(FVector2D(Tick * 7 - 140, (Tick % 5) * 40 - 80), 50.f, 4.f);
+		Floe->MeltUniformly(0.2f, 0.2f);
+	}
+
+	const int32 After = Floe->GetSurfaceTriangleCount();
+
+	TestTrue(TEXT("Forty melt ticks later there is still ice"), After > 0);
+	TestTrue(TEXT("And the mesh never grew past what the grid allows"), After <= Fresh);
 
 	return true;
 }
@@ -1317,8 +1465,8 @@ bool FARPGFluidSurfaceTest::RunTest(const FString& Parameters)
 
 	// A SLAB, not a flat cap: the depth is what gives the water an edge. Two caps
 	// plus a wall quad per ring segment is strictly more than the cap alone.
-	const int32 Triangles = Pool->GetSurfaceTriangleCount();
-	TestTrue(TEXT("And is a slab rather than a flat sheet"), Triangles > 2 * Pool->GetRing().Num());
+	TestTrue(TEXT("And is a slab rather than a flat sheet"),
+		Pool->GetSurfaceTriangleCount() > 2 * Pool->GetRing().Num());
 
 	TestEqual(TEXT("Drawn with the material its definition names"),
 		Pool->GetSurfaceMaterial(), static_cast<UMaterialInterface*>(UMaterial::GetDefaultMaterial(MD_Surface)));
@@ -1365,9 +1513,9 @@ bool FARPGFluidReplicationTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("A pool replicates its definition"),
 		PoolDefinition && PoolDefinition->HasAnyPropertyFlags(CPF_Net));
 
-	const FProperty* Hole = AARPGFluidSolid::StaticClass()->FindPropertyByName(TEXT("HoleRing"));
-	TestTrue(TEXT("A solid replicates its hole, which is a gap you can fall through"),
-		Hole && Hole->HasAnyPropertyFlags(CPF_Net));
+	const FProperty* Ice = AARPGFluidSolid::StaticClass()->FindPropertyByName(TEXT("Field"));
+	TestTrue(TEXT("A solid replicates its heightfield, holes and all"),
+		Ice && Ice->HasAnyPropertyFlags(CPF_Net));
 
 	// And the rebuild genuinely needs nothing else. Setup is server-only, so this
 	// assigns exactly what replication would and asks the body to build itself.
@@ -1411,10 +1559,11 @@ bool FARPGFluidSolidSurfaceTest::RunTest(const FString& Parameters)
 	AARPGFluidSolid* Floe = Scope.World->SpawnActor<AARPGFluidSolid>(
 		AARPGFluidSolid::StaticClass(), FTransform::Identity, Params);
 
-	// A slab with a melted-through gap in the middle, which is the case a solid
-	// keeps holes for at all.
-	Floe->HoleRing = ARPGFluidGeometry::MakeCircle(FVector2D::ZeroVector, 60.0);
 	Floe->Setup(IceDefinition, ARPGFluidGeometry::MakeCircle(FVector2D::ZeroVector, 300.0), 0.f);
+
+	// A gap melted clean through the middle. Not a ring anyone tracks -- just the
+	// cells whose top has met their bottom.
+	Floe->MeltAt(FVector2D::ZeroVector, 60.f, IceDefinition->Thickness * 4.f);
 
 	TestTrue(TEXT("A floe has a surface"), Floe->GetSurfaceTriangleCount() > 0);
 
@@ -1430,7 +1579,7 @@ bool FARPGFluidSolidSurfaceTest::RunTest(const FString& Parameters)
 	// Which agrees with the gameplay answer, and both know about the hole.
 	TestTrue(TEXT("You can stand on the slab"),
 		Floe->IsStandableAt(FVector(200, 0, Floe->GetSurfaceHeight())));
-	TestFalse(TEXT("But not down the hole through it"),
+	TestFalse(TEXT("But not down the hole melted through it"),
 		Floe->IsStandableAt(FVector(0, 0, Floe->GetSurfaceHeight())));
 
 	// A sheet of frost is not something you stand on, and says so the same way.

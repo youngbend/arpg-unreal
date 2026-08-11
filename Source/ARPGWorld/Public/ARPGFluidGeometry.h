@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "ARPGIceField.h"
 
 class UDynamicMeshComponent;
 
@@ -139,4 +140,24 @@ namespace ARPGFluidGeometry
 	ARPGWORLD_API void BuildSlabMesh(UDynamicMeshComponent* Component,
 		const TArray<FVector2D>& Ring, const TArray<FVector2D>& Hole,
 		const FVector2D& Origin, double BottomZ, double TopZ);
+
+	/**
+	 * The sixth call, and the one with a CEILING: a heightfield as a mesh.
+	 *
+	 * Where BuildSlabMesh draws a polygon extruded to a flat thickness, this draws
+	 * a field whose top and bottom vary per cell -- a floe with a bowl melted into
+	 * it, a step where new ice froze at a lower waterline, a hole where the two
+	 * surfaces met.
+	 *
+	 * WHY IT MATTERS FOR COST, and this is the whole reason a floe stopped being a
+	 * polygon. A slab mesh is retriangulated from an outline that gains vertices
+	 * every time it is clipped or offset, so a long-lived floe grows without
+	 * bound -- the Godot version measured fifty vertices becoming seven thousand
+	 * over eighteen melt ticks. A field cannot: its triangle count is at most a
+	 * fixed few per cell, forever, no matter how many fireballs land on it.
+	 *
+	 * Emitted in the component's LOCAL space; the field's own heights already are.
+	 */
+	ARPGWORLD_API void BuildFieldMesh(UDynamicMeshComponent* Component,
+		const FARPGIceField& Field, const FVector2D& Origin);
 }
