@@ -45,6 +45,16 @@ struct FARPGPlaceholderShape
 	float Hold = 0.25f;
 
 	/**
+	 * Whether this stand-in is MADE OF its element, and so meets other spells.
+	 *
+	 * False only for a collision product -- see GetShapeFor. Everything a caster
+	 * throws should react; the thing a reaction produced should not, because it
+	 * spawns inside whatever survived making it.
+	 */
+	UPROPERTY()
+	bool bReacts = true;
+
+	/**
 	 * Someone else owns how long this lasts.
 	 *
 	 * True for a cloak, whose duration comes from the element and whose end is

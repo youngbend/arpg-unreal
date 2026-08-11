@@ -5,6 +5,8 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "ARPGConductionSubsystem.h"
+#include "ARPGDischargeContext.h"
+#include "ARPGDischargeEffect.h"
 #include "ARPGElementalReactionSubsystem.h"
 #include "ARPGElementPalette.h"
 #include "ARPGElementalVolumeComponent.h"
@@ -164,6 +166,121 @@ namespace ARPGReactionTestUtils
 		}
 		return Rig;
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Reaching the solver at all
+//
+// Everything below this asserts the energy model, and all of it was true and
+// unreachable: a spawned spell carried no elemental volume and, worse, no
+// primitive collider of any kind -- the hitbox is a scene component that sweeps
+// by hand. Nothing could ever meet anything, so no cast spell ever reacted.
+// ---------------------------------------------------------------------------
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGReactionCastSpellTest,
+	"ARPG.World.Reaction.ACastSpellIsMadeOfItsElement",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGReactionCastSpellTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGReactionTestUtils;
+	FTestWorld Scope;
+	FRig Rig = BuildRig(Scope.World);
+
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+	AActor* Caster = Scope.World->SpawnActor<AActor>(AActor::StaticClass(),
+		FTransform::Identity, Params);
+
+	// A spell as the discharge ability actually spawns one: deferred, context
+	// stamped, then finished. The context is the ONLY thing that energises it.
+	auto CastSpell = [&](UARPGMagicElement* Element, float Damage, float Radius, FVector At)
+	{
+		AARPGDischargeEffect* Effect = Scope.World->SpawnActorDeferred<AARPGDischargeEffect>(
+			AARPGDischargeEffect::StaticClass(), FTransform(At), Caster);
+
+		FARPGDischargeContext Context;
+		Context.PrimaryElement = Element;
+		Context.Caster = Caster;
+		Context.ComputedDamage = Damage;
+
+		Effect->ReactionRadius = Radius;
+		Effect->InitializeFromContext(Context);
+		Effect->FinishSpawning(FTransform(At));
+
+		return Effect;
+	};
+
+	AARPGDischargeEffect* Fireball = CastSpell(Rig.Fire, 40.f, 100.f, FVector(0, 0, 0));
+
+	TestNotNull(TEXT("A cast spell has a collider to meet things with"), Fireball->Collider);
+	TestNotNull(TEXT("And a volume saying what it is made of"), Fireball->Volume);
+	TestSamePtr(TEXT("Made of the element that was cast"),
+		Fireball->Volume->Element.Get(), Rig.Fire);
+
+	// THE SAME NUMBER AS THE DAMAGE. ComputedDamage is precomputed on the context
+	// precisely so a reaction accounts for charge, mastery and buffs without
+	// re-deriving any of them -- a charged fireball out-trades a tapped one.
+	TestEqual(TEXT("Energised from its own computed damage"),
+		Fireball->Volume->GetEnergy(), 40.f);
+	TestSamePtr(TEXT("And attributes to the caster, not to itself"),
+		Fireball->Volume->SourceActor.Get(), Caster);
+
+	TestNotEqual(TEXT("Its collider is live"),
+		Fireball->Collider->GetCollisionEnabled(), ECollisionEnabled::NoCollision);
+	TestEqual(TEXT("At the radius the spell asked for"),
+		Fireball->Collider->GetUnscaledSphereRadius(), 100.f);
+
+	// OVERLAP, NEVER BLOCK. A collider that blocked would have the fireball
+	// bouncing off the water it is supposed to react with.
+	TestEqual(TEXT("And overlaps rather than blocking"),
+		Fireball->Collider->GetCollisionResponseToChannel(ECC_WorldDynamic), ECR_Overlap);
+
+	// End to end, minus the broadphase: two spawned spells, resolved the same way
+	// an overlap would resolve them.
+	AARPGDischargeEffect* Jet = CastSpell(Rig.Water, 40.f, 100.f, FVector(50, 0, 0));
+
+	Rig.Reactions->Resolve(Fireball->Volume, Jet->Volume);
+
+	TestSamePtr(TEXT("Fire meeting water makes steam"),
+		Rig.Reactions->GetLastProduct(), Rig.Steam);
+	TestEqual(TEXT("And both spells are spent"), Fireball->Volume->GetEnergy(), 0.f);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGReactionInertSpellTest,
+	"ARPG.World.Reaction.ASpellWithNoReactionRadiusStaysInert",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGReactionInertSpellTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGReactionTestUtils;
+	FTestWorld Scope;
+	FRig Rig = BuildRig(Scope.World);
+
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+	AARPGDischargeEffect* Effect = Scope.World->SpawnActorDeferred<AARPGDischargeEffect>(
+		AARPGDischargeEffect::StaticClass(), FTransform::Identity, nullptr);
+
+	FARPGDischargeContext Context;
+	Context.PrimaryElement = Rig.Fire;
+	Context.ComputedDamage = 40.f;
+
+	// ReactionRadius left at its default of 0.
+	Effect->InitializeFromContext(Context);
+	Effect->FinishSpawning(FTransform::Identity);
+
+	// Most spells never react, and paying overlap traffic on every one of them to
+	// discover that is the cost this default avoids.
+	TestEqual(TEXT("A spell with no reaction radius keeps its collider off"),
+		Effect->Collider->GetCollisionEnabled(), ECollisionEnabled::NoCollision);
+	TestNull(TEXT("And is made of nothing"), Effect->Volume->Element.Get());
+
+	return true;
 }
 
 // ---------------------------------------------------------------------------

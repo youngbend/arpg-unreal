@@ -8,7 +8,9 @@
 #include "ARPGDischargeEffect.generated.h"
 
 class AARPGDischargeEffect;
+class UARPGElementalVolumeComponent;
 class UARPGHitboxComponent;
+class USphereComponent;
 
 DECLARE_MULTICAST_DELEGATE_OneParam(FARPGOnDischargeLanded,
 	AARPGDischargeEffect* /*Effect*/);
@@ -91,8 +93,40 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ARPG|Magic|Deposit")
 	bool bDepositSwept = false;
 
+	// --- What it meets ----------------------------------------------------------
+
+	/**
+	 * Radius within which this spell is MADE OF its element, and so reacts with
+	 * any other element it meets. 0 -- the default -- never reacts.
+	 *
+	 * Distinct from the hitbox, which is what it does to a PERSON. This is what it
+	 * does to another spell: a fireball meeting a water jet trades energy and
+	 * makes steam, and neither of them hit anybody to do it. Placeholders drive
+	 * both from the same number, so what you see is what reacts.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ARPG|Magic|Reaction",
+		meta = (ClampMin = "0.0"))
+	float ReactionRadius = 0.f;
+
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<UARPGHitboxComponent> Hitbox;
+
+	/**
+	 * The only PRIMITIVE on a discharge effect, and the reason one is needed.
+	 *
+	 * The hitbox is a scene component that sweeps by hand, deliberately -- an
+	 * overlap volume moving fast enough passes through a target between frames.
+	 * But reactions are detected by physics overlap, so without a real collider
+	 * here a spell could never meet another spell at all, which is exactly the
+	 * state this was in: every solver built and tested, and nothing to trigger
+	 * one.
+	 */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<USphereComponent> Collider;
+
+	/** What this spell is MADE OF, energised from its own discharge context. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UARPGElementalVolumeComponent> Volume;
 
 	/**
 	 * Raised when a spell with a deposit radius finishes, so a body of its element
@@ -113,6 +147,15 @@ public:
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+
+	/**
+	 * Sizes and arms the reaction volume from the context and ReactionRadius.
+	 *
+	 * Called from BeginPlay and BEFORE Super's, because the volume binds its own
+	 * overlap handler in its BeginPlay -- which the actor's Super dispatches. Arm
+	 * it after and the collider it binds to is still switched off.
+	 */
+	void ConfigureReactionVolume();
 
 	UPROPERTY(BlueprintReadOnly, Category = "ARPG|Magic")
 	FARPGDischargeContext Context;
