@@ -160,6 +160,75 @@ bool FARPGWeaponEquipTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGUnarmedMovesetTest,
+	"ARPG.Combat.Equipment.UnarmedKeepsNoWeaponMoveset",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+/**
+ * The regression: sword combos with nothing in hand.
+ *
+ * The cause was one line of character setup -- the sword's tree seeded into the
+ * combo component's FALLBACK slot, which is the moveset for bare hands -- so
+ * unequipping the sword took nothing away. Nothing in the components could have
+ * caught it, because both fields were being used exactly as designed. What is
+ * asserted here is the invariant that makes that misuse visible: what a
+ * character can do with empty hands never comes from a weapon.
+ */
+bool FARPGUnarmedMovesetTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGEquipmentTestUtils;
+	FTestWorld Scope;
+
+	{
+		FRig Rig = BuildRig(Scope.World);
+
+		// Begin play with nothing equipped has to PUSH the unarmed state, not
+		// merely decline to write a weapon's: the hitbox ships with an authored
+		// WeaponBaseDamage, and a character who never equips anything would
+		// otherwise punch for a sword's worth of it.
+		TestEqual(TEXT("Unarmed at begin play swings for nothing"),
+			Rig.Hitbox->WeaponBaseDamage, 0.f);
+
+		UARPGWeaponAttackTree* Fists = MakeTree(Rig.Actor, TEXT("jab"));
+		Rig.Combo->FallbackAttackTree = Fists;
+
+		UARPGWeaponDefinition* Sword = NewObject<UARPGWeaponDefinition>();
+		Sword->WeaponId = TEXT("sword");
+		Sword->BaseDamage = 30.f;
+		Sword->AttackTree = MakeTree(Sword, TEXT("sword_light"));
+
+		Rig.WeaponComp->EquipWeapon(Sword);
+		TestSamePtr(TEXT("Armed, the weapon's moveset takes over from the unarmed one"),
+			Rig.Combo->GetActiveTree(), Sword->AttackTree.Get());
+
+		Rig.WeaponComp->UnequipWeapon();
+		TestSamePtr(TEXT("Unarmed goes back to the unarmed moveset, not the sword's"),
+			Rig.Combo->GetActiveTree(), Fists);
+		TestEqual(TEXT("...and back to unarmed damage with it"),
+			Rig.Hitbox->WeaponBaseDamage, 0.f);
+
+		Rig.Combo->ReceiveInput(EARPGAttackInput::Light);
+		const UARPGComboAttackNode* Node = Rig.Combo->GetCurrentNode();
+		TestEqual(TEXT("...and the beat a press starts is the unarmed one"),
+			Node && Node->Attack ? Node->Attack->AttackId.ToString() : FString(TEXT("<none>")),
+			FString(TEXT("jab")));
+	}
+
+	// No unarmed moveset authored at all -- the shipping default. Empty hands
+	// then do nothing, which is the honest answer and the one the previous
+	// behaviour hid by handing them a sword.
+	{
+		FRig Rig = BuildRig(Scope.World);
+
+		Rig.Combo->ReceiveInput(EARPGAttackInput::Light);
+		TestFalse(TEXT("With no unarmed moveset, a bare-handed press starts nothing"),
+			Rig.Combo->IsAttacking());
+		TestNull(TEXT("...and leaves the chain at rest"), Rig.Combo->GetCurrentNode());
+	}
+
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGWeaponCritTest,
 	"ARPG.Combat.Equipment.WeaponCritIsSymmetric",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

@@ -45,6 +45,19 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "ARPG|Weapon")
 	TObjectPtr<UARPGWeaponDefinition> DefaultWeapon;
 
+	/**
+	 * What the weapon hitbox is worth with nothing equipped -- fists, and only
+	 * fists.
+	 *
+	 * Zero by default, because an unarmed moveset that hurts is a design choice
+	 * and a hitbox left at its authored WeaponBaseDamage is an accident. This is
+	 * the number the combo component's FallbackAttackTree swings for; authoring
+	 * one without setting this gives a punch that connects and does nothing.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Weapon",
+		meta = (ClampMin = "0.0"))
+	float UnarmedBaseDamage = 0.f;
+
 	UFUNCTION(BlueprintCallable, Category = "ARPG|Weapon")
 	void EquipWeapon(UARPGWeaponDefinition* NewWeapon);
 

@@ -65,6 +65,12 @@ public:
 	 * on whether PossessedBy ran before or after the weapon component's
 	 * BeginPlay, so unequipping a weapon either left the character unarmed or
 	 * silently gave them the character's default sword moveset.
+	 *
+	 * A WEAPON'S TREE MUST NEVER BE PUT HERE. This is the moveset a character has
+	 * when they are holding nothing, so a sword tree in this slot is a sword you
+	 * cannot put down: every combo stays available bare-handed and unequipping
+	 * takes nothing away. Whatever a weapon can do belongs on that weapon's
+	 * UARPGWeaponDefinition.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Combo")
 	TObjectPtr<UARPGWeaponAttackTree> FallbackAttackTree;

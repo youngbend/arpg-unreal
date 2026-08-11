@@ -25,6 +25,7 @@
 #include "ARPGParryComponent.h"
 #include "ARPGQuickSlotComponent.h"
 #include "ARPGWeaponComponent.h"
+#include "ARPGWeaponDefinition.h"
 #include "ARPGLocomotionComponent.h"
 #include "ARPGVitalRegenComponent.h"
 #include "ARPGModalInputComponent.h"
@@ -150,8 +151,14 @@ AarpgCharacter::AarpgCharacter()
 	// A convenience default only. SET THIS ON THE BLUEPRINT -- a hard-coded
 	// content path in C++ silently stops working the moment the asset is moved
 	// or renamed, which is exactly what happened the first time.
-	DefaultAttackTree = TSoftObjectPtr<UARPGWeaponAttackTree>(
-		FSoftObjectPath(TEXT("/Game/ARPG/Weapons/sword/DA_AttackTree_Sword.DA_AttackTree_Sword")));
+	//
+	// THE WEAPON, not the attack tree. This used to point the character's
+	// FallbackAttackTree -- the bare-handed moveset -- straight at the sword's
+	// tree, so every sword combo was available with nothing equipped and
+	// unequipping took nothing away. The sword's moveset now arrives the way any
+	// weapon's does: by equipping the weapon that owns it.
+	DefaultWeapon = TSoftObjectPtr<UARPGWeaponDefinition>(
+		FSoftObjectPath(TEXT("/Game/ARPG/Weapons/sword/DA_Weapon_Sword.DA_Weapon_Sword")));
 }
 
 void AarpgCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
@@ -225,6 +232,49 @@ void AarpgCharacter::BeginPlay()
 {
 	Super::BeginPlay();
 	ResolveDefaultMagicContent();
+	ResolveDefaultCombatContent();
+}
+
+void AarpgCharacter::ResolveDefaultCombatContent()
+{
+	// The unarmed moveset. Left null unless a Blueprint authors one, and a null
+	// one is not an error: it means a character with empty hands has no attacks,
+	// which is the honest answer until fists are authored. The combo component
+	// says so on the first press.
+	if (ComboComponent && !ComboComponent->FallbackAttackTree && !UnarmedAttackTree.IsNull())
+	{
+		ComboComponent->FallbackAttackTree = UnarmedAttackTree.LoadSynchronous();
+		if (!ComboComponent->FallbackAttackTree)
+		{
+			UE_LOG(Logarpg, Warning,
+				TEXT("Unarmed attack tree '%s' failed to load; bare hands will have no attacks."),
+				*UnarmedAttackTree.ToString());
+		}
+	}
+
+	// Server-side, and only when nothing is equipped already: the weapon
+	// component equips its own DefaultWeapon in its BeginPlay, which has already
+	// run by the time this does, and an NPC-style definition may have equipped
+	// something too. Weapon state replicates, so clients receive it rather than
+	// resolving it a second time.
+	if (!WeaponComponent || !HasAuthority() || WeaponComponent->GetWeapon() || DefaultWeapon.IsNull())
+	{
+		return;
+	}
+
+	if (UARPGWeaponDefinition* Definition = DefaultWeapon.LoadSynchronous())
+	{
+		WeaponComponent->EquipWeapon(Definition);
+	}
+	else
+	{
+		UE_LOG(Logarpg, Error,
+			TEXT("Default weapon '%s' failed to load -- the character spawns unarmed and, with no "
+			     "unarmed moveset authored, cannot attack at all. Run "
+			     "Tools/generate_sword_weapon.py to build it, or set DefaultWeapon on the "
+			     "character Blueprint."),
+			*DefaultWeapon.ToString());
+	}
 }
 
 void AarpgCharacter::ResolveDefaultMagicContent()
@@ -541,22 +591,10 @@ void AarpgCharacter::InitAbilityActorInfo()
 		}
 	}
 
-	// Into the FALLBACK slot, not AttackTree. The weapon component owns
-	// AttackTree outright and clears it on unequip; writing the character default
-	// there too made the outcome depend on whether possession happened before or
-	// after that component began play.
-	if (ComboComponent && !ComboComponent->FallbackAttackTree && !DefaultAttackTree.IsNull())
-	{
-		ComboComponent->FallbackAttackTree = DefaultAttackTree.LoadSynchronous();
-		if (!ComboComponent->FallbackAttackTree)
-		{
-			UE_LOG(Logarpg, Error,
-				TEXT("Attack tree '%s' failed to load -- an unarmed character will have no "
-				     "attacks at all. Set DefaultAttackTree on the character Blueprint to the "
-				     "real asset."),
-				*DefaultAttackTree.ToString());
-		}
-	}
+	// Movesets are resolved in ResolveDefaultCombatContent, off BeginPlay. They
+	// were resolved here when this function was the only place guaranteed to run
+	// on both sides, but the combo component is not replicated -- a client has to
+	// fill its own unarmed slot, and BeginPlay is where both sides meet.
 }
 
 // --- Debug harness ----------------------------------------------------------
