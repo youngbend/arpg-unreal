@@ -366,4 +366,50 @@ bool FARPGComboTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGComboNodeRegistryTest,
+	"ARPG.Combat.Combo.NodeRegistry",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+/**
+ * The registry a tree carries of its own nodes.
+ *
+ * Every tree in the project predates it -- they were built by wiring roots and
+ * follow-ups directly -- so the walk that fills it in is what the graph editor
+ * reads when it opens one of them. Two things can go wrong with a walk over a
+ * structure that now permits sharing: counting a shared node twice, and never
+ * finishing at all.
+ */
+bool FARPGComboNodeRegistryTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGComboTestUtils;
+
+	UARPGWeaponAttackTree* Tree = NewObject<UARPGWeaponAttackTree>();
+
+	UARPGComboAttackNode* Opener = MakeNode(Tree, MakeAttack(TEXT("opener")));
+	UARPGComboAttackNode* Finisher = MakeNode(Tree, MakeAttack(TEXT("finisher")));
+
+	// One node reached three ways, which is the sword tree's shape.
+	Opener->FollowLight = Finisher;
+	Opener->FollowHeavy = Finisher;
+	Tree->RootLight = Opener;
+	Tree->ParryLight = Finisher;
+
+	Tree->RebuildNodeRegistry();
+
+	TestEqual(TEXT("A shared node is registered once, not once per parent"),
+		Tree->Nodes.Num(), 2);
+	TestTrue(TEXT("The opener is registered"), Tree->Nodes.Contains(Opener));
+	TestTrue(TEXT("The finisher is registered"), Tree->Nodes.Contains(Finisher));
+
+	// A chain that returns to its own opener is legal: the combo component
+	// resolves one step per press and never walks the structure. This walk does,
+	// so it is the only thing a cycle could hang.
+	Finisher->FollowLight = Opener;
+	Tree->RebuildNodeRegistry();
+
+	TestEqual(TEXT("A cycle terminates and registers each node once"), Tree->Nodes.Num(), 2);
+
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS
