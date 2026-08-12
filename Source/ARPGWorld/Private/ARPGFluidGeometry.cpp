@@ -648,7 +648,7 @@ void BuildFieldMesh(UDynamicMeshComponent* Component, const FARPGSolidField& Fie
 	{
 		for (int32 X = 0; X < Field.CountX; ++X)
 		{
-			if (!Field.IsIced(X, Y))
+			if (!Field.IsSolid(X, Y))
 			{
 				continue;
 			}
@@ -693,7 +693,7 @@ void BuildFieldMesh(UDynamicMeshComponent* Component, const FARPGSolidField& Fie
 
 			for (int32 Side = 0; Side < 4; ++Side)
 			{
-				if (Field.IsIced(X + Steps[Side].X, Y + Steps[Side].Y))
+				if (Field.IsSolid(X + Steps[Side].X, Y + Steps[Side].Y))
 				{
 					continue;
 				}

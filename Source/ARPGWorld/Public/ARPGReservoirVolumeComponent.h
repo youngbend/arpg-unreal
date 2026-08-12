@@ -58,7 +58,7 @@ public:
 	virtual bool AbsorbSurfaceVolume(double Volume) override { return true; }
 
 	virtual float GetSurfaceEnergyDensity() const override { return 0.f; }
-	virtual bool IsSurfaceAt(const FVector2D& At) const override { return IsWaterAt(At); }
+	virtual bool IsSurfaceAt(const FVector2D& At) const override { return IsFluidAt(At); }
 	virtual FVector2D GetSurfaceFlowAt(const FVector2D& At) const override { return FlowVelocity; }
 	virtual float GetSurfaceDensity() const override { return Density; }
 	virtual float GetSurfaceBedAt(const FVector2D& At) const override;
@@ -97,7 +97,7 @@ public:
 	int32 FootprintSegments = 16;
 
 	/** Is there water at this XY, tested just under the surface? */
-	bool IsWaterAt(const FVector2D& Point) const;
+	bool IsFluidAt(const FVector2D& Point) const;
 
 protected:
 

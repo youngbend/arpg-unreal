@@ -16,7 +16,7 @@ namespace
 	 * differently. A centimetre under is unambiguously in the water and is far
 	 * below anything a bank could be mistaken for.
 	 */
-	constexpr float WaterProbeDepth = 1.f;
+	constexpr float FluidProbeDepth = 1.f;
 
 	/** Enough halvings to land the bank within a centimetre or so of a spell. */
 	constexpr int32 EdgeSearchSteps = 8;
@@ -33,12 +33,12 @@ UARPGReservoirVolumeComponent::UARPGReservoirVolumeComponent()
 	Conductivity = 0.85f;
 }
 
-bool UARPGReservoirVolumeComponent::IsWaterAt(const FVector2D& Point) const
+bool UARPGReservoirVolumeComponent::IsFluidAt(const FVector2D& Point) const
 {
 	const FVector Column(Point.X, Point.Y, 0.f);
 	const float Surface = GetSurfaceHeightAt(Column);
 
-	return ContainsPoint(FVector(Point.X, Point.Y, Surface - WaterProbeDepth));
+	return ContainsPoint(FVector(Point.X, Point.Y, Surface - FluidProbeDepth));
 }
 
 double UARPGReservoirVolumeComponent::MarchToEdge(const FVector2D& Centre,
@@ -46,7 +46,7 @@ double UARPGReservoirVolumeComponent::MarchToEdge(const FVector2D& Centre,
 {
 	// The whole reach is water: nothing to search for, the patch is unclipped
 	// here. The common case for a shard landing mid-river.
-	if (IsWaterAt(Centre + Direction * MaxDistance))
+	if (IsFluidAt(Centre + Direction * MaxDistance))
 	{
 		return MaxDistance;
 	}
@@ -61,7 +61,7 @@ double UARPGReservoirVolumeComponent::MarchToEdge(const FVector2D& Centre,
 	{
 		const double Middle = (Inside + Outside) * 0.5;
 
-		if (IsWaterAt(Centre + Direction * Middle))
+		if (IsFluidAt(Centre + Direction * Middle))
 		{
 			Inside = Middle;
 		}
@@ -82,7 +82,7 @@ TArray<FVector2D> UARPGReservoirVolumeComponent::GetSurfaceFootprint(const FVect
 	// The contact itself has to be in the water. A shard that struck the bank
 	// beside a river freezes nothing, which is the answer a box would have got
 	// wrong and the reason containment is asked rather than assumed.
-	if (Radius <= 0.0 || !IsWaterAt(Centre))
+	if (Radius <= 0.0 || !IsFluidAt(Centre))
 	{
 		return Footprint;
 	}

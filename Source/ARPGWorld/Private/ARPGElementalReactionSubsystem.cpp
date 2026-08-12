@@ -292,9 +292,15 @@ void UARPGElementalReactionSubsystem::Resolve(UARPGElementalVolumeComponent* A,
 	// and OnElementalReaction has no room to say so. Left here rather than
 	// threaded through the hook's signature, which every projectile would then
 	// carry for the sake of one case.
-	if (UARPGFluidSurfaceSubsystem* Fluids = GetWorld()->GetSubsystem<UARPGFluidSurfaceSubsystem>())
+	UARPGFluidSurfaceSubsystem* Fluids = GetWorld()->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	if (Fluids)
 	{
 		Fluids->NoteReactionContact(A, B, Contact);
+
+		// And an empty ledger, so anything a consumed body hands back below is
+		// attributable to THIS reaction when the product is spawned.
+		Fluids->OpenReactionLedger();
 	}
 
 	A->Consume(Reacted * RateA, Product);
@@ -302,12 +308,19 @@ void UARPGElementalReactionSubsystem::Resolve(UARPGElementalVolumeComponent* A,
 
 	if (Product && Magnitude >= MinMagnitude)
 	{
-		SpawnProduct(Product, Contact, Direction, Magnitude, SourceActor);
+		// A MELTED SLAB HAS ALREADY LEFT ITS FLUID at this very point, so the
+		// product must not leave it again -- fire + ice -> water is one body of
+		// water, not two. With no body consumed there is nothing else accounting
+		// for it and the product's deposit is the only one there will be.
+		const bool bProductDeposits = !Fluids || !Fluids->WasFluidReturned(Product->ElementTag);
+
+		SpawnProduct(Product, Contact, Direction, Magnitude, SourceActor, bProductDeposits);
 	}
 }
 
 void UARPGElementalReactionSubsystem::SpawnProduct(UARPGMagicElement* Product,
-	const FVector& Contact, const FVector& Direction, float Magnitude, AActor* SourceActor)
+	const FVector& Contact, const FVector& Direction, float Magnitude, AActor* SourceActor,
+	bool bDeposits)
 {
 	UWorld* World = GetWorld();
 	if (!World || !Product)
@@ -357,6 +370,15 @@ void UARPGElementalReactionSubsystem::SpawnProduct(UARPGMagicElement* Product,
 	if (AARPGDischargeEffect* Effect = Cast<AARPGDischargeEffect>(Spawned))
 	{
 		Effect->InitializeFromContext(Context);
+
+		// AFTER the effect has sized itself, because sizing is where the deposit
+		// radius comes from -- an effect derives what it wets from what it covers,
+		// and the one thing that can know this particular puddle is already spoken
+		// for is the caller.
+		if (!bDeposits)
+		{
+			Effect->DepositRadius = 0.f;
+		}
 	}
 
 	Spawned->FinishSpawning(SpawnTransform);

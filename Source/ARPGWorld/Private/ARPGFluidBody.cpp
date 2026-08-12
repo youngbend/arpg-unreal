@@ -465,7 +465,7 @@ void AARPGFluidSolid::RebuildFromRing()
 	// to trust everywhere else.
 	Field.Refresh();
 
-	if (!Definition || !Field.IsValidField() || Field.IcedCellCount() == 0)
+	if (!Definition || !Field.IsValidField() || Field.SolidCellCount() == 0)
 	{
 		ARPGFluidGeometry::BuildFieldMesh(Surface, FARPGSolidField(), FVector2D::ZeroVector);
 		Surface->SetCollisionEnabled(ECollisionEnabled::NoCollision);
@@ -475,7 +475,7 @@ void AARPGFluidSolid::RebuildFromRing()
 	// FROM THE FIELD, not from an outline. Where the ice is, how thick it is and
 	// how high it stands are all one answer now, and the box, the mesh and the
 	// collision are three readings of it.
-	const FVector2D Centre = Field.IcedCentroid();
+	const FVector2D Centre = Field.SolidCentroid();
 	const FVector2D Reach(
 		Field.SupportDistance(Centre, FVector2D(1, 0)),
 		Field.SupportDistance(Centre, FVector2D(0, 1)));
@@ -538,12 +538,12 @@ void AARPGFluidSolid::RebuildFromRing()
 int32 AARPGFluidSolid::CountOccupants() const
 {
 	const UWorld* World = GetWorld();
-	if (!World || Field.IcedCellCount() == 0)
+	if (!World || Field.SolidCellCount() == 0)
 	{
 		return 0;
 	}
 
-	const FVector2D Centre = Field.IcedCentroid();
+	const FVector2D Centre = Field.SolidCentroid();
 	const FVector2D Extent(
 		Field.SupportDistance(Centre, FVector2D(1, 0)),
 		Field.SupportDistance(Centre, FVector2D(0, 1)));
@@ -601,7 +601,7 @@ float AARPGFluidSolid::ComputeTargetDraft() const
 	// compared, and which of them floats is data.
 	const float FluidDensity = FloatsOn->GetSurfaceDensity();
 
-	const double Area = Field.IcedArea();
+	const double Area = Field.SolidArea();
 	if (Area <= 0.0 || FluidDensity <= 0.f)
 	{
 		return 0.f;
@@ -617,7 +617,7 @@ float AARPGFluidSolid::ComputeTargetDraft() const
 	// same stuff ride at the same depth, and correctly so. The load's term does
 	// NOT cancel, so a wider slab takes a person's weight better. Both fall out of
 	// the equation rather than being arranged.
-	const float AverageThickness = static_cast<float>(Field.IceVolume() / Area);
+	const float AverageThickness = static_cast<float>(Field.SolidVolume() / Area);
 	const float SlabDraft = AverageThickness * (Definition->Density / FluidDensity);
 
 	const float LoadMass = OccupantCount * Definition->OccupantMass * Definition->LoadResponse;
@@ -630,7 +630,7 @@ float AARPGFluidSolid::ComputeTargetDraft() const
 
 bool AARPGFluidSolid::HasRoomToward(const FVector2D& Direction) const
 {
-	if (!FloatsOn || Field.IcedCellCount() == 0)
+	if (!FloatsOn || Field.SolidCellCount() == 0)
 	{
 		return false;
 	}
@@ -639,7 +639,7 @@ bool AARPGFluidSolid::HasRoomToward(const FVector2D& Direction) const
 	// larger than one cell of the grid it is measured on.
 	static constexpr double Clearance = 50.0;
 
-	const FVector2D Centre = Field.IcedCentroid();
+	const FVector2D Centre = Field.SolidCentroid();
 	const double Reach = Field.SupportDistance(Centre, Direction);
 
 	return FloatsOn->IsSurfaceAt(Centre + Direction * (Reach + Clearance));
@@ -649,7 +649,7 @@ void AARPGFluidSolid::UpdateAnchoring()
 {
 	bAnchored = false;
 
-	if (!FloatsOn || Field.IcedCellCount() == 0)
+	if (!FloatsOn || Field.SolidCellCount() == 0)
 	{
 		return;
 	}
@@ -686,7 +686,7 @@ void AARPGFluidSolid::Tick(float DeltaTime)
 	// is not garbage collected until later, so the interface still points at it
 	// and every query below would run against a dead pool.
 	if (!HasAuthority() || !Definition || !IsValid(FloatsOn.GetObject())
-		|| Field.IcedCellCount() == 0)
+		|| Field.SolidCellCount() == 0)
 	{
 		return;
 	}
@@ -706,7 +706,7 @@ void AARPGFluidSolid::Tick(float DeltaTime)
 		}
 	}
 
-	const FVector2D Centre = Field.IcedCentroid();
+	const FVector2D Centre = Field.SolidCentroid();
 
 	// The waterline it should be riding, asked of the body it froze out of -- so a
 	// floe on a Water plugin river follows the waves and one on a puddle sits on a
@@ -777,7 +777,7 @@ double AARPGFluidSolid::GetArea() const
 {
 	// The ice that is actually LEFT, which after a fireball is not the outline it
 	// froze with. Energy, buoyancy and retirement all read this.
-	return Field.IcedArea();
+	return Field.SolidArea();
 }
 
 double AARPGFluidSolid::MeltAt(const FVector2D& Where, float Radius, float Depth)
@@ -812,7 +812,7 @@ bool AARPGFluidSolid::ConsumeSurfaceArea(double Area)
 	// The reaction path calls MeltAt with the contact instead, and this remains
 	// only for anything that still asks in area -- thinning the whole slab by the
 	// depth that much ice would have been.
-	const double Plan = Field.IcedArea();
+	const double Plan = Field.SolidArea();
 	if (Plan <= 0.0 || !Definition)
 	{
 		return true;
@@ -824,7 +824,7 @@ bool AARPGFluidSolid::ConsumeSurfaceArea(double Area)
 	// hole through it. Without a contact -- anything that spent this slab without
 	// touching a point on it -- fall back to thinning the whole thing.
 	double Melted = 0.0;
-	FVector2D MeltedAt = Field.IcedCentroid();
+	FVector2D MeltedAt = Field.SolidCentroid();
 
 	if (bHasPendingContact)
 	{
@@ -851,12 +851,12 @@ bool AARPGFluidSolid::ConsumeSurfaceArea(double Area)
 	// bookkeeping nobody asked to see. A reaction is the opposite case: a fireball
 	// through ice is a thing the player did, at a place they can see, and the
 	// water it leaves is the visible result of it.
-	ReturnMeltwater(Melted, MeltedAt);
+	ReturnMeltedFluid(Melted, MeltedAt);
 
-	return Field.IcedCellCount() == 0 || Field.IcedArea() < GetMinimumArea();
+	return Field.SolidCellCount() == 0 || Field.SolidArea() < GetMinimumArea();
 }
 
-void AARPGFluidSolid::ReturnMeltwater(double MeltedVolume, const FVector2D& At)
+void AARPGFluidSolid::ReturnMeltedFluid(double MeltedVolume, const FVector2D& At)
 {
 	// Null MeltsInto is correct for obsidian: rock that formed on lava is not
 	// frozen lava, and breaking it releases nothing.
@@ -885,13 +885,23 @@ void AARPGFluidSolid::ReturnMeltwater(double MeltedVolume, const FVector2D& At)
 	// garbage collected yet, so the interface still points at it.
 	IARPGElementalSurface* Riding = IsValid(FloatsOn.GetObject()) ? FloatsOn.GetInterface() : nullptr;
 
+	UARPGFluidSurfaceSubsystem* Fluids =
+		GetWorld() ? GetWorld()->GetSubsystem<UARPGFluidSurfaceSubsystem>() : nullptr;
+
+	// SAID BEFORE IT IS DONE, and said whichever way it goes. The reaction's own
+	// product would otherwise deposit this same fluid a second time when its
+	// discharge lands -- for fire + ice -> water those are one body of water
+	// described twice. Absorbed into a lake counts: the material was accounted
+	// for, and the fact that nothing is visible does not make it unaccounted.
+	if (Fluids)
+	{
+		Fluids->NoteFluidReturned(Fluid->GetElementTag());
+	}
+
 	if (Riding && Riding->IsSurfaceAt(At) && Riding->AbsorbSurfaceVolume(FluidVolume))
 	{
 		return;
 	}
-
-	UARPGFluidSurfaceSubsystem* Fluids =
-		GetWorld() ? GetWorld()->GetSubsystem<UARPGFluidSurfaceSubsystem>() : nullptr;
 
 	if (!Fluids)
 	{
@@ -920,5 +930,5 @@ bool AARPGFluidSolid::IsStandableAt(FVector WorldPoint) const
 	// complexity; here it is simply a cell whose top has met its bottom, so "is
 	// there ice here" is the entire test and a gap you can fall through needs no
 	// special knowledge at all.
-	return Field.IsIcedAt(FVector2D(WorldPoint.X, WorldPoint.Y));
+	return Field.IsSolidAt(FVector2D(WorldPoint.X, WorldPoint.Y));
 }

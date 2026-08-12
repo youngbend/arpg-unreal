@@ -355,7 +355,7 @@ public:
 	 * @param MeltedVolume cubic cm of SLAB. Converted by the two densities.
 	 * @param At world XY where it melted, so the water appears at the hole.
 	 */
-	void ReturnMeltwater(double MeltedVolume, const FVector2D& At);
+	void ReturnMeltedFluid(double MeltedVolume, const FVector2D& At);
 
 	/**
 	 * Where the last reaction touched this slab, in world XY.

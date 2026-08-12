@@ -24,6 +24,7 @@
 #include "Components/SphereComponent.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
+#include "EngineUtils.h"
 #include "Materials/Material.h"
 
 /**
@@ -643,6 +644,28 @@ bool FARPGFluidMeltTest::RunTest(const FString& Parameters)
 	// materialising later when the last sliver of ice happens to go.
 	TestEqual(TEXT("Which is water on the ground, immediately"), Fluids->GetPools().Num(), 1);
 
+	// AND ONLY ONCE. The row's Result is water too, so a water product was spawned
+	// at this same contact -- and a discharge that lands deposits whatever its
+	// element pools as. That is the SAME water described twice, and it made the
+	// puddle bigger than the ice that produced it.
+	TestTrue(TEXT("The melt is on the reaction's ledger"),
+		Fluids->WasFluidReturned(TAG_Element_Water));
+
+	int32 Products = 0;
+	for (TActorIterator<AARPGDischargeEffect> It(Scope.World); It; ++It)
+	{
+		if (It->GetDischargeContext().DischargeType != EARPGDischargeType::Collision)
+		{
+			continue;
+		}
+
+		++Products;
+		TestEqual(TEXT("So the product it spawned deposits nothing"),
+			It->DepositRadius, 0.f);
+	}
+
+	TestEqual(TEXT("And there was a product to check"), Products, 1);
+
 	const double AfterFirst = Fluids->GetPools()[0]->GetArea();
 
 	// The rest of it, melted the same way. The puddle grows; a second one is not
@@ -844,7 +867,7 @@ bool FARPGSolidFieldMeltTest::RunTest(const FString& Parameters)
 	Field.BuildFrom(ARPGFluidGeometry::MakeCircle(FVector2D::ZeroVector, 300.0),
 		/*CellSize=*/20.f, /*Thickness=*/30.f);
 
-	if (!Field.IsValidField() || Field.IcedCellCount() == 0)
+	if (!Field.IsValidField() || Field.SolidCellCount() == 0)
 	{
 		AddError(TEXT("Setup: the field did not build."));
 		return false;
@@ -859,7 +882,7 @@ bool FARPGSolidFieldMeltTest::RunTest(const FString& Parameters)
 
 	TestTrue(TEXT("Melting takes ice away"), Removed > 0.0);
 	TestTrue(TEXT("But a shallow bowl does not break through"),
-		Field.IsIcedAt(FVector2D::ZeroVector));
+		Field.IsSolidAt(FVector2D::ZeroVector));
 
 	// A BOWL, NOT A CYLINDER, which is the whole reason an impact at the edge cuts
 	// at an angle: the centre goes deepest and it tapers to nothing at the rim.
@@ -877,15 +900,15 @@ bool FARPGSolidFieldMeltTest::RunTest(const FString& Parameters)
 	// and cannot be dropped for not being the largest.
 	Field.MeltBowl(FVector2D::ZeroVector, 100.f, 60.f);
 
-	TestFalse(TEXT("A deep bowl melts clean through"), Field.IsIcedAt(FVector2D::ZeroVector));
-	TestTrue(TEXT("And the ice around it is untouched"), Field.IsIcedAt(FVector2D(200, 0)));
+	TestFalse(TEXT("A deep bowl melts clean through"), Field.IsSolidAt(FVector2D::ZeroVector));
+	TestTrue(TEXT("And the ice around it is untouched"), Field.IsSolidAt(FVector2D(200, 0)));
 
 	// TWO HOLES BOTH SURVIVE. Only the largest used to be kept, so a second
 	// fireball made the first hole vanish.
 	Field.MeltBowl(FVector2D(200, 0), 60.f, 60.f);
 
-	TestFalse(TEXT("A second hole opens"), Field.IsIcedAt(FVector2D(200, 0)));
-	TestFalse(TEXT("And the first is still there"), Field.IsIcedAt(FVector2D::ZeroVector));
+	TestFalse(TEXT("A second hole opens"), Field.IsSolidAt(FVector2D(200, 0)));
+	TestFalse(TEXT("And the first is still there"), Field.IsSolidAt(FVector2D::ZeroVector));
 
 	return true;
 }
@@ -913,7 +936,7 @@ bool FARPGSolidFieldRefreezeTest::RunTest(const FString& Parameters)
 	const float Dished = Field.TopAt(FVector2D(150, 0));
 	TestTrue(TEXT("Setup: the dish is below the surface"), Dished < 25.f);
 
-	Field.Refreeze(Whole, /*WaterlineZ=*/22.f, /*MinimumGain=*/0.5f);
+	Field.Resolidify(Whole, /*SurfaceZ=*/22.f, /*MinimumGain=*/0.5f);
 
 	// THE STEP. New ice forms at the surface of the water, so a floe riding low
 	// gains ice BELOW the ice that froze when it was riding high -- and the
@@ -989,7 +1012,7 @@ bool FARPGSolidFieldCacheTest::RunTest(const FString& Parameters)
 		{
 			for (int32 X = 0; X < Field.CountX; ++X)
 			{
-				Count += Field.IsIced(X, Y) ? 1 : 0;
+				Count += Field.IsSolid(X, Y) ? 1 : 0;
 			}
 		}
 		return Count;
@@ -999,34 +1022,34 @@ bool FARPGSolidFieldCacheTest::RunTest(const FString& Parameters)
 	Field.BuildFrom(ARPGFluidGeometry::MakeCircle(FVector2D::ZeroVector, 300.0), 20.f, 30.f);
 
 	TestEqual(TEXT("A fresh field's count is its cells"),
-		Field.IcedCellCount(), SweptCellCount(Field));
+		Field.SolidCellCount(), SweptCellCount(Field));
 	TestEqual(TEXT("And its volume is area times thickness"),
-		Field.IceVolume(), Field.IcedArea() * 30.0, Field.IcedArea() * 0.02);
+		Field.SolidVolume(), Field.SolidArea() * 30.0, Field.SolidArea() * 0.02);
 
 	// Melting through changes the count, so the cache has to move with it.
 	Field.MeltBowl(FVector2D::ZeroVector, 120.f, 60.f);
 
 	TestEqual(TEXT("Melting through updates the count"),
-		Field.IcedCellCount(), SweptCellCount(Field));
-	TestTrue(TEXT("Which went down"), Field.IcedCellCount() < Field.CountX * Field.CountY);
+		Field.SolidCellCount(), SweptCellCount(Field));
+	TestTrue(TEXT("Which went down"), Field.SolidCellCount() < Field.CountX * Field.CountY);
 
 	// Thinning changes volume without changing occupancy.
-	const int32 BeforeCells = Field.IcedCellCount();
-	const double BeforeVolume = Field.IceVolume();
+	const int32 BeforeCells = Field.SolidCellCount();
+	const double BeforeVolume = Field.SolidVolume();
 
 	Field.MeltUniform(2.f, 0.f);
 
-	TestEqual(TEXT("Thinning leaves the count alone"), Field.IcedCellCount(), BeforeCells);
-	TestTrue(TEXT("But takes volume"), Field.IceVolume() < BeforeVolume);
+	TestEqual(TEXT("Thinning leaves the count alone"), Field.SolidCellCount(), BeforeCells);
+	TestTrue(TEXT("But takes volume"), Field.SolidVolume() < BeforeVolume);
 
 	// TRANSLATION MOVES THE CENTROID WITHOUT A SWEEP, which is the whole reason
 	// drifting is one vector add rather than a rebuild.
-	const FVector2D Before = Field.IcedCentroid();
+	const FVector2D Before = Field.SolidCentroid();
 	Field.Translate(FVector2D(500, -250));
 
 	TestEqual(TEXT("Sliding the field slides its centroid"),
-		Field.IcedCentroid(), Before + FVector2D(500, -250));
-	TestEqual(TEXT("And costs it no cells"), Field.IcedCellCount(), BeforeCells);
+		Field.SolidCentroid(), Before + FVector2D(500, -250));
+	TestEqual(TEXT("And costs it no cells"), Field.SolidCellCount(), BeforeCells);
 
 	return true;
 }
@@ -2099,6 +2122,64 @@ bool FARPGFluidCastDepositTest::RunTest(const FString& Parameters)
 		/*Radius=*/0.f)->Destroy();
 	TestEqual(TEXT("A spell with no deposit radius leaves nothing"),
 		Fluids->GetPools().Num(), 1);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFluidCastOverSlabTest,
+	"ARPG.World.Fluid.Casting.ASpellOverASlabWetsWhatTheSlabIsFloatingIn",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGFluidCastOverSlabTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	MakeGround(Scope.World, 0.f);
+
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+	UARPGMagicElement* Ice = MakeElement(GetTransientPackage(), TAG_Element_Ice);
+
+	UARPGFluidDefinition* WaterDefinition = MakeWater(GetTransientPackage(), Water);
+	WaterDefinition->EvaporationRate = 0.f;
+
+	UARPGSolidDefinition* IceDefinition = MakeIce(Ice);
+	IceDefinition->Thickness = 40.f;
+
+	Fluids->Definitions = { WaterDefinition };
+	Fluids->Solids = { IceDefinition };
+	Fluids->CombinationTable = MakeFreezeTable(Ice);
+
+	AARPGFluidPool* Pool = Fluids->Deposit(FVector(0, 0, 0), 600.f, TAG_Element_Water);
+	UARPGElementalVolumeComponent* Shard = MakeShard(Scope.World, Ice, FVector(0, 0, 0), 300.f);
+
+	if (!Fluids->TrySolidify(Pool->Volume, Shard) || Fluids->GetSolids().Num() != 1)
+	{
+		AddError(TEXT("Setup: nothing froze."));
+		return false;
+	}
+
+	AARPGFluidSolid* Floe = Fluids->GetSolids()[0];
+	const int32 PoolsBefore = Fluids->GetPools().Num();
+
+	// A SLAB IS NOT GROUND. It blocks every channel because you stand on it, so
+	// the deposit probe used to hit the ICE and leave a puddle on top of the floe
+	// -- at the wrong height, and as a separate actor that does NOT drift with the
+	// floe, so it hung over open water the moment the floe moved on. What that
+	// spell wet is whatever the floe is floating in.
+	MakeCastSpell(Scope.World, Water, FVector(0, 0, 400), FVector(0, 0, 400),
+		/*Radius=*/100.f)->Destroy();
+
+	TestEqual(TEXT("It merged into the water under the floe"),
+		Fluids->GetPools().Num(), PoolsBefore);
+
+	for (const AARPGFluidPool* Wet : Fluids->GetPools())
+	{
+		TestTrue(TEXT("And no body sits at the height of the ice"),
+			Wet->GroundHeight < Floe->GetSurfaceHeight() - 1.f);
+	}
 
 	return true;
 }

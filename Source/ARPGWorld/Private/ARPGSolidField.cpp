@@ -9,7 +9,7 @@ namespace
 	constexpr float ToCm = 0.1f;
 	constexpr float ToMm = 10.f;
 
-	/** Below this a cell is bare water rather than very thin ice, in cm. */
+	/** Below this a cell is bare fluid rather than a very thin skin, in cm. */
 	constexpr float MinimumLayer = 1.f;
 
 	int16 Clamped(float Millimetres)
@@ -37,7 +37,7 @@ FVector2D FARPGSolidField::CentreOf(int32 X, int32 Y) const
 	return Origin + FVector2D(X * CellSize, Y * CellSize);
 }
 
-bool FARPGSolidField::IsIced(int32 X, int32 Y) const
+bool FARPGSolidField::IsSolid(int32 X, int32 Y) const
 {
 	return ThicknessAt(X, Y) >= MinimumLayer;
 }
@@ -53,10 +53,10 @@ float FARPGSolidField::ThicknessAt(int32 X, int32 Y) const
 	return FMath::Max(0.f, (Top[At] - Bottom[At]) * ToCm);
 }
 
-bool FARPGSolidField::IsIcedAt(const FVector2D& World) const
+bool FARPGSolidField::IsSolidAt(const FVector2D& World) const
 {
 	const FIntPoint Cell = CellAt(World);
-	return Cell.X >= 0 && IsIced(Cell.X, Cell.Y);
+	return Cell.X >= 0 && IsSolid(Cell.X, Cell.Y);
 }
 
 float FARPGSolidField::TopAt(const FVector2D& World) const
@@ -80,7 +80,7 @@ void FARPGSolidField::Refresh()
 	{
 		for (int32 X = 0; X < CountX; ++X)
 		{
-			if (!IsIced(X, Y))
+			if (!IsSolid(X, Y))
 			{
 				continue;
 			}
@@ -103,7 +103,7 @@ double FARPGSolidField::SupportDistance(const FVector2D& From, const FVector2D& 
 	{
 		for (int32 X = 0; X < CountX; ++X)
 		{
-			if (IsIced(X, Y))
+			if (IsSolid(X, Y))
 			{
 				Furthest = FMath::Max(Furthest,
 					FVector2D::DotProduct(CentreOf(X, Y) - From, Direction));
@@ -111,7 +111,7 @@ double FARPGSolidField::SupportDistance(const FVector2D& From, const FVector2D& 
 		}
 	}
 
-	// Half a cell, because the support is measured to cell CENTRES and the ice in
+	// Half a cell, because the support is measured to cell CENTRES and the material in
 	// the furthest one reaches to its edge.
 	return Furthest + CellSize * 0.5;
 }
@@ -134,7 +134,7 @@ void FARPGSolidField::BuildFrom(const TArray<FVector2D>& Ring, float InCellSize,
 
 	CellSize = InCellSize;
 
-	// One cell of margin, so the ice never sits flush against the edge of its own
+	// One cell of margin, so the slab never sits flush against the edge of its own
 	// grid -- refreezing can add to a floe and would have nowhere to put it.
 	const FBox2D Bounds = ARPGFluidGeometry::PolygonBounds(Ring).ExpandBy(CellSize);
 
@@ -164,14 +164,14 @@ void FARPGSolidField::BuildFrom(const TArray<FVector2D>& Ring, float InCellSize,
 	Refresh();
 }
 
-bool FARPGSolidField::Refreeze(const TArray<FVector2D>& Ring, float WaterlineZ, float MinimumGain)
+bool FARPGSolidField::Resolidify(const TArray<FVector2D>& Ring, float SurfaceZ, float MinimumGain)
 {
 	if (!IsValidField() || Ring.Num() < 3)
 	{
 		return false;
 	}
 
-	const int16 NewTop = Clamped(WaterlineZ * ToMm);
+	const int16 NewTop = Clamped(SurfaceZ * ToMm);
 	bool bGained = false;
 
 	for (int32 Y = 0; Y < CountY; ++Y)
@@ -185,10 +185,10 @@ bool FARPGSolidField::Refreeze(const TArray<FVector2D>& Ring, float WaterlineZ, 
 
 			const int32 At = Index(X, Y);
 
-			// ICE ALREADY PROUD OF THE WATERLINE IS NOT ADDED TO. New ice forms at
+			// WHAT IS ALREADY PROUD OF THE WATERLINE IS NOT ADDED TO. New material forms at
 			// the surface of the water, and where the slab already stands above
 			// that there is no water to freeze -- which is precisely why a floe
-			// pushed down under a load gains its new ice BELOW the old.
+			// pushed down under a load gains its new material BELOW the old.
 			if (Top[At] >= NewTop)
 			{
 				continue;

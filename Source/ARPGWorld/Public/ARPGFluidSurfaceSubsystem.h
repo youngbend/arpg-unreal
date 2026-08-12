@@ -229,6 +229,29 @@ public:
 	void NoteReactionContact(UARPGElementalVolumeComponent* A, UARPGElementalVolumeComponent* B,
 		FVector Contact);
 
+	// --- Not paying for the same fluid twice -----------------------------------
+	//
+	// A REACTION HAS TWO WAYS TO PUT FLUID ON THE GROUND and they are easy to run
+	// both at once. Melting a slab returns the material that melted, at the
+	// contact, as it happens. Separately, the row's Result spawns a Collision
+	// discharge, and a discharge that lands deposits whatever its element pools
+	// as. For fire + ice -> water those are THE SAME WATER described twice, and
+	// the puddle came out bigger than the ice that made it.
+	//
+	// The product's deposit is still right when no body was consumed -- two spells
+	// meeting in mid-air to make water genuinely leave water and nothing else
+	// accounted for it -- so the answer is not to switch it off, but to know
+	// whether it was already covered.
+
+	/** Starts a fresh reaction. Called by the reaction solver before it consumes. */
+	void OpenReactionLedger();
+
+	/** A body has handed this element's fluid back, so nothing else should. */
+	void NoteFluidReturned(FGameplayTag ElementTag);
+
+	/** Did a body already account for this element during the current reaction? */
+	bool WasFluidReturned(FGameplayTag ElementTag) const;
+
 private:
 	UARPGFluidDefinition* FindDefinition(FGameplayTag ElementTag) const;
 	UARPGSolidDefinition* FindSolidDefinition(FGameplayTag ElementTag) const;
@@ -278,6 +301,15 @@ private:
 	void EnforceBudget();
 
 	TArray<FVector> ViewerLocations;
+
+	/**
+	 * Elements a body has handed back during the reaction being resolved.
+	 *
+	 * Scoped to one Resolve rather than timed: the solver opens the ledger, the
+	 * Consume calls fill it, and the product is spawned before anything else runs.
+	 * A window in seconds would have to guess how long a discharge lives.
+	 */
+	TArray<FGameplayTag> FluidReturnedThisReaction;
 
 	float TickAccumulator = 0.f;
 };

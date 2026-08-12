@@ -1308,6 +1308,49 @@ one asserts against a POOL rather than a lake on purpose: a lake absorbs whateve
 the rule is, so it cannot tell the two behaviours apart, while a pool is where
 returned water would show as a body that grew.
 
+**AN EIGHTH CORRECTION: the same water, twice, and a puddle on top of the ice.**
+Returning meltwater gave a reaction a SECOND way to put fluid on the ground, and
+nothing stopped both running.
+
+- **A reaction has two mouths.** Melting a slab returns the material that melted,
+  at the contact. Separately, the row's `Result` spawns a Collision discharge,
+  and a discharge that lands deposits whatever its element pools as. For
+  `fire + ice -> water` those are one body of water described twice, and the floe
+  left more water than there was ice. The product's deposit is still right when no
+  body was consumed -- two spells meeting in mid-air to make water genuinely leave
+  water, with nothing else accounting for it -- so the fix is not to switch it off
+  but to know whether it was already covered. The solver opens a ledger before it
+  consumes, a body that hands its fluid back writes to it, and the product reads
+  it before spawning. Scoped to one `Resolve` rather than timed, because a window
+  in seconds would have to guess how long a discharge lives.
+- **Absorbed counts as returned.** A lake taking the water is the material being
+  accounted for; that nothing is visible does not make it unaccounted, and the
+  product would otherwise deposit a puddle on the lake -- the exact artefact the
+  seventh correction removed.
+- **A SLAB IS NOT GROUND.** The deposit probe traces on Visibility and a slab
+  blocks every channel, because you stand on it. So a spell finishing over a floe
+  hit the ICE and left its puddle on top: at the wrong height, and as a separate
+  actor that does not drift with the floe, so it hung over open water the moment
+  the floe moved on. The probe now ignores every body this system owns -- pools
+  as well, where the milder version was stacking a second body a couple of
+  centimetres above the first instead of merging with it.
+
+**And the slab vocabulary stopped being about ice.** The type was generalised two
+commits ago and its language was not, which is the half of a rename that actually
+misleads: `IsIced`, `IcedArea`, `IceVolume`, `IcedCentroid`, `IcedCellCount`,
+`Refreeze`, `WaterlineZ`, `ReturnMeltwater`, `IsWaterAt` and the doc comments
+around them all read as if ice were the only thing a slab could be. They are now
+`IsSolid`, `SolidArea`, `SolidVolume`, `SolidCentroid`, `SolidCellCount`,
+`Resolidify`, `SurfaceZ`, `ReturnMeltedFluid` and `IsFluidAt`, with ice kept only
+as the worked example. `Melt*` stays: melting is what happens to any solid, and
+`MeltRate` / `MeltsInto` were already general. Water plugin names stay too --
+`UARPGWaterBodyVolumeComponent` really is about Unreal's water bodies.
+
+2 new cases under `ARPG.World.Fluid.Casting` and `.Reaction`, the second of which
+walks the world for the spawned product and asserts its deposit radius is zero --
+the double deposit is invisible from the pool count alone, since both deposits
+merge into one body.
+
 **Phase 11 -- code complete. Not in the original ten: this is the layer that
 makes the other ten reachable from a controller.** The modal control scheme, the
 speed tiers, the buffering, and auto-sheathe. 13 new cases; 99 pass in total.

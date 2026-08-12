@@ -345,6 +345,33 @@ bool UARPGFluidSurfaceSubsystem::TraceToGround(FVector From, const AActor* Ignor
 	// projectile with a collider lands on ITSELF and the puddle forms in mid-air.
 	Params.AddIgnoredActor(Ignore);
 
+	// AND EVERY BODY THIS SYSTEM OWNS, because a body is not ground.
+	//
+	// A slab blocks every channel -- it has to, you stand on it -- so a spell that
+	// finished over a floe traced down, hit the ICE, and left its puddle on top:
+	// at the wrong height, and as a separate actor that does not drift with the
+	// floe, so it stayed hanging over the water once the floe moved on. What that
+	// spell wet is whatever the floe is floating in, which is what the trace finds
+	// with the floe out of its way. A pool is skipped for the milder version of
+	// the same reason -- landing on the surface film of a puddle rather than the
+	// bed under it would stack a second body a couple of centimetres above the
+	// first instead of merging with it.
+	for (const AARPGFluidPool* Pool : Pools)
+	{
+		if (IsValid(Pool))
+		{
+			Params.AddIgnoredActor(Pool);
+		}
+	}
+
+	for (const AARPGFluidSolid* Solid : ActiveSolids)
+	{
+		if (IsValid(Solid))
+		{
+			Params.AddIgnoredActor(Solid);
+		}
+	}
+
 	FHitResult Hit;
 	if (!World->LineTraceSingleByChannel(Hit, Start, End, ECC_Visibility, Params))
 	{
@@ -484,12 +511,12 @@ bool UARPGFluidSurfaceSubsystem::TrySolidify(UARPGElementalVolumeComponent* A,
 	// THE OVERLAP, not the whole surface and not the whole shard. Freezing exactly
 	// where the two met is the entire reason a body is a polygon rather than a
 	// disc or a grid cell.
-	TArray<FVector2D> FrozenRing;
+	TArray<FVector2D> SolidifiedRing;
 	TArray<TArray<FVector2D>> Holes;
-	ARPGFluidGeometry::IntersectWithHoles(Footprint, AgentRing, FrozenRing, Holes);
+	ARPGFluidGeometry::IntersectWithHoles(Footprint, AgentRing, SolidifiedRing, Holes);
 
-	const double FrozenArea = ARPGFluidGeometry::PolygonArea(FrozenRing);
-	if (FrozenArea < SolidDefinition->MinimumArea)
+	const double SolidifiedArea = ARPGFluidGeometry::PolygonArea(SolidifiedRing);
+	if (SolidifiedArea < SolidDefinition->MinimumArea)
 	{
 		return false;
 	}
@@ -500,7 +527,7 @@ bool UARPGFluidSurfaceSubsystem::TrySolidify(UARPGElementalVolumeComponent* A,
 		return false;
 	}
 
-	const FVector2D Centre = ARPGFluidGeometry::PolygonCentroid(FrozenRing);
+	const FVector2D Centre = ARPGFluidGeometry::PolygonCentroid(SolidifiedRing);
 
 	FActorSpawnParameters Params;
 	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
@@ -521,7 +548,7 @@ bool UARPGFluidSurfaceSubsystem::TrySolidify(UARPGElementalVolumeComponent* A,
 	// stops. Set before Setup, which is what first places it.
 	Solid->FloatsOn = Surface->_getUObject();
 
-	Solid->Setup(SolidDefinition, FrozenRing, SurfaceHeight);
+	Solid->Setup(SolidDefinition, SolidifiedRing, SurfaceHeight);
 
 	// Immediately, so a plug frozen across a river is anchored on the frame it
 	// forms rather than drifting for a quarter of a second first.
@@ -532,7 +559,7 @@ bool UARPGFluidSurfaceSubsystem::TrySolidify(UARPGElementalVolumeComponent* A,
 	// The fluid is genuinely used up -- unless it is bottomless, which is the
 	// surface's own answer to give. A puddle shrinks and may be finished by this;
 	// a river takes nothing and is never finished.
-	if (Surface->ConsumeSurfaceArea(FrozenArea))
+	if (Surface->ConsumeSurfaceArea(SolidifiedArea))
 	{
 		// Only this subsystem's own bodies are its to retire. Anything else that
 		// reports itself used up owns its own lifetime.
@@ -543,7 +570,7 @@ bool UARPGFluidSurfaceSubsystem::TrySolidify(UARPGElementalVolumeComponent* A,
 	Agent->Consume(Agent->GetEnergy(), Entry->Result);
 
 	UE_LOG(LogARPGWorld, Log, TEXT("Froze %.0f square units of '%s' into '%s'."),
-		FrozenArea, *Frozen->Element->ElementTag.ToString(),
+		SolidifiedArea, *Frozen->Element->ElementTag.ToString(),
 		*SolidDefinition->GetElementTag().ToString());
 
 	return true;
@@ -561,6 +588,24 @@ void UARPGFluidSurfaceSubsystem::NoteReactionContact(UARPGElementalVolumeCompone
 			Slab->NoteContactAt(Where);
 		}
 	}
+}
+
+void UARPGFluidSurfaceSubsystem::OpenReactionLedger()
+{
+	FluidReturnedThisReaction.Reset();
+}
+
+void UARPGFluidSurfaceSubsystem::NoteFluidReturned(FGameplayTag ElementTag)
+{
+	// Whether it became a puddle or vanished into a lake. Both are the material
+	// being accounted for; only one of them is visible, and neither leaves room
+	// for the product to deposit the same fluid again.
+	FluidReturnedThisReaction.AddUnique(ElementTag);
+}
+
+bool UARPGFluidSurfaceSubsystem::WasFluidReturned(FGameplayTag ElementTag) const
+{
+	return FluidReturnedThisReaction.Contains(ElementTag);
 }
 
 void UARPGFluidSurfaceSubsystem::DropRiders(AARPGFluidPool* Pool)
@@ -607,7 +652,7 @@ void UARPGFluidSurfaceSubsystem::RetireBody(AARPGFluidBody* Body)
 	//
 	// The two ways a slab reaches nothing are not the same event. A reaction melts
 	// it, and the water for that is deposited by the reaction, at the point of
-	// contact, as it happens -- see ReturnMeltwater. Ambient melting is the other,
+	// contact, as it happens -- see ReturnMeltedFluid. Ambient melting is the other,
 	// and it is meant to return nothing at all: a floe thinning in the sun over a
 	// minute should leave dry ground, not a puddle appearing out of nowhere at the
 	// instant the last of it goes.
