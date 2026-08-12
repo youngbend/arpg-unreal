@@ -389,6 +389,33 @@ void IntersectWithHoles(const TArray<FVector2D>& A, const TArray<FVector2D>& B,
 	}
 }
 
+namespace
+{
+	/**
+	 * Scales a ring about its centroid to enclose a target area, either way.
+	 *
+	 * Area scales with the SQUARE of a uniform scale, so this is one square root
+	 * rather than an iterative solve. Uniform rather than an offset because an
+	 * offset erodes thin necks away entirely and changes the shape -- wrong when
+	 * the point is only that fluid was added or taken.
+	 */
+	TArray<FVector2D> ScaleToArea(const TArray<FVector2D>& Ring, double TargetArea)
+	{
+		const double Scale = FMath::Sqrt(TargetArea / PolygonArea(Ring));
+		const FVector2D Centre = PolygonCentroid(Ring);
+
+		TArray<FVector2D> Scaled;
+		Scaled.Reserve(Ring.Num());
+
+		for (const FVector2D& Point : Ring)
+		{
+			Scaled.Add(Centre + (Point - Centre) * Scale);
+		}
+
+		return Scaled;
+	}
+}
+
 TArray<FVector2D> ShrinkToArea(const TArray<FVector2D>& Ring, double TargetArea)
 {
 	const double Area = PolygonArea(Ring);
@@ -402,22 +429,20 @@ TArray<FVector2D> ShrinkToArea(const TArray<FVector2D>& Ring, double TargetArea)
 		return TArray<FVector2D>();
 	}
 
-	// Area scales with the SQUARE of a uniform scale, so this is one square root
-	// rather than an iterative solve. Uniform rather than an inward offset
-	// because an offset erodes thin necks away entirely and changes the shape --
-	// wrong when the point is only that some of the fluid was consumed.
-	const double Scale = FMath::Sqrt(TargetArea / Area);
-	const FVector2D Centre = PolygonCentroid(Ring);
+	return ScaleToArea(Ring, TargetArea);
+}
 
-	TArray<FVector2D> Scaled;
-	Scaled.Reserve(Ring.Num());
+TArray<FVector2D> GrowToArea(const TArray<FVector2D>& Ring, double TargetArea)
+{
+	const double Area = PolygonArea(Ring);
 
-	for (const FVector2D& Point : Ring)
+	// Refuses to shrink, so the pair keep one-way contracts.
+	if (Area <= 0.0 || TargetArea <= Area)
 	{
-		Scaled.Add(Centre + (Point - Centre) * Scale);
+		return Ring;
 	}
 
-	return Scaled;
+	return ScaleToArea(Ring, TargetArea);
 }
 
 // ---------------------------------------------------------------------------

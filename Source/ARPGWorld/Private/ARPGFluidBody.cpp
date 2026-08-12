@@ -308,6 +308,28 @@ bool AARPGFluidPool::ConsumeSurfaceArea(double Area)
 	return Super::ConsumeSurfaceArea(Area);
 }
 
+bool AARPGFluidPool::AbsorbSurfaceVolume(double InVolume)
+{
+	if (InVolume <= 0.0 || !Definition || Ring.Num() < 3)
+	{
+		return false;
+	}
+
+	// A POOL BIG ENOUGH TO BE A RESERVOIR TAKES IT AND SHOWS NOTHING, the mirror
+	// of refusing to be depleted. A lake gaining a visible ring of shoreline
+	// because a floe melted on it is the same wrongness as one shrinking because
+	// a fireball hit it.
+	if (Volume->bReservoir)
+	{
+		return true;
+	}
+
+	SetRing(ARPGFluidGeometry::GrowToArea(Ring,
+		ARPGFluidGeometry::PolygonArea(Ring) + InVolume / FMath::Max(1.f, Definition->Depth)));
+
+	return true;
+}
+
 float AARPGFluidPool::GetSurfaceEnergyDensity() const
 {
 	return Definition ? Definition->EnergyPerArea : 0.f;
@@ -660,7 +682,11 @@ void AARPGFluidSolid::Tick(float DeltaTime)
 
 	// Server only. The draft replicates as a result and the outline carries the
 	// drift, so a client that simulated its own would be fighting both.
-	if (!HasAuthority() || !Definition || !FloatsOn || Field.IcedCellCount() == 0)
+	// IsValid rather than a null check on FloatsOn: an actor destroyed this frame
+	// is not garbage collected until later, so the interface still points at it
+	// and every query below would run against a dead pool.
+	if (!HasAuthority() || !Definition || !IsValid(FloatsOn.GetObject())
+		|| Field.IcedCellCount() == 0)
 	{
 		return;
 	}
@@ -797,9 +823,13 @@ bool AARPGFluidSolid::ConsumeSurfaceArea(double Area)
 	// hit at the edge cuts the slab away at an angle and one in the middle opens a
 	// hole through it. Without a contact -- anything that spent this slab without
 	// touching a point on it -- fall back to thinning the whole thing.
+	double Melted = 0.0;
+	FVector2D MeltedAt = Field.IcedCentroid();
+
 	if (bHasPendingContact)
 	{
 		bHasPendingContact = false;
+		MeltedAt = PendingContact;
 
 		// A bowl of this radius and depth removes about half a cylinder's volume,
 		// so the depth that spends the given plan-area of ice is twice as deep as
@@ -808,14 +838,74 @@ bool AARPGFluidSolid::ConsumeSurfaceArea(double Area)
 		const float Depth = static_cast<float>(2.0 * Area / (PI * Radius * Radius))
 			* Definition->Thickness;
 
-		MeltAt(PendingContact, Radius, Depth);
+		Melted = MeltAt(PendingContact, Radius, Depth);
 	}
 	else
 	{
-		MeltUniformly(static_cast<float>(Area / Plan), 0.f);
+		Melted = MeltUniformly(static_cast<float>(Area / Plan), 0.f);
 	}
 
+	// THE ONLY WAY A SOLID GIVES ITS FLUID BACK. Ambient melting deliberately
+	// returns nothing -- a floe left alone in the sun thins away and the world is
+	// no wetter for it, because a puddle for every floe that ever existed is
+	// bookkeeping nobody asked to see. A reaction is the opposite case: a fireball
+	// through ice is a thing the player did, at a place they can see, and the
+	// water it leaves is the visible result of it.
+	ReturnMeltwater(Melted, MeltedAt);
+
 	return Field.IcedCellCount() == 0 || Field.IcedArea() < GetMinimumArea();
+}
+
+void AARPGFluidSolid::ReturnMeltwater(double MeltedVolume, const FVector2D& At)
+{
+	// Null MeltsInto is correct for obsidian: rock that formed on lava is not
+	// frozen lava, and breaking it releases nothing.
+	if (MeltedVolume <= 0.0 || !Definition || !Definition->MeltsInto)
+	{
+		return;
+	}
+
+	UARPGFluidDefinition* Fluid = Definition->MeltsInto;
+
+	// MASS IS WHAT IS CONSERVED, not volume. Ice is lighter than the water it came
+	// from, so a cubic metre of it does not melt into a cubic metre -- it melts
+	// into the volume of water that weighs the same. The same two densities that
+	// decide whether the slab floats decide how much water it is worth, which is
+	// the point of them being densities rather than a float called Buoyancy.
+	const double FluidVolume = MeltedVolume
+		* Definition->Density / FMath::Max(KINDA_SMALL_NUMBER, Fluid->Density);
+
+	// BACK INTO WHATEVER IT IS FLOATING ON, first, and the floe never learns which
+	// kind of thing that is: a lake takes it and nothing appears, a puddle takes it
+	// by growing its outline. Only a slab that has been left on dry land -- its
+	// pool evaporated out from under it -- falls through to making a body of its
+	// own.
+	//
+	// IsValid rather than a null check: a pool destroyed this frame has not been
+	// garbage collected yet, so the interface still points at it.
+	IARPGElementalSurface* Riding = IsValid(FloatsOn.GetObject()) ? FloatsOn.GetInterface() : nullptr;
+
+	if (Riding && Riding->IsSurfaceAt(At) && Riding->AbsorbSurfaceVolume(FluidVolume))
+	{
+		return;
+	}
+
+	UARPGFluidSurfaceSubsystem* Fluids =
+		GetWorld() ? GetWorld()->GetSubsystem<UARPGFluidSurfaceSubsystem>() : nullptr;
+
+	if (!Fluids)
+	{
+		return;
+	}
+
+	// THE BED, not the waterline. GroundHeight on a solid tracks the surface it
+	// rides, which is where the ice is -- but water lies on the bottom. For a floe
+	// melting on a puddle those are centimetres apart and either would do; for one
+	// melting on dry land after its pool evaporated, the bed is the only answer
+	// that is not in the air.
+	const float Bed = Riding ? Riding->GetSurfaceBedAt(At) : GroundHeight;
+
+	Fluids->ReturnFluid(At, Bed, FluidVolume, Fluid);
 }
 
 bool AARPGFluidSolid::IsStandableAt(FVector WorldPoint) const

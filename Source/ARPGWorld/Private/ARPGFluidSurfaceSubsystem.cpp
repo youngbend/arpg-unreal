@@ -203,6 +203,42 @@ AARPGFluidPool* UARPGFluidSurfaceSubsystem::Deposit(FVector WorldPosition, float
 	return DepositRing(Footprint, WorldPosition.Z, Definition);
 }
 
+AARPGFluidPool* UARPGFluidSurfaceSubsystem::ReturnFluid(FVector2D Where, float GroundHeight,
+	double Volume, UARPGFluidDefinition* Definition)
+{
+	if (Volume <= 0.0 || !Definition)
+	{
+		return nullptr;
+	}
+
+	// INTO A BODY THAT IS ALREADY THERE, by growing it rather than by depositing a
+	// disc on top of it.
+	//
+	// THIS IS THE CASE THAT LOOKS FINE AND LOSES THE WATER. Fluid returns where it
+	// left, so the disc almost always lands INSIDE the pool it is joining -- and a
+	// disc unioned with an outline that already contains it is that same outline.
+	// Merging would have conserved nothing, silently, in the common case.
+	for (AARPGFluidPool* Pool : Pools)
+	{
+		if (IsValid(Pool) && Pool->Definition == Definition
+			&& Pool->ContainsPoint(FVector(Where.X, Where.Y, GroundHeight)))
+		{
+			Pool->AbsorbSurfaceVolume(Volume);
+			return Pool;
+		}
+	}
+
+	// Nowhere to put it but the ground. VOLUME BECOMES AREA THROUGH DEPTH, and
+	// this is the only place in the system that does it: a puddle has no third
+	// dimension of its own -- pour more in and it gets wider, not deeper -- so the
+	// fluid's Depth is exactly the exchange rate between how much of it there is
+	// and how much ground it covers.
+	const double Area = Volume / FMath::Max(1.f, Definition->Depth);
+	const double Radius = FMath::Sqrt(Area / PI);
+
+	return DepositRing(ARPGFluidGeometry::MakeCircle(Where, Radius), GroundHeight, Definition);
+}
+
 AARPGFluidPool* UARPGFluidSurfaceSubsystem::DepositSwept(FVector From, FVector To, float Radius,
 	FGameplayTag ElementTag)
 {
@@ -567,23 +603,19 @@ void UARPGFluidSurfaceSubsystem::RetireBody(AARPGFluidBody* Body)
 		return;
 	}
 
-	// A SOLID RETURNS ITS WATER, rather than the fluid simply vanishing when a
-	// floe goes. Right here rather than only in the melt tick, because a floe now
-	// has two ways to reach nothing -- eroding away over time, and a fire spell
-	// taking the last of it -- and only one of them used to put the water back.
+	// A SOLID RETURNS NOTHING WHEN IT GOES, and this used to be where it did.
 	//
-	// Null MeltsInto is correct for obsidian, which is permanent rock rather than
-	// frozen lava.
-	if (Solid->Definition && Solid->Definition->MeltsInto)
-	{
-		const FVector2D Centre = Solid->Field.IcedCentroid();
-		const double Radius = FMath::Sqrt(
-			FMath::Max(1.0, Solid->Field.IcedArea()) / PI);
-
-		DepositRing(ARPGFluidGeometry::MakeCircle(Centre, Radius),
-			Solid->GroundHeight, Solid->Definition->MeltsInto);
-	}
-
+	// The two ways a slab reaches nothing are not the same event. A reaction melts
+	// it, and the water for that is deposited by the reaction, at the point of
+	// contact, as it happens -- see ReturnMeltwater. Ambient melting is the other,
+	// and it is meant to return nothing at all: a floe thinning in the sun over a
+	// minute should leave dry ground, not a puddle appearing out of nowhere at the
+	// instant the last of it goes.
+	//
+	// Depositing here could not tell those apart, and got both wrong: it fired for
+	// the ambient case that wanted nothing, and for the reaction case it offered a
+	// second helping sized by whatever sliver was left -- which, being under
+	// MinimumArea by definition, was refused anyway.
 	ActiveSolids.Remove(Solid);
 	Solid->Destroy();
 }

@@ -637,13 +637,189 @@ bool FARPGFluidMeltTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Fire meeting ice melts some of it"), Floe->GetArea() < BeforeArea);
 	TestSamePtr(TEXT("Producing water"), Reactions->GetLastProduct(), Water);
 
-	// The rest of it. A floe that reaches nothing RETURNS ITS WATER rather than
-	// the fluid simply vanishing -- which the melt tick already did, and which the
-	// reaction path had no way of doing until retirement moved into one place.
+	// AT THE REACTION, not at the end. Melting is the one thing that gives a
+	// slab's fluid back, and it gives it back as it happens -- the water is the
+	// visible result of the shot, so it appears when the shot lands rather than
+	// materialising later when the last sliver of ice happens to go.
+	TestEqual(TEXT("Which is water on the ground, immediately"), Fluids->GetPools().Num(), 1);
+
+	const double AfterFirst = Fluids->GetPools()[0]->GetArea();
+
+	// The rest of it, melted the same way. The puddle grows; a second one is not
+	// invented next to the first.
 	Floe->Volume->Consume(Floe->Volume->GetEnergy(), Water);
 
 	TestEqual(TEXT("Melted through, the floe is gone"), Fluids->GetSolids().Num(), 0);
-	TestEqual(TEXT("And left water behind it"), Fluids->GetPools().Num(), 1);
+	TestEqual(TEXT("And the water it left is one body"), Fluids->GetPools().Num(), 1);
+	TestTrue(TEXT("Which grew as the rest of the ice went"),
+		Fluids->GetPools()[0]->GetArea() > AfterFirst);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFluidAmbientMeltTest,
+	"ARPG.World.Fluid.Ice.MeltingInTheSunLeavesNothingBehind",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGFluidAmbientMeltTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+	UARPGMagicElement* Ice = MakeElement(GetTransientPackage(), TAG_Element_Ice);
+
+	UARPGFluidDefinition* WaterDefinition = MakeWater(GetTransientPackage(), Water);
+	WaterDefinition->MinimumArea = 100.f;
+	WaterDefinition->EvaporationRate = 0.f;   // so the pool's area means something
+
+	UARPGSolidDefinition* IceDefinition = MakeIce(Ice);
+	IceDefinition->MeltsInto = WaterDefinition;
+	IceDefinition->MeltRate = 20.f;   // gone in a few ticks
+
+	Fluids->Definitions = { WaterDefinition };
+	Fluids->Solids = { IceDefinition };
+	Fluids->CombinationTable = MakeFreezeTable(Ice);
+
+	// ON A POOL, deliberately. A floe melting over a lake would leave no puddle
+	// whatever the rule was, because a lake absorbs -- so it cannot tell the two
+	// behaviours apart. A pool is where returned water WOULD show, as a body that
+	// grew or a second one beside it, which is what makes the assertion mean
+	// something. Frozen through TrySolidify so the weather tick reaches it.
+	AARPGFluidPool* Pool = Fluids->Deposit(FVector(0, 0, 0), 500.f, TAG_Element_Water);
+	UARPGElementalVolumeComponent* Shard = MakeShard(Scope.World, Ice, FVector(0, 0, 0), 200.f);
+
+	if (!Fluids->TrySolidify(Pool->Volume, Shard) || Fluids->GetSolids().Num() != 1)
+	{
+		AddError(TEXT("Setup: nothing froze."));
+		return false;
+	}
+
+	const double PoolBefore = Pool->GetArea();
+
+	// AMBIENT MELTING RETURNS NOTHING, and that is a decision rather than an
+	// omission. A floe thinning in the sun over a minute, then a puddle appearing
+	// at the instant its last sliver goes, is water arriving out of nowhere -- and
+	// it would make every slab the world ever froze into a puddle it has to keep
+	// forever. Fire is the case that leaves water, because someone did it and was
+	// looking when it happened.
+	for (int32 Tick = 0; Tick < 12 && Fluids->GetSolids().Num() > 0; ++Tick)
+	{
+		Fluids->StepSimulation(0.25f);
+	}
+
+	TestEqual(TEXT("The floe melted away"), Fluids->GetSolids().Num(), 0);
+	TestEqual(TEXT("Leaving the one pool that was already there"),
+		Fluids->GetPools().Num(), 1);
+	TestEqual(TEXT("Which is no bigger for having had ice on it"),
+		Pool->GetArea(), PoolBefore, 1.0);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFluidAbsorbTest,
+	"ARPG.World.Fluid.Pools.WaterReturnedToTheMiddleOfAPuddleIsNotLost",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGFluidAbsorbTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+	UARPGFluidDefinition* WaterDefinition = MakeWater(GetTransientPackage(), Water);
+	WaterDefinition->EvaporationRate = 0.f;
+	WaterDefinition->Depth = 20.f;
+
+	Fluids->Definitions = { WaterDefinition };
+
+	AARPGFluidPool* Pool = Fluids->Deposit(FVector(0, 0, 0), 400.f, TAG_Element_Water);
+	const double Before = Pool->GetArea();
+
+	// THE TRAP THIS EXISTS FOR. Returning fluid by depositing a disc is the obvious
+	// implementation and it silently conserves nothing: fluid comes back where it
+	// left, so the disc lands INSIDE the outline it is joining, and a union with a
+	// polygon that already contains you is that polygon. The volume has nowhere to
+	// go but the ring, so the ring is what grows.
+	const double Volume = 200000.0;   // 10,000 square cm at 20cm deep
+
+	TestSamePtr(TEXT("Water returned inside a pool goes into that pool"),
+		Fluids->ReturnFluid(FVector2D::ZeroVector, 0.f, Volume, WaterDefinition), Pool);
+
+	TestEqual(TEXT("And the pool grew by exactly what it was given"),
+		Pool->GetArea(), Before + Volume / WaterDefinition->Depth, 200.0);
+
+	// Beyond it, there is nothing to grow, so a body of the right size is made.
+	AARPGFluidPool* Elsewhere =
+		Fluids->ReturnFluid(FVector2D(50000, 0), 0.f, Volume, WaterDefinition);
+
+	TestNotNull(TEXT("Water returned to bare ground makes a puddle"), Elsewhere);
+	if (Elsewhere)
+	{
+		TestTrue(TEXT("A separate one"), Elsewhere != Pool);
+
+		// Within a few percent rather than exactly: the ring is a sixteen-sided
+		// polygon inscribed in the circle the area was solved for, so it comes out
+		// about 2.6% under. That is the discretisation and not a loss of water.
+		const double Expected = Volume / WaterDefinition->Depth;
+		TestTrue(TEXT("Holding what it was given"),
+			Elsewhere->GetArea() > Expected * 0.95 && Elsewhere->GetArea() <= Expected);
+	}
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFluidReservoirMeltTest,
+	"ARPG.World.Fluid.Reservoir.MeltingAFloeOnALakeJustJoinsTheLake",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGFluidReservoirMeltTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+	UARPGMagicElement* Ice = MakeElement(GetTransientPackage(), TAG_Element_Ice);
+
+	UARPGFluidDefinition* WaterDefinition = MakeWater(GetTransientPackage(), Water);
+	WaterDefinition->MinimumArea = 100.f;
+
+	UARPGSolidDefinition* IceDefinition = MakeIce(Ice);
+	IceDefinition->MeltsInto = WaterDefinition;
+
+	Fluids->Definitions = { WaterDefinition };
+	Fluids->Solids = { IceDefinition };
+	Fluids->CombinationTable = MakeFreezeTable(Ice);
+
+	UARPGReservoirVolumeComponent* Lake =
+		MakeRiver(Scope.World, Water, FVector(0, 0, 0), FVector(2000, 2000, 350));
+
+	UARPGElementalVolumeComponent* Shard = MakeShard(Scope.World, Ice, FVector(0, 0, 0), 200.f);
+	if (!Fluids->TrySolidify(Lake, Shard) || Fluids->GetSolids().Num() != 1)
+	{
+		AddError(TEXT("Setup: nothing froze."));
+		return false;
+	}
+
+	AARPGFluidSolid* Floe = Fluids->GetSolids()[0];
+	TestEqual(TEXT("Freezing a lake invents no pool"), Fluids->GetPools().Num(), 0);
+
+	// A LAKE TAKES ITS WATER BACK AND NOTHING APPEARS. The obvious implementation
+	// -- deposit wherever the ice was -- would put a puddle mesh coplanar with the
+	// lake surface, z-fighting with it, in the one place a puddle is least needed.
+	// A body that is bottomless when you take from it is bottomless when you give
+	// back, and the floe never learns which kind of thing it is riding.
+	Floe->NoteContactAt(FVector2D::ZeroVector);
+	Floe->ConsumeSurfaceArea(Floe->GetArea() * 0.5);
+
+	TestEqual(TEXT("Melting it into the lake makes no puddle on the lake"),
+		Fluids->GetPools().Num(), 0);
 
 	return true;
 }

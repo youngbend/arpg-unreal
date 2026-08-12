@@ -1258,6 +1258,56 @@ which hand-sweeps a grid and compares it against the cache after every kind of
 write, because a cache that agrees with its source only when freshly built is
 the failure worth testing for.
 
+**A SEVENTH CORRECTION: a melting slab put its fluid nowhere.** Both melt paths
+computed the volume they had removed and both callers threw the return value
+away, so a floe's entire mass simply left the world. The only thing that ever
+put water back was a one-shot deposit at retirement, sized by whatever sliver of
+ice was left -- which, being under `MinimumArea` by definition, the deposit path
+refused anyway.
+
+- **MELTING IS NOT ONE EVENT, and that is the whole of the fix.** Ambient melting
+  returns NOTHING, deliberately: a floe thinning in the sun over a minute, then a
+  puddle appearing at the instant its last sliver goes, is water arriving out of
+  nowhere -- and it would turn every slab the world ever froze into a puddle it
+  has to keep. A reaction is the opposite case. Fire through ice is a thing the
+  player did, somewhere they were looking, and the water is the visible result of
+  it, so the reaction path deposits as it melts rather than at the end.
+- **The deposit at retirement is gone**, because it could not tell those two
+  apart and got both wrong.
+- **Mass is what is conserved, not volume.** Ice is lighter than the water it came
+  from, so a cubic metre of it melts into the volume of water that WEIGHS the
+  same. The same two densities that decide whether the slab floats decide how
+  much water it is worth -- which is what they are for, and is why nothing here
+  names ice or water.
+- **A LAKE TAKES IT BACK AND NOTHING APPEARS.** The floe hands the water to the
+  surface it is riding and never learns which kind of thing that is:
+  `AbsorbSurfaceVolume` on a reservoir is bottomless in the giving direction
+  exactly as `ConsumeSurfaceArea` is in the taking direction. The obvious
+  implementation -- deposit wherever the ice was -- would have put a puddle mesh
+  coplanar with the lake surface, z-fighting with it, in the one place on the map
+  a puddle is least wanted.
+- **AND THE TRAP THAT LOOKS FINE AND CONSERVES NOTHING.** Returning fluid by
+  merging a disc in is silently a no-op in the common case: fluid comes back
+  where it left, so the disc lands INSIDE the outline it is joining, and a union
+  with a polygon that already contains you is that polygon. A puddle has no
+  volume of its own to accumulate into, so the volume has nowhere to go but the
+  ring -- `GrowToArea`, which is `ShrinkToArea` run backwards, and the two now
+  share a solver and keep one-way contracts so a caller cannot quietly get the
+  opposite of what it asked for.
+- **A slab left on dry land is the remaining case**, and the only one that makes
+  a body of its own: its pool evaporated out from under it, there is nothing to
+  absorb into, and fire melting it should leave a puddle. It does.
+
+Also fixed while tracing it: a floe's `FloatsOn` was null-checked rather than
+IsValid-checked, so a pool destroyed earlier in the same frame -- not yet
+collected, so the interface still pointed at it -- would have been queried for a
+waterline, a density and a bed on the buoyancy tick.
+
+4 new cases under `ARPG.World.Fluid.Ice`, `.Pools` and `.Reservoir`. The ambient
+one asserts against a POOL rather than a lake on purpose: a lake absorbs whatever
+the rule is, so it cannot tell the two behaviours apart, while a pool is where
+returned water would show as a body that grew.
+
 **Phase 11 -- code complete. Not in the original ten: this is the layer that
 makes the other ten reachable from a controller.** The modal control scheme, the
 speed tiers, the buffering, and auto-sheathe. 13 new cases; 99 pass in total.

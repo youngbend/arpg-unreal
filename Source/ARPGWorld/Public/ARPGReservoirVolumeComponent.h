@@ -47,6 +47,16 @@ public:
 	virtual TArray<FVector2D> GetSurfaceFootprint(const FVector2D& Centre, double Radius) const override;
 	virtual float GetSurfaceLevelAt(const FVector2D& At) const override;
 	virtual bool ConsumeSurfaceArea(double Area) override;
+
+	/**
+	 * YES, AND NOTHING VISIBLE HAPPENS. A lake that is bottomless when you take
+	 * from it is bottomless when you give back: the water joins it and there is
+	 * no outline to grow. Answering false here is what would put a puddle mesh
+	 * coplanar with the lake surface, which is the artefact this exists to
+	 * prevent.
+	 */
+	virtual bool AbsorbSurfaceVolume(double Volume) override { return true; }
+
 	virtual float GetSurfaceEnergyDensity() const override { return 0.f; }
 	virtual bool IsSurfaceAt(const FVector2D& At) const override { return IsWaterAt(At); }
 	virtual FVector2D GetSurfaceFlowAt(const FVector2D& At) const override { return FlowVelocity; }

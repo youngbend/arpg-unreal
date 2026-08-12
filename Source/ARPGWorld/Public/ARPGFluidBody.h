@@ -45,6 +45,10 @@ public:
 	virtual TArray<FVector2D> GetSurfaceFootprint(const FVector2D& Centre, double Radius) const override;
 	virtual float GetSurfaceLevelAt(const FVector2D& At) const override;
 	virtual bool ConsumeSurfaceArea(double Area) override;
+
+	/** NO by default -- a slab of ice is not something you can pour water into. */
+	virtual bool AbsorbSurfaceVolume(double InVolume) override { return false; }
+
 	virtual float GetSurfaceEnergyDensity() const override { return 0.f; }
 	virtual bool IsSurfaceAt(const FVector2D& At) const override;
 	virtual FVector2D GetSurfaceFlowAt(const FVector2D& At) const override { return FVector2D::ZeroVector; }
@@ -218,6 +222,17 @@ public:
 
 	/** A lake is bottomless, so freezing and boiling both take nothing from it. */
 	virtual bool ConsumeSurfaceArea(double Area) override;
+
+	/**
+	 * YES -- the outline grows to hold it. Consumption run backwards.
+	 *
+	 * NOT A MERGED CIRCLE, which is the version that looks right and silently
+	 * loses the water: a circle landing inside an outline unions to that same
+	 * outline, so meltwater returned to the middle of a puddle would vanish. The
+	 * volume has nowhere to go but the ring.
+	 */
+	virtual bool AbsorbSurfaceVolume(double InVolume) override;
+
 	virtual float GetSurfaceEnergyDensity() const override;
 	virtual float GetSurfaceDensity() const override;
 
@@ -328,6 +343,19 @@ public:
 	/** Thins the slab from both faces at once. Ambient warmth, and holes widen free. */
 	UFUNCTION(BlueprintCallable, Category = "ARPG|Fluid")
 	double MeltUniformly(float FromTop, float FromBottom);
+
+	/**
+	 * Puts a melted volume of this slab back into the world as fluid.
+	 *
+	 * REACTIONS ONLY. Ambient melting calls MeltUniformly directly and discards
+	 * what it removed, on purpose: a floe thinning in the sun should leave the
+	 * world no wetter than it found it. Fire through ice is the case that leaves
+	 * water, because it happened somewhere the player was looking.
+	 *
+	 * @param MeltedVolume cubic cm of SLAB. Converted by the two densities.
+	 * @param At world XY where it melted, so the water appears at the hole.
+	 */
+	void ReturnMeltwater(double MeltedVolume, const FVector2D& At);
 
 	/**
 	 * Where the last reaction touched this slab, in world XY.

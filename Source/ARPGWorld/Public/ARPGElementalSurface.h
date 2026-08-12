@@ -69,6 +69,22 @@ public:
 	virtual bool ConsumeSurfaceArea(double Area) = 0;
 
 	/**
+	 * Takes a volume of fluid back INTO the body, and says whether it did.
+	 *
+	 * FALSE IS THE ORDINARY ANSWER AND NOT A FAILURE. A puddle would rather the
+	 * water were deposited where it appeared, so the outline grows at the point
+	 * the ice actually melted rather than uniformly somewhere else -- and the
+	 * deposit path already merges, so saying no here gets a better result than
+	 * saying yes. What answers true is a body with no outline to grow: a
+	 * reservoir is bottomless in both directions, and water returned to a lake
+	 * joins the lake rather than making a puddle on top of it.
+	 *
+	 * @param Volume in cubic cm of THIS body's fluid, already converted from
+	 *        whatever was carrying it.
+	 */
+	virtual bool AbsorbSurfaceVolume(double Volume) = 0;
+
+	/**
 	 * Energy per unit of area, so a reaction's spend converts into ground lost.
 	 *
 	 * Zero means a reaction never eats this: it is the same statement as

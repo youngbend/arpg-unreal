@@ -150,6 +150,20 @@ public:
 		meta = (ClampMin = "0.0"))
 	float MaxDepositDrop = 1000.f;
 
+	/**
+	 * Puts a VOLUME of fluid back into the world, as opposed to wetting a radius.
+	 *
+	 * What melting a solid returns. The caller has a volume of stuff and no
+	 * opinion about how wide the puddle should be, which is the fluid's own
+	 * business: how far a given volume spreads is its Depth, and that is the only
+	 * place in the system that turns one into the other.
+	 *
+	 * @return the body it ended up in, or null if it was too little to be one.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "ARPG|Fluid")
+	AARPGFluidPool* ReturnFluid(FVector2D Where, float GroundHeight, double Volume,
+		UARPGFluidDefinition* Definition);
+
 	// --- Solidifying ----------------------------------------------------------
 
 	/**

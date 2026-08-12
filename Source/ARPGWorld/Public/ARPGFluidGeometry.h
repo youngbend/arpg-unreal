@@ -118,6 +118,20 @@ namespace ARPGFluidGeometry
 	ARPGWORLD_API TArray<FVector2D> ShrinkToArea(const TArray<FVector2D>& Ring, double TargetArea);
 
 	/**
+	 * The same scale outward, for fluid ADDED to a body rather than taken from it.
+	 *
+	 * WHY NOT JUST MERGE A CIRCLE IN. Because a puddle is a polygon with no volume
+	 * of its own, and a circle that lands inside the outline unions to exactly the
+	 * outline it landed in -- so water poured into the middle of a puddle would
+	 * vanish. Growing the whole ring is the only way the volume survives, and it
+	 * is the same arithmetic as consumption run backwards.
+	 *
+	 * Refuses to shrink, so the pair keep one-way contracts and a caller cannot
+	 * quietly get the opposite of what it asked for.
+	 */
+	ARPGWORLD_API TArray<FVector2D> GrowToArea(const TArray<FVector2D>& Ring, double TargetArea);
+
+	/**
 	 * The fifth call: turns an outline into something you can SEE.
 	 *
 	 * A slab -- a triangulated cap at TopZ, another at BottomZ, and walls joining
