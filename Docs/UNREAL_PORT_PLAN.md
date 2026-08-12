@@ -1063,7 +1063,7 @@ elemental collisions simply did not happen in game.
   volume component's default projectile reaction, which scales the actor by the
   cube root of what is left and destroys it outright at zero -- so a reacting
   pool had its mesh, trigger box and outline disagreeing within a frame, and
-  could destroy itself behind the subsystem's back. `AARPGFluidBody` implements
+  could destroy itself behind the subsystem's back. `AARPGSurfaceBody` implements
   `IARPGElementalReactive`, and retirement moved into one `RetireBody` that both
   the melt tick and the reaction path go through -- which is also how a floe
   melted by fire returns its water, something only the tick used to do.
@@ -1077,7 +1077,7 @@ reaction can take, and both callers were asking the same three questions.
 **A FIFTH CORRECTION: a puddle did not conduct.** The conduction subsystem is
 sound and four cases prove the chain -- but every one of them sets
 `Conductivity` on its volumes by hand, and nothing ever set it on a deposited
-pool. The volume's own default is 0, `AARPGFluidBody` never touched it, and
+pool. The volume's own default is 0, `AARPGSurfaceBody` never touched it, and
 `UARPGFluidDefinition` had no field for it, so there was no authoring surface
 either. The conduction filter drops any neighbour at 0, so a chain of real
 puddles fell out of its own graph. That is the phase 6 gate -- *lightning floods
@@ -1350,6 +1350,67 @@ as the worked example. `Melt*` stays: melting is what happens to any solid, and
 walks the world for the spawned product and asserts its deposit radius is zero --
 the double deposit is invisible from the pool count alone, since both deposits
 merge into one body.
+
+**A SLAB STOPPED BEING SOMETHING A FLUID BECAME.** Everything above is about ice
+on water, and freezing was the only way to make a slab at all -- `ActiveSolids`
+had exactly one writer. Earth raises a wall out of the ground: the same object,
+for a completely different reason, and the last place the fluid system's
+assumptions were still baked into the general one.
+
+- **The types moved out of the fluid headers.** `AARPGFluidSolid` is
+  `AARPGSolidBody` in `ARPGSolidBody.h`, the shared base is `AARPGSurfaceBody` in
+  `ARPGSurfaceBody.h` -- it always was "anything that IS an outline lying on the
+  ground" rather than anything fluid -- and `UARPGSolidDefinition` has its own
+  header instead of riding along in the fluid one. A pillar of earth that was
+  never a liquid should not be described by a file named for fluids.
+- **ROOTED IS THE ABSENCE OF SOMETHING**, not a new mode. A slab with no
+  `FloatsOn` has nothing to settle against, so the buoyancy tick stops before it
+  starts -- and that same null was already the guard for a floe whose pool had
+  just gone. One branch, two right answers.
+- **`Draft` already meant "how far under its resting height this is sitting"**,
+  so burying a slab to its own thickness and letting the number come back to zero
+  IS the rise, with no animation track and no second concept. It snaps home
+  rather than approaching forever, because FInterpTo is asymptotic and a slab a
+  fraction of a millimetre short would tick, move and dirty its replicated draft
+  for the rest of the level's life.
+- **`IsPermanent` is `MeltRate == 0` read back** -- the same zero the weather tick
+  already skips on. It now also exempts a body from the budget, because that
+  economy is for litter: puddles left crossing a field, floes that were going to
+  melt anyway. A wall someone raised for cover vanishing mid-fight because the
+  level accumulated puddles elsewhere is the worst thing it could do.
+- **`RegisterSolid` closes the hole that made all of this possible to get wrong.**
+  An unregistered slab still draws, collides and reacts, so it looks like it
+  works -- but `IsCoveredBySolid` never sees it, and a bolt striking the water it
+  stands in conducts as though the wall were not there.
+- **`FindSolidNear` measures to the SLAB, not to its origin**, via the field's own
+  `SupportDistance`. A wall is long and a caster at one end of one is not far from
+  it; the actor's location is its centroid, which would say they were.
+
+**Earth is authored, and it is the first element whose discharge types are
+different spells.** Fire is a fireball, a cone and a nova -- one idea aimed three
+ways. Earth throws a rock, raises a pillar and raises a ring, and only the first
+is a projectile. That took no new dispatch: `DischargeEffects` is a map keyed by
+discharge type and authoring three entries is authoring three spells.
+
+- **Two solid definitions for one element**, because Burst and Emanate want
+  opposite shapes: a thick pillar at 40cm cells, and a wide low ring at 60cm --
+  cell count goes with AREA, and an emanation is metres across in every
+  direction.
+- **`MeltRate` 0 and `EnergyPerArea` high** is the pair that makes it cover worth
+  having. Time cannot take it; a sustained assault can. Cover that cannot be
+  broken is a wall the encounter is now behind.
+- **Denser than any fluid here**, so a slab raised in water rests on the bed
+  rather than bobbing -- one comparison in the same Archimedes the floes use,
+  reached without anything knowing it is rock.
+- **Project reads the world rather than the input.** `AARPGLaunchSlabProjectile`
+  looks a short way ahead for a slab of its own element and throws it instead of
+  conjuring a boulder, sized from the volume of rock that actually went. In the
+  effect and not the ability, because Project is one ability shared by every
+  element and only earth cares. Short reach on purpose: the point is "throw the
+  wall you just raised", not "the spell hunts for ammunition", and a caster whose
+  cover is thrown away from across the room has been robbed by their own spell.
+
+4 new cases under `ARPG.World.Fluid.Slabs`.
 
 **Phase 11 -- code complete. Not in the original ten: this is the layer that
 makes the other ten reachable from a controller.** The modal control scheme, the

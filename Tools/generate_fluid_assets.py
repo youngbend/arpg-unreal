@@ -28,6 +28,7 @@ import unreal
 FLUID_DIR = "/Game/ARPG/Fluids"
 MATERIAL_DIR = "/Game/ARPG/Fluids/Materials"
 ELEMENT_DIR = "/Game/ARPG/Magic/Elements"
+EFFECT_DIR = "/Game/ARPG/Magic/Effects"
 
 asset_tools = unreal.AssetToolsHelpers.get_asset_tools()
 
@@ -121,6 +122,17 @@ SURFACES = [
         "opacity_facing": 0.75,
         "opacity_grazing": 1.0,
         "fresnel_exponent": 3.0,
+    },
+    {
+        "name": "M_ARPG_Earth_Placeholder",
+        "colour": (0.30, 0.22, 0.14),
+        "roughness": 0.9,
+        # FULLY OPAQUE both ways. Every other surface here is a fluid or a pane
+        # of one and reads correctly as translucent; a wall of earth that you can
+        # see through is not cover, and cover is the entire point of it.
+        "opacity_facing": 1.0,
+        "opacity_grazing": 1.0,
+        "fresnel_exponent": 1.0,
     },
 ]
 
@@ -263,8 +275,182 @@ SOLIDS = [
         "drift_response": 0.6,
         "surface": "M_ARPG_Ice_Placeholder",
     },
+
+    # --- Earth ---------------------------------------------------------------
+    #
+    # NOT FROZEN OUT OF ANYTHING, which is what these two exist to demonstrate.
+    # Every other solid here is what a fluid became; earth is raised out of the
+    # ground by a spell and was never a liquid. The definition does not care --
+    # it describes what a slab IS, not where it came from -- and that is the
+    # whole reason the slab model was taken off ice.
+    #
+    # Two of them for one element, because the two discharge types want opposite
+    # shapes: Burst throws up a thick pillar to hide behind, Emanate raises a
+    # long low wall. Same element, same material, two bodies.
+    {
+        "name": "DA_Solid_EarthSlab", "element": "Earth",
+        # Chest height on a 180cm character: cover you crouch behind, and a step
+        # you can climb rather than a cliff.
+        "thickness": 120.0,
+        "standable": True,
+
+        # PERMANENT. Zero is the documented obsidian answer -- the weather tick
+        # skips such a slab entirely -- and it is also what keeps the body budget
+        # from culling a wall the player raised on purpose. See IsPermanent.
+        "melt_rate": 0.0,
+        # And nothing to give back. Earth is not frozen water.
+        "melts_into": None,
+
+        "minimum_area": 2500.0,
+
+        # DESTRUCTIBLE, THOUGH, and this is the interesting number. MeltRate says
+        # time cannot take it; EnergyPerArea says whether a SPELL can. Ten times
+        # ice, so a fireball chips a pillar rather than opening a hole in it, but
+        # a sustained assault still brings it down -- cover that can be broken is
+        # a fight, cover that cannot is a wall the encounter is now behind.
+        "energy_per_area": 0.02,
+
+        # Coarser than ice. A pillar is a couple of metres across and takes hits
+        # rather than intricate melting, so it does not need 20cm resolution --
+        # and cell count is what a slab costs to draw, cook and replicate.
+        "cell_size": 40.0,
+        "melt_radius": 70.0,
+
+        # DENSER THAN ANY FLUID HERE, so if one is ever raised in water it rests
+        # on the bed instead of bobbing -- one comparison in the same Archimedes
+        # the floes use, reached without anything knowing it is rock.
+        "density": 0.0025,
+        "occupant_mass": 80.0,
+        # Rock does not give underfoot. High response, instant settle: both are
+        # the buoyancy path being told to do nothing.
+        "load_response": 100000.0,
+        "settle_speed": 1000.0,
+        # And it does not travel, even if the thing it stands in is moving.
+        "drift_response": 0.0,
+        # Violent. A wall of earth easing gracefully into place is not the spell
+        # anyone cast.
+        "rise_speed": 14.0,
+        "surface": "M_ARPG_Earth_Placeholder",
+    },
+    {
+        "name": "DA_Solid_EarthWall", "element": "Earth",
+        # WIDER AND THINNER, which is the whole difference. Waist height: it
+        # breaks a charge and blocks a line rather than hiding you.
+        "thickness": 60.0,
+        "standable": True,
+        "melt_rate": 0.0,
+        "melts_into": None,
+        "minimum_area": 2500.0,
+        # Half the pillar's. A wall is thinner, covers far more ground, and
+        # should be the thing that comes down first.
+        "energy_per_area": 0.01,
+        # COARSER AGAIN, and this one matters. An emanation is metres across in
+        # every direction, and cell count goes with AREA -- a 6m wall at 20cm
+        # cells is 900 cells, at 60cm it is 100. The wall is a slab, not a
+        # sculpture.
+        "cell_size": 60.0,
+        "melt_radius": 70.0,
+        "density": 0.0025,
+        "occupant_mass": 80.0,
+        "load_response": 100000.0,
+        "settle_speed": 1000.0,
+        "drift_response": 0.0,
+        "rise_speed": 18.0,
+        "surface": "M_ARPG_Earth_Placeholder",
+    },
 ]
 
+
+# --- Earth's three spells ---------------------------------------------------
+#
+# THE ONE ELEMENT WHOSE DISCHARGE TYPES ARE DIFFERENT SPELLS, rather than the
+# same spell in three shapes. Fire is a fireball, a cone and a nova -- one idea
+# aimed three ways. Earth throws a rock, raises a pillar and raises a wall, and
+# only the first of those is a projectile at all.
+#
+# NO C++ KNOWS THIS. UARPGMagicElement::DischargeEffects is a map keyed by the
+# discharge type, which is the whole dispatch: authoring three entries here is
+# authoring three spells. The alternative the Godot version had -- six parallel
+# properties and a switch to read them -- is where its per-type bugs lived.
+#
+# Blueprint subclasses rather than the C++ classes directly, because everything
+# that makes one of these a SPELL rather than a mechanism is EditDefaultsOnly:
+# which slab it raises, how big, how far in front. Pointing the map at the raw
+# class would give a slab effect with no definition, which warns and shoves.
+EARTH_EFFECTS = [
+    {
+        "name": "BP_Earth_Boulder", "parent": "ARPGLaunchSlabProjectile",
+        "type": "PROJECT",
+        # Short reach: "throw the wall you just raised", not "hunt for ammo".
+        "floats": {"reach": 400.0, "max_launch_scale": 2.5,
+                   "min_radius": 28.0, "max_radius": 70.0},
+    },
+    {
+        "name": "BP_Earth_Pillar", "parent": "ARPGRaiseSlabEffect",
+        "type": "BURST",
+        "solid": "DA_Solid_EarthSlab",
+        "shape": "PILLAR",
+        # Just beyond arm's reach, so it is cover rather than a thing you are
+        # standing inside.
+        "floats": {"standoff": 220.0, "extent": 160.0, "depth": 90.0,
+                   "charge_scale": 1.8},
+    },
+    {
+        "name": "BP_Earth_Wall", "parent": "ARPGRaiseSlabEffect",
+        "type": "EMANATE",
+        "solid": "DA_Solid_EarthWall",
+        # A RING, because an emanation emanates -- the wall comes up all around
+        # rather than in front, which is the actual difference between RT+A and
+        # RT+X for this element.
+        "shape": "RING",
+        "floats": {"standoff": 0.0, "extent": 320.0, "depth": 80.0,
+                   "charge_scale": 1.5},
+    },
+]
+
+
+def blueprint_of(name, parent_class):
+    """Creates or loads a Blueprint subclass and returns (asset, cdo)."""
+    factory = unreal.BlueprintFactory()
+    factory.set_editor_property("parent_class", parent_class)
+
+    asset = ensure(EFFECT_DIR, name, unreal.Blueprint, factory)
+    return asset, unreal.get_default_object(asset.generated_class())
+
+
+def author_earth(solids):
+    """Points DA_Element_Earth at a different spell per discharge type."""
+    earth = element("Earth")
+    if not earth:
+        return
+
+    effects = {}
+
+    for spec in EARTH_EFFECTS:
+        parent = getattr(unreal, spec["parent"], None)
+        if parent is None:
+            log("no {} in the bindings -- compile the project first".format(spec["parent"]))
+            return
+
+        asset, cdo = blueprint_of(spec["name"], parent)
+
+        for prop, value in spec["floats"].items():
+            cdo.set_editor_property(prop, value)
+
+        if "solid" in spec:
+            cdo.set_editor_property("definition", solids[spec["solid"]])
+
+        if "shape" in spec:
+            cdo.set_editor_property("shape",
+                                    getattr(unreal.ARPGSlabShape, spec["shape"]))
+
+        save(asset, "{}/{}".format(EFFECT_DIR, spec["name"]))
+        effects[getattr(unreal.ARPGDischargeType, spec["type"])] = asset.generated_class()
+
+    earth.set_editor_property("discharge_effects", effects)
+    save(earth, "{}/DA_Element_Earth".format(ELEMENT_DIR))
+
+    log("earth: {} spells, one per discharge type".format(len(effects)))
 
 def main():
     surfaces = {spec["name"]: build_surface(spec) for spec in SURFACES}
@@ -288,6 +474,8 @@ def main():
         save(fluid, "{}/{}".format(FLUID_DIR, spec["name"]))
         fluids[spec["name"]] = fluid
 
+    solids = {}
+
     for spec in SOLIDS:
         solid = ensure(FLUID_DIR, spec["name"], unreal.ARPGSolidDefinition)
 
@@ -304,6 +492,7 @@ def main():
         solid.set_editor_property("load_response", spec["load_response"])
         solid.set_editor_property("settle_speed", spec["settle_speed"])
         solid.set_editor_property("drift_response", spec["drift_response"])
+        solid.set_editor_property("rise_speed", spec.get("rise_speed", 14.0))
         solid.set_editor_property("surface_material", surfaces[spec["surface"]])
 
         # Melting RETURNS its area to the fluid it came from rather than the
@@ -314,6 +503,12 @@ def main():
             solid.set_editor_property("melts_into", fluids[melts_into])
 
         save(solid, "{}/{}".format(FLUID_DIR, spec["name"]))
+        solids[spec["name"]] = solid
+
+    # AFTER the solids, because two of earth's three spells name one. This is the
+    # only place the ordering matters and it is the reason this lives here rather
+    # than in the element script, which runs first and could not see them.
+    author_earth(solids)
 
     log("{} surfaces, {} fluids, {} solids".format(len(SURFACES), len(FLUIDS), len(SOLIDS)))
     log("Config/DefaultGame.ini already lists the definitions under ARPGWorldSettings.")

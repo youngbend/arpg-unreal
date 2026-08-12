@@ -8,9 +8,9 @@
 #include "ARPGFluidSurfaceSubsystem.generated.h"
 
 class AARPGDischargeEffect;
-class AARPGFluidBody;
+class AARPGSurfaceBody;
 class AARPGFluidPool;
-class AARPGFluidSolid;
+class AARPGSolidBody;
 class UARPGElementalVolumeComponent;
 class UARPGFluidDefinition;
 class UARPGMagicCombinationTable;
@@ -194,12 +194,58 @@ public:
 	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
 	bool IsCoveredBySolid(FVector WorldPosition) const;
 
+	/**
+	 * The slab standing at this point, or null.
+	 *
+	 * IsCoveredBySolid answers yes or no, which is all conduction needs. Anything
+	 * that wants to DO something to the slab -- an earth spell picking up the wall
+	 * in front of it and throwing it -- needs the slab.
+	 */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
+	AARPGSolidBody* FindSolidAt(FVector WorldPosition) const;
+
+	/**
+	 * The nearest slab of a given element within a reach, or null.
+	 *
+	 * What a spell asks before deciding what it is. An earth Project cast at a
+	 * wall the caster raised a moment ago throws the WALL rather than conjuring a
+	 * boulder beside it, and this is the question that distinguishes the two --
+	 * asked by the effect actor rather than by the ability, because the ability is
+	 * shared by every element and only earth cares.
+	 *
+	 * @param ElementTag empty matches any element.
+	 */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
+	AARPGSolidBody* FindSolidNear(FVector WorldPosition, float Reach,
+		FGameplayTag ElementTag) const;
+
+	// --- Slabs nothing solidified ----------------------------------------------
+
+	/**
+	 * Puts a slab this subsystem did not create into its register.
+	 *
+	 * FREEZING WAS THE ONLY WAY TO MAKE ONE, which quietly meant a slab was always
+	 * something a fluid had turned into. An earth spell raising a wall out of the
+	 * ground makes the same object for a completely different reason, and an
+	 * unregistered one is a real actor that draws, collides and reacts -- but is
+	 * invisible to IsCoveredBySolid, so a bolt would conduct through the water it
+	 * is standing in as though the wall were not there.
+	 *
+	 * Idempotent, and the register holds no ownership: a slab destroyed by
+	 * anything else drops out on the next sweep.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "ARPG|Fluid")
+	void RegisterSolid(AARPGSolidBody* Solid);
+
+	UFUNCTION(BlueprintCallable, Category = "ARPG|Fluid")
+	void UnregisterSolid(AARPGSolidBody* Solid);
+
 	/** Every pool currently in the world. */
 	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
 	const TArray<AARPGFluidPool*>& GetPools() const { return Pools; }
 
 	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
-	const TArray<AARPGFluidSolid*>& GetSolids() const { return ActiveSolids; }
+	const TArray<AARPGSolidBody*>& GetSolids() const { return ActiveSolids; }
 
 	/** Runs one weather step immediately, bypassing the tick rate. */
 	UFUNCTION(BlueprintCallable, Category = "ARPG|Fluid")
@@ -215,7 +261,7 @@ public:
 	 * subsystem holding a pointer to it until something notices.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "ARPG|Fluid")
-	void RetireBody(AARPGFluidBody* Body);
+	void RetireBody(AARPGSurfaceBody* Body);
 
 	/**
 	 * Tells whichever side is a slab WHERE a reaction touched it.
@@ -284,7 +330,7 @@ private:
 	TArray<AARPGFluidPool*> Pools;
 
 	UPROPERTY(Transient)
-	TArray<AARPGFluidSolid*> ActiveSolids;
+	TArray<AARPGSolidBody*> ActiveSolids;
 
 	FDelegateHandle DischargeLandedHandle;
 

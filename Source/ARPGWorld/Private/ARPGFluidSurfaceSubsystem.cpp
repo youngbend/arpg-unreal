@@ -4,8 +4,10 @@
 #include "ARPGDischargeContext.h"
 #include "ARPGDischargeEffect.h"
 #include "ARPGElementalVolumeComponent.h"
-#include "ARPGFluidBody.h"
+#include "ARPGSurfaceBody.h"
+#include "ARPGSolidBody.h"
 #include "ARPGFluidDefinition.h"
+#include "ARPGSolidDefinition.h"
 #include "ARPGFluidGeometry.h"
 #include "ARPGElementalSurface.h"
 #include "ARPGMagicCombinationTable.h"
@@ -364,7 +366,7 @@ bool UARPGFluidSurfaceSubsystem::TraceToGround(FVector From, const AActor* Ignor
 		}
 	}
 
-	for (const AARPGFluidSolid* Solid : ActiveSolids)
+	for (const AARPGSolidBody* Solid : ActiveSolids)
 	{
 		if (IsValid(Solid))
 		{
@@ -534,8 +536,8 @@ bool UARPGFluidSurfaceSubsystem::TrySolidify(UARPGElementalVolumeComponent* A,
 
 	const float SurfaceHeight = Surface->GetSurfaceLevelAt(Centre);
 
-	AARPGFluidSolid* Solid = World->SpawnActor<AARPGFluidSolid>(
-		AARPGFluidSolid::StaticClass(),
+	AARPGSolidBody* Solid = World->SpawnActor<AARPGSolidBody>(
+		AARPGSolidBody::StaticClass(),
 		FTransform(FVector(Centre.X, Centre.Y, SurfaceHeight)), Params);
 
 	if (!Solid)
@@ -563,7 +565,7 @@ bool UARPGFluidSurfaceSubsystem::TrySolidify(UARPGElementalVolumeComponent* A,
 	{
 		// Only this subsystem's own bodies are its to retire. Anything else that
 		// reports itself used up owns its own lifetime.
-		RetireBody(Cast<AARPGFluidBody>(Surface->_getUObject()));
+		RetireBody(Cast<AARPGSurfaceBody>(Surface->_getUObject()));
 	}
 
 	// Spent freezing it.
@@ -583,7 +585,7 @@ void UARPGFluidSurfaceSubsystem::NoteReactionContact(UARPGElementalVolumeCompone
 
 	for (UARPGElementalVolumeComponent* Side : { A, B })
 	{
-		if (AARPGFluidSolid* Slab = Side ? Cast<AARPGFluidSolid>(Side->GetOwner()) : nullptr)
+		if (AARPGSolidBody* Slab = Side ? Cast<AARPGSolidBody>(Side->GetOwner()) : nullptr)
 		{
 			Slab->NoteContactAt(Where);
 		}
@@ -618,7 +620,7 @@ void UARPGFluidSurfaceSubsystem::DropRiders(AARPGFluidPool* Pool)
 	// one path that used to be the only way for a pool to go.
 	for (int32 Index = ActiveSolids.Num() - 1; Index >= 0; --Index)
 	{
-		AARPGFluidSolid* Riding = ActiveSolids[Index];
+		AARPGSolidBody* Riding = ActiveSolids[Index];
 		if (IsValid(Riding) && Riding->FloatsOn.GetObject() == Pool)
 		{
 			ActiveSolids.RemoveAt(Index);
@@ -627,7 +629,7 @@ void UARPGFluidSurfaceSubsystem::DropRiders(AARPGFluidPool* Pool)
 	}
 }
 
-void UARPGFluidSurfaceSubsystem::RetireBody(AARPGFluidBody* Body)
+void UARPGFluidSurfaceSubsystem::RetireBody(AARPGSurfaceBody* Body)
 {
 	if (!IsValid(Body))
 	{
@@ -642,7 +644,7 @@ void UARPGFluidSurfaceSubsystem::RetireBody(AARPGFluidBody* Body)
 		return;
 	}
 
-	AARPGFluidSolid* Solid = Cast<AARPGFluidSolid>(Body);
+	AARPGSolidBody* Solid = Cast<AARPGSolidBody>(Body);
 	if (!Solid)
 	{
 		return;
@@ -681,9 +683,81 @@ AARPGFluidPool* UARPGFluidSurfaceSubsystem::FindPoolAt(FVector WorldPosition) co
 	return nullptr;
 }
 
+AARPGSolidBody* UARPGFluidSurfaceSubsystem::FindSolidAt(FVector WorldPosition) const
+{
+	for (AARPGSolidBody* Solid : ActiveSolids)
+	{
+		if (IsValid(Solid) && Solid->ContainsPoint(WorldPosition))
+		{
+			return Solid;
+		}
+	}
+	return nullptr;
+}
+
+AARPGSolidBody* UARPGFluidSurfaceSubsystem::FindSolidNear(FVector WorldPosition, float Reach,
+	FGameplayTag ElementTag) const
+{
+	AARPGSolidBody* Nearest = nullptr;
+	double Closest = static_cast<double>(Reach) * Reach;
+
+	for (AARPGSolidBody* Solid : ActiveSolids)
+	{
+		if (!IsValid(Solid))
+		{
+			continue;
+		}
+
+		// An empty tag matches anything, which is the honest default for "is there
+		// a slab here" -- filtering is the caller's business and most callers have
+		// exactly one element in mind.
+		if (ElementTag.IsValid() && Solid->Volume
+			&& Solid->Volume->Element
+			&& Solid->Volume->Element->ElementTag != ElementTag)
+		{
+			continue;
+		}
+
+		// TO THE SLAB, not to its origin. A wall is long, and a caster standing at
+		// one end of one is not far from it -- measuring to the actor would say
+		// they were, because a slab's origin is its centroid.
+		const FVector2D Where(WorldPosition.X, WorldPosition.Y);
+		const FVector2D Centre = Solid->Field.SolidCentroid();
+		const FVector2D Toward = Where - Centre;
+
+		const double Support = Toward.IsNearlyZero()
+			? 0.0
+			: Solid->Field.SupportDistance(Centre, Toward.GetSafeNormal());
+
+		const double Gap = FMath::Max(0.0, Toward.Size() - Support);
+		const double GapSq = Gap * Gap;
+
+		if (GapSq <= Closest)
+		{
+			Closest = GapSq;
+			Nearest = Solid;
+		}
+	}
+
+	return Nearest;
+}
+
+void UARPGFluidSurfaceSubsystem::RegisterSolid(AARPGSolidBody* Solid)
+{
+	if (IsValid(Solid))
+	{
+		ActiveSolids.AddUnique(Solid);
+	}
+}
+
+void UARPGFluidSurfaceSubsystem::UnregisterSolid(AARPGSolidBody* Solid)
+{
+	ActiveSolids.Remove(Solid);
+}
+
 bool UARPGFluidSurfaceSubsystem::IsCoveredBySolid(FVector WorldPosition) const
 {
-	for (const AARPGFluidSolid* Solid : ActiveSolids)
+	for (const AARPGSolidBody* Solid : ActiveSolids)
 	{
 		if (IsValid(Solid) && Solid->IsStandableAt(WorldPosition))
 		{
@@ -778,6 +852,18 @@ void UARPGFluidSurfaceSubsystem::EnforceBudget()
 					break;
 				}
 
+				// PERMANENT BODIES ARE NOT SPARE CAPACITY. The budget exists for
+				// litter -- puddles a player left behind crossing a field, floes
+				// that will melt anyway -- and culling those is unnoticeable. An
+				// earth wall someone raised for cover is the opposite: it is there
+				// on purpose, nothing was ever going to remove it, and having it
+				// vanish mid-fight because the level accumulated puddles elsewhere
+				// is the worst outcome this economy could produce.
+				if (Register[Index]->IsPermanent())
+				{
+					continue;
+				}
+
 				const double Area = Register[Index]->GetArea();
 				if (Area < LeastArea)
 				{
@@ -786,15 +872,20 @@ void UARPGFluidSurfaceSubsystem::EnforceBudget()
 				}
 			}
 
+			// Everything left is permanent, so the register stays over budget --
+			// which is the right answer. A cap is a limit on what the world keeps
+			// FOR you, not a licence to delete what you built.
 			if (Smallest == INDEX_NONE)
 			{
+				UE_LOG(LogARPGWorld, Verbose,
+					TEXT("Over the %s budget and everything left is permanent."), Kind);
 				break;
 			}
 
 			UE_LOG(LogARPGWorld, Verbose,
 				TEXT("Over the %s budget, so the smallest one goes."), Kind);
 
-			AARPGFluidBody* Spent = Register[Smallest];
+			AARPGSurfaceBody* Spent = Register[Smallest];
 			Register.RemoveAt(Smallest);
 
 			// Whatever was riding it goes with it, exactly as when a pool is
@@ -884,7 +975,7 @@ void UARPGFluidSurfaceSubsystem::TickWeather(float DeltaTime)
 
 	for (int32 Index = ActiveSolids.Num() - 1; Index >= 0; --Index)
 	{
-		AARPGFluidSolid* Solid = ActiveSolids[Index];
+		AARPGSolidBody* Solid = ActiveSolids[Index];
 		if (!IsValid(Solid) || !Solid->Definition)
 		{
 			ActiveSolids.RemoveAt(Index);

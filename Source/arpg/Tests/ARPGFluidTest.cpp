@@ -10,8 +10,10 @@
 #include "ARPGElementPalette.h"
 #include "ARPGElementalReactionSubsystem.h"
 #include "ARPGElementalVolumeComponent.h"
-#include "ARPGFluidBody.h"
+#include "ARPGSurfaceBody.h"
+#include "ARPGSolidBody.h"
 #include "ARPGFluidDefinition.h"
+#include "ARPGSolidDefinition.h"
 #include "ARPGFluidGeometry.h"
 #include "ARPGSolidField.h"
 #include "ARPGFluidSurfaceSubsystem.h"
@@ -616,8 +618,8 @@ bool FARPGFluidMeltTest::RunTest(const FString& Parameters)
 
 	FActorSpawnParameters Params;
 	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-	AARPGFluidSolid* Floe = Scope.World->SpawnActor<AARPGFluidSolid>(
-		AARPGFluidSolid::StaticClass(), FTransform::Identity, Params);
+	AARPGSolidBody* Floe = Scope.World->SpawnActor<AARPGSolidBody>(
+		AARPGSolidBody::StaticClass(), FTransform::Identity, Params);
 
 	Floe->Setup(IceDefinition, ARPGFluidGeometry::MakeCircle(FVector2D::ZeroVector, 200.0), 0.f);
 
@@ -830,7 +832,7 @@ bool FARPGFluidReservoirMeltTest::RunTest(const FString& Parameters)
 		return false;
 	}
 
-	AARPGFluidSolid* Floe = Fluids->GetSolids()[0];
+	AARPGSolidBody* Floe = Fluids->GetSolids()[0];
 	TestEqual(TEXT("Freezing a lake invents no pool"), Fluids->GetPools().Num(), 0);
 
 	// A LAKE TAKES ITS WATER BACK AND NOTHING APPEARS. The obvious implementation
@@ -843,6 +845,233 @@ bool FARPGFluidReservoirMeltTest::RunTest(const FString& Parameters)
 
 	TestEqual(TEXT("Melting it into the lake makes no puddle on the lake"),
 		Fluids->GetPools().Num(), 0);
+
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// Slabs nothing solidified
+//
+// FREEZING USED TO BE THE ONLY WAY TO MAKE ONE, which quietly meant a slab was
+// always something a fluid had turned into. An earth spell raising a wall out of
+// the ground makes the same object for a completely different reason: rooted
+// rather than floating, permanent rather than melting, and registered by hand
+// rather than by TrySolidify.
+// ---------------------------------------------------------------------------
+
+namespace ARPGFluidTestUtils
+{
+	/** Earth: rooted, permanent, and never frozen out of anything. */
+	inline UARPGSolidDefinition* MakeEarth(UARPGMagicElement* Element)
+	{
+		UARPGSolidDefinition* Definition = NewObject<UARPGSolidDefinition>();
+		Definition->Element = Element;
+		Definition->Thickness = 120.f;
+		Definition->bStandable = true;
+		Definition->MeltRate = 0.f;      // time does not take it
+		Definition->MeltsInto = nullptr; // and it was never a liquid
+		Definition->MinimumArea = 100.f;
+		Definition->EnergyPerArea = 0.02f;
+		Definition->CellSize = 40.f;
+		Definition->Density = 0.0025f;
+		Definition->RiseSpeed = 14.f;
+		return Definition;
+	}
+
+	inline AARPGSolidBody* RaiseSlab(UWorld* World, UARPGFluidSurfaceSubsystem* Fluids,
+		UARPGSolidDefinition* Definition, const FVector2D& At, double Radius)
+	{
+		FActorSpawnParameters Params;
+		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+		AARPGSolidBody* Slab = World->SpawnActor<AARPGSolidBody>(
+			AARPGSolidBody::StaticClass(), FTransform::Identity, Params);
+
+		Slab->Setup(Definition, ARPGFluidGeometry::MakeCircle(At, Radius), 0.f);
+		Fluids->RegisterSolid(Slab);
+		return Slab;
+	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGSlabRaisedTest,
+	"ARPG.World.Fluid.Slabs.ARaisedSlabIsRootedPermanentAndKnown",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGSlabRaisedTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	UARPGMagicElement* Earth = MakeElement(GetTransientPackage(), TAG_Element_Earth);
+	UARPGSolidDefinition* EarthDefinition = MakeEarth(Earth);
+	Fluids->Solids = { EarthDefinition };
+
+	AARPGSolidBody* Slab = RaiseSlab(Scope.World, Fluids, EarthDefinition,
+		FVector2D::ZeroVector, 200.0);
+
+	// REGISTERED BY HAND, because nothing solidified it. Unregistered it would
+	// still draw, collide and react -- but a bolt striking water it stands in
+	// would conduct as though the wall were not there.
+	TestEqual(TEXT("The world knows about a slab it did not freeze"),
+		Fluids->GetSolids().Num(), 1);
+	TestTrue(TEXT("And it roofs over the ground it stands on"),
+		Fluids->IsCoveredBySolid(FVector(0, 0, 0)));
+	TestSamePtr(TEXT("And can be found, not just counted"),
+		Fluids->FindSolidAt(FVector(0, 0, 0)), Slab);
+
+	// PERMANENT is MeltRate 0 read back -- the same zero that makes the weather
+	// tick skip it. Two questions, one answer, rather than a second flag that can
+	// disagree with the first.
+	TestTrue(TEXT("It is permanent"), Slab->IsPermanent());
+
+	const double Before = Slab->GetArea();
+	for (int32 Tick = 0; Tick < 20; ++Tick)
+	{
+		Fluids->StepSimulation(0.25f);
+	}
+
+	TestEqual(TEXT("Five seconds of weather does not touch it"), Slab->GetArea(), Before, 1.0);
+	TestEqual(TEXT("And it is still there"), Fluids->GetSolids().Num(), 1);
+
+	// ROOTED. No FloatsOn, so the buoyancy path never runs: it does not settle to
+	// a waterline, does not drift, and does not ask a surface that is not there
+	// for a density.
+	TestNull(TEXT("It floats on nothing"), Slab->FloatsOn.GetObject());
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGSlabRiseTest,
+	"ARPG.World.Fluid.Slabs.ARaisedSlabClimbsOutOfTheGround",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGSlabRiseTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	UARPGMagicElement* Earth = MakeElement(GetTransientPackage(), TAG_Element_Earth);
+	UARPGSolidDefinition* EarthDefinition = MakeEarth(Earth);
+	Fluids->Solids = { EarthDefinition };
+
+	AARPGSolidBody* Slab = RaiseSlab(Scope.World, Fluids, EarthDefinition,
+		FVector2D::ZeroVector, 200.0);
+
+	// BURIED TO ITS OWN THICKNESS, which is what makes it climb out rather than
+	// appear. Draft already means "how far under its resting height this is
+	// sitting", so a spell that raises a slab sets it and the rise IS the number
+	// coming back to zero -- no second concept, no animation track.
+	const float Resting = Slab->GetActorLocation().Z;
+
+	Slab->BeginBuried(EarthDefinition->Thickness);
+	TestEqual(TEXT("It starts buried"), Slab->Draft, EarthDefinition->Thickness, 0.01f);
+
+	// AND IS ACTUALLY DOWN THERE. Recording the depth without moving the slab
+	// would leave it standing in full view until the first tick dropped it -- a
+	// wall that appears, sinks, then rises, which is worse than not animating.
+	const float Buried = Slab->GetActorLocation().Z;
+	TestTrue(TEXT("And is below where it will end up"), Buried < Resting);
+
+	for (int32 Tick = 0; Tick < 120 && Slab->Draft > 0.f; ++Tick)
+	{
+		Slab->Tick(1.f / 60.f);
+	}
+
+	// SNAPPED HOME rather than approached forever. FInterpTo is asymptotic, so a
+	// slab a fraction of a millimetre short would tick, move and dirty its
+	// replicated draft for the rest of the level's life.
+	TestEqual(TEXT("Two seconds later it is all the way out"), Slab->Draft, 0.f);
+	TestTrue(TEXT("And it ended up higher than it started"),
+		Slab->GetActorLocation().Z > Buried);
+
+	TestEqual(TEXT("Back at the height it was built for"),
+		Slab->GetActorLocation().Z, Resting, 0.01f);
+
+	// And having arrived, it stays: nothing moves a rooted slab again.
+	Slab->Tick(1.f);
+	TestEqual(TEXT("Then it never moves again"),
+		Slab->GetActorLocation().Z, Resting, 0.01f);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGSlabBudgetTest,
+	"ARPG.World.Fluid.Slabs.TheBudgetWillNotCullWhatSomeoneBuilt",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGSlabBudgetTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	UARPGMagicElement* Earth = MakeElement(GetTransientPackage(), TAG_Element_Earth);
+	UARPGSolidDefinition* EarthDefinition = MakeEarth(Earth);
+	Fluids->Solids = { EarthDefinition };
+	Fluids->MaxBodiesOfEachKind = 2;
+
+	for (int32 Index = 0; Index < 5; ++Index)
+	{
+		RaiseSlab(Scope.World, Fluids, EarthDefinition,
+			FVector2D(Index * 1000, 0), 150.0 + Index * 10.0);
+	}
+
+	Fluids->StepSimulation(0.1f);
+
+	// THE BUDGET IS FOR LITTER. Puddles left crossing a field and floes that were
+	// going to melt anyway are unnoticeable to lose. A wall someone raised for
+	// cover is the opposite: it is there on purpose, nothing was ever going to
+	// remove it, and having it vanish mid-fight because the level accumulated
+	// puddles elsewhere is the worst thing this economy could do.
+	TestEqual(TEXT("Every permanent slab survives its own budget"),
+		Fluids->GetSolids().Num(), 5);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGSlabFindNearTest,
+	"ARPG.World.Fluid.Slabs.ASpellCanFindTheSlabInFrontOfIt",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGSlabFindNearTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	UARPGMagicElement* Earth = MakeElement(GetTransientPackage(), TAG_Element_Earth);
+	UARPGMagicElement* Ice = MakeElement(GetTransientPackage(), TAG_Element_Ice);
+
+	UARPGSolidDefinition* EarthDefinition = MakeEarth(Earth);
+	UARPGSolidDefinition* IceDefinition = MakeIce(Ice);
+	Fluids->Solids = { EarthDefinition, IceDefinition };
+
+	AARPGSolidBody* Wall = RaiseSlab(Scope.World, Fluids, EarthDefinition,
+		FVector2D(400, 0), 150.0);
+
+	// TO THE SLAB, NOT TO ITS ORIGIN. A wall is long, and a caster at one end of
+	// one is not far from it -- measuring to the actor would say they were,
+	// because a slab's origin is its centroid.
+	TestSamePtr(TEXT("A caster beside it finds it"),
+		Fluids->FindSolidNear(FVector(300, 0, 0), 400.f, TAG_Element_Earth), Wall);
+
+	TestNull(TEXT("One across the room does not"),
+		Fluids->FindSolidNear(FVector(6000, 0, 0), 400.f, TAG_Element_Earth));
+
+	// OF MY OWN ELEMENT. An earth spell throws earth; a wall of ice in front of
+	// the caster is somebody else's cover, not this spell's ammunition.
+	TestNull(TEXT("And an earth spell will not throw ice"),
+		Fluids->FindSolidNear(FVector(300, 0, 0), 400.f, TAG_Element_Ice));
+
+	// An empty tag is the honest "is there a slab here at all".
+	TestSamePtr(TEXT("Asking for anything finds it regardless"),
+		Fluids->FindSolidNear(FVector(300, 0, 0), 400.f, FGameplayTag()), Wall);
 
 	return true;
 }
@@ -967,8 +1196,8 @@ bool FARPGSolidFieldBoundedTest::RunTest(const FString& Parameters)
 
 	FActorSpawnParameters Params;
 	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-	AARPGFluidSolid* Floe = Scope.World->SpawnActor<AARPGFluidSolid>(
-		AARPGFluidSolid::StaticClass(), FTransform::Identity, Params);
+	AARPGSolidBody* Floe = Scope.World->SpawnActor<AARPGSolidBody>(
+		AARPGSolidBody::StaticClass(), FTransform::Identity, Params);
 
 	Floe->Setup(IceDefinition, ARPGFluidGeometry::MakeCircle(FVector2D::ZeroVector, 300.0), 0.f);
 
@@ -1105,7 +1334,7 @@ bool FARPGFluidFloatTest::RunTest(const FString& Parameters)
 		return false;
 	}
 
-	AARPGFluidSolid* Floe = Fluids->GetSolids()[0];
+	AARPGSolidBody* Floe = Fluids->GetSolids()[0];
 
 	// It knows what it is riding, which is what lets it ask for a waterline that
 	// moves rather than remembering one that does not.
@@ -1174,7 +1403,7 @@ bool FARPGFluidSinkTest::RunTest(const FString& Parameters)
 		return false;
 	}
 
-	AARPGFluidSolid* Floe = Fluids->GetSolids()[0];
+	AARPGSolidBody* Floe = Fluids->GetSolids()[0];
 	Floe->Tick(1.f);
 
 	const float Unloaded = Floe->Draft;
@@ -1252,7 +1481,7 @@ bool FARPGFluidDriftTest::RunTest(const FString& Parameters)
 		return false;
 	}
 
-	AARPGFluidSolid* Raft = Fluids->GetSolids()[0];
+	AARPGSolidBody* Raft = Fluids->GetSolids()[0];
 
 	TestFalse(TEXT("A floe with open water around it is not anchored"), Raft->bAnchored);
 
@@ -1281,7 +1510,7 @@ bool FARPGFluidDriftTest::RunTest(const FString& Parameters)
 		return false;
 	}
 
-	AARPGFluidSolid* Plug = Fluids->GetSolids()[1];
+	AARPGSolidBody* Plug = Fluids->GetSolids()[1];
 
 	TestTrue(TEXT("A floe spanning the water is anchored by the shore"), Plug->bAnchored);
 
@@ -1396,7 +1625,7 @@ bool FARPGFluidHeavySolidTest::RunTest(const FString& Parameters)
 		return false;
 	}
 
-	AARPGFluidSolid* Slab = Fluids->GetSolids()[0];
+	AARPGSolidBody* Slab = Fluids->GetSolids()[0];
 	Slab->Tick(1.f);
 
 	TestTrue(TEXT("A slab denser than its fluid does not float"), Slab->bAground);
@@ -1814,7 +2043,7 @@ bool FARPGFluidFreezeEdgeTest::RunTest(const FString& Parameters)
 		return false;
 	}
 
-	AARPGFluidSolid* Floe = Fluids->GetSolids()[0];
+	AARPGSolidBody* Floe = Fluids->GetSolids()[0];
 
 	TestTrue(TEXT("You can stand on it mid-river"),
 		Floe->IsStandableAt(FVector(0, 0, Floe->GetSurfaceHeight())));
@@ -1962,7 +2191,7 @@ bool FARPGFluidReplicationTest::RunTest(const FString& Parameters)
 	// replicates, the client just receives an empty ring and renders nothing.
 	for (const TCHAR* Name : { TEXT("Ring"), TEXT("GroundHeight") })
 	{
-		const FProperty* Property = AARPGFluidBody::StaticClass()->FindPropertyByName(Name);
+		const FProperty* Property = AARPGSurfaceBody::StaticClass()->FindPropertyByName(Name);
 		TestTrue(FString::Printf(TEXT("A body replicates its %s"), Name),
 			Property && Property->HasAnyPropertyFlags(CPF_Net));
 	}
@@ -1971,7 +2200,7 @@ bool FARPGFluidReplicationTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("A pool replicates its definition"),
 		PoolDefinition && PoolDefinition->HasAnyPropertyFlags(CPF_Net));
 
-	const FProperty* Ice = AARPGFluidSolid::StaticClass()->FindPropertyByName(TEXT("Field"));
+	const FProperty* Ice = AARPGSolidBody::StaticClass()->FindPropertyByName(TEXT("Field"));
 	TestTrue(TEXT("A solid replicates its heightfield, holes and all"),
 		Ice && Ice->HasAnyPropertyFlags(CPF_Net));
 
@@ -2014,8 +2243,8 @@ bool FARPGFluidSolidSurfaceTest::RunTest(const FString& Parameters)
 
 	FActorSpawnParameters Params;
 	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-	AARPGFluidSolid* Floe = Scope.World->SpawnActor<AARPGFluidSolid>(
-		AARPGFluidSolid::StaticClass(), FTransform::Identity, Params);
+	AARPGSolidBody* Floe = Scope.World->SpawnActor<AARPGSolidBody>(
+		AARPGSolidBody::StaticClass(), FTransform::Identity, Params);
 
 	Floe->Setup(IceDefinition, ARPGFluidGeometry::MakeCircle(FVector2D::ZeroVector, 300.0), 0.f);
 
@@ -2161,7 +2390,7 @@ bool FARPGFluidCastOverSlabTest::RunTest(const FString& Parameters)
 		return false;
 	}
 
-	AARPGFluidSolid* Floe = Fluids->GetSolids()[0];
+	AARPGSolidBody* Floe = Fluids->GetSolids()[0];
 	const int32 PoolsBefore = Fluids->GetPools().Num();
 
 	// A SLAB IS NOT GROUND. It blocks every channel because you stand on it, so
@@ -2350,7 +2579,7 @@ bool FARPGFluidSolidifyTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Ice meeting a pool freezes it"), bFroze);
 	TestEqual(TEXT("Producing one slab"), Fluids->GetSolids().Num(), 1);
 
-	AARPGFluidSolid* Floe = Fluids->GetSolids()[0];
+	AARPGSolidBody* Floe = Fluids->GetSolids()[0];
 
 	// THE OVERLAP, not the whole pool and not the whole shard. Freezing exactly
 	// where the two met is the whole reason a body is a polygon.
