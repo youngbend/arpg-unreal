@@ -652,14 +652,32 @@ finds it on the ASC by interface at the moment it arms each hitbox window. The
 swing owns the timing throughout: only it knows its motion value, which window is
 arming, and whether it was cancelled before reaching one.
 
-The elemental half is delivered as an `FARPGElementalRider` on the weapon's own
-hitbox — a second damage spec with its own damage type, from the *same* contact.
-Two hitbox components would be the more literal reading of "two independent
-hits" and is the wrong one: the target's invincibility window opens on the first
-hit that lands, so the second would be dropped by `TryConsumeHit` on any
-character authored with one. What has to stay independent is the mitigation, not
-the collision — `ARPG.Combat.ElementalRiderIsMitigatedSeparately` pins both
-halves landing with their own resistances, i-frames and all.
+**The coating is a hitbox of its own, and swing pairing is what makes that
+survivable.** The elemental half needs its own damage type *and* its own reach —
+a burning sword swings a sheath of hot air, and `FARPGElementalCoating::
+TraceRadiusScale` is how much wider than the blade. Geometry is the part a
+second payload on the weapon's hitbox could never express, since a payload
+inherits whatever carries it.
+
+Two hitboxes on one swing is exactly what i-frames exist to stop, though:
+whichever half lands first calls `TryConsumeHit` and shuts the window on the
+other, and *which* half survived would depend on component tick order. So
+`UARPGHitboxComponent` gained symmetric swing pairing — a partner that has
+already cleared a target this activation has cleared it for the swing. The rule
+says what was always true: **i-frames gate attacks, not the individual payloads
+one attack lands.** It loosens nothing else. Dodge i-frames and
+`State.Invulnerable` still stop both halves (neither partner lands, so neither
+can vouch for the other), a window opened by a *different* attack still blocks
+both, and a channelled re-hit through `TickInterval` is one hitbox hitting twice
+rather than two hitting once, so it is untouched.
+
+The imbue owns the elemental hitbox, creating one attached to the swing's own
+hitbox when the character has no authored `EARPGHitboxSource::Elemental` — so
+imbuing works everywhere without content having to be revisited first, and an
+authored one wins when it exists. `ARPG.Combat.PairedHitboxesLandTogether` pins
+the separate mitigation, the pairing in both tick orders, the coating catching a
+target the blade cannot reach, and ordinary i-frames returning once the pairing
+is broken.
 
 Structural decisions:
 

@@ -245,19 +245,22 @@ bool FARPGHitboxDetectionTest::RunTest(const FString& Parameters)
 }
 
 /**
- * The elemental rider: an imbued swing's second, independently mitigated half.
+ * An imbued swing: two hitboxes, one attack.
  *
- * The property under test is the one the whole design turns on -- ONE contact
- * resolving through the mitigation pipeline TWICE, with a different damage type
- * each time. Armour answers for the steel and resistance for the fire, and they
- * are not the same number; a single folded damage value could only ever be right
- * for one of them.
+ * The coating is a hitbox of its own because it is WIDER than the blade -- it
+ * catches things the steel misses -- and because it has to be mitigated as its
+ * own damage type. Armour answers for the steel and resistance for the fire, and
+ * they are not the same number.
+ *
+ * Two hitboxes on one swing is exactly what the target's invincibility frames
+ * are designed to stop, so the pairing rule is the thing most worth pinning
+ * here: i-frames gate ATTACKS, not the individual payloads one attack lands.
  */
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGHitboxElementalRiderTest,
-	"ARPG.Combat.ElementalRiderIsMitigatedSeparately",
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGHitboxSwingPairingTest,
+	"ARPG.Combat.PairedHitboxesLandTogether",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FARPGHitboxElementalRiderTest::RunTest(const FString& Parameters)
+bool FARPGHitboxSwingPairingTest::RunTest(const FString& Parameters)
 {
 	using namespace ARPGHitboxTestUtils;
 
@@ -284,88 +287,160 @@ bool FARPGHitboxElementalRiderTest::RunTest(const FString& Parameters)
 		return Target;
 	};
 
-	auto CoatWithFire = [&Fire](UARPGHitboxComponent* Hitbox, float Damage)
+	/** The steel and the coating, armed together as one swing would arm them. */
+	struct FSwing
 	{
-		FARPGElementalRider Rider;
-		Rider.BaseDamage = Damage;
-		Rider.DamageType = Fire;
-		Rider.MagicElementTag = TAG_Element_Fire;
-		Hitbox->SetElementalRider(Rider);
+		UARPGHitboxComponent* Weapon = nullptr;
+		UARPGHitboxComponent* Coating = nullptr;
+
+		void Arm(const FVector& From)
+		{
+			Weapon->SetWorldLocation(From);
+			Coating->SetWorldLocation(From);
+			Coating->PairWithSwingPartner(Weapon);
+			Weapon->ActivateHitbox();
+			Coating->ActivateHitbox();
+		}
+
+		void Disarm()
+		{
+			Weapon->DeactivateHitbox();
+			Coating->DeactivateHitbox();
+			Coating->ClearSwingPartner();
+		}
+
+		/** Both halves sweep the same frame, coating first -- see the tick-order case. */
+		void SweepTo(const FVector& To)
+		{
+			ARPGHitboxTestUtils::TickAt(Coating, To);
+			ARPGHitboxTestUtils::TickAt(Weapon, To);
+		}
 	};
 
-	// --- Two damage types, two resistance lookups, one contact ----------------
+	auto BuildSwing = [&](AActor* Attacker, float SteelDamage, float FireDamage,
+		float ReachScale) -> FSwing
+	{
+		FSwing Swing;
+		Swing.Weapon = AttachHitbox(Attacker, Physical, SteelDamage);
+		Swing.Weapon->SetSourceActor(Attacker);
+
+		Swing.Coating = AttachHitbox(Attacker, Fire, FireDamage);
+		Swing.Coating->HitboxSource = EARPGHitboxSource::Elemental;
+		Swing.Coating->MagicElementTag = TAG_Element_Fire;
+		Swing.Coating->TraceRadius = Swing.Weapon->TraceRadius * ReachScale;
+		Swing.Coating->SetSourceActor(Attacker);
+		return Swing;
+	};
+
+	// --- Two damage types, two resistance lookups -----------------------------
 	{
 		const FVector TargetLocation(0.f, 0.f, 0.f);
 		AARPGCombatDummy* Attacker = SpawnDummy(World, FVector(-400.f, 0.f, 0.f), TAG_Faction_Player, 100.f);
 		AARPGCombatDummy* Target = SpawnArmouredTarget(TargetLocation, /*IFrames=*/0.f);
 
-		UARPGHitboxComponent* Hitbox = AttachHitbox(Attacker, Physical, 100.f);
-		Hitbox->SetSourceActor(Attacker);
-		CoatWithFire(Hitbox, 40.f);
+		FSwing Swing = BuildSwing(Attacker, 100.f, 40.f, /*ReachScale=*/1.f);
+		Swing.Arm(FVector(-400.f, 0.f, 0.f));
 
-		Hitbox->ActivateHitbox();
-		TickAt(Hitbox, FVector(-300.f, 0.f, 0.f));
+		Swing.SweepTo(FVector(-300.f, 0.f, 0.f));
 		TestEqual(TEXT("approach short of contact deals nothing"), GetHealth(Target), 500.f);
 
-		TickAt(Hitbox, TargetLocation);
+		Swing.SweepTo(TargetLocation);
 
-		// 100 steel halved by armour to 50, and 40 fire that the armour has no
-		// answer for. Folding them would have produced 140 halved, or 140 whole.
+		// 100 steel halved by armour to 50, and 40 fire the armour has no answer
+		// for. One folded number could only ever have been right for one of them.
 		TestEqual(TEXT("both halves land, each mitigated by its own resistance"),
 			GetHealth(Target), 500.f - 50.f - 40.f);
 	}
 
-	// --- The rider survives the target's i-frames ------------------------------
-	// This is exactly why the coating rides the weapon's hitbox instead of being
-	// a second hitbox component tracing the same arc: the physical hit opens the
-	// invincibility window on its way through, and a second component arriving
-	// behind it would be dropped by TryConsumeHit on any character authored with
-	// one. Both halves come from a single TryConsumeHit, so both land.
+	// --- The pairing beats the i-frames the swing opens itself -----------------
+	// The heart of it. Whichever half lands first calls TryConsumeHit and shuts
+	// the target's invincibility window; unpaired, the other half would arrive to
+	// find it closed and vanish. Which half vanished would depend on component
+	// tick order, so it would not even be consistent.
 	{
 		const FVector TargetLocation(0.f, 200.f, 0.f);
 		AARPGCombatDummy* Attacker = SpawnDummy(World, FVector(-400.f, 200.f, 0.f), TAG_Faction_Player, 100.f);
 		AARPGCombatDummy* Target = SpawnArmouredTarget(TargetLocation, /*IFrames=*/5.f);
 
-		UARPGHitboxComponent* Hitbox = AttachHitbox(Attacker, Physical, 100.f);
-		Hitbox->SetSourceActor(Attacker);
-		CoatWithFire(Hitbox, 40.f);
+		FSwing Swing = BuildSwing(Attacker, 100.f, 40.f, /*ReachScale=*/1.f);
+		Swing.Arm(FVector(-400.f, 200.f, 0.f));
+		Swing.SweepTo(FVector(-300.f, 200.f, 0.f));
+		Swing.SweepTo(TargetLocation);
 
-		Hitbox->ActivateHitbox();
-		TickAt(Hitbox, FVector(-300.f, 200.f, 0.f));
-		TickAt(Hitbox, TargetLocation);
-
-		TestEqual(TEXT("i-frames opened by the physical hit do not swallow the elemental one"),
+		TestEqual(TEXT("i-frames opened by one half do not swallow the other"),
 			GetHealth(Target), 500.f - 50.f - 40.f);
 	}
 
-	// --- A cleared rider leaves nothing behind ---------------------------------
-	// The coating is per-window. One left on the hitbox would elementally charge
-	// every later swing this character throws, for free and forever -- the same
-	// trap the melee ability's damage-type snapshot exists to avoid.
+	// --- ...and it works whichever half sweeps first ---------------------------
+	// The rule has to be symmetric, because tick order is not something either
+	// hitbox gets to assume. Same swing, weapon swept first.
 	{
 		const FVector TargetLocation(0.f, 400.f, 0.f);
 		AARPGCombatDummy* Attacker = SpawnDummy(World, FVector(-400.f, 400.f, 0.f), TAG_Faction_Player, 100.f);
+		AARPGCombatDummy* Target = SpawnArmouredTarget(TargetLocation, /*IFrames=*/5.f);
+
+		FSwing Swing = BuildSwing(Attacker, 100.f, 40.f, /*ReachScale=*/1.f);
+		Swing.Arm(FVector(-400.f, 400.f, 0.f));
+
+		TickAt(Swing.Weapon, FVector(-300.f, 400.f, 0.f));
+		TickAt(Swing.Coating, FVector(-300.f, 400.f, 0.f));
+		TickAt(Swing.Weapon, TargetLocation);
+		TickAt(Swing.Coating, TargetLocation);
+
+		TestEqual(TEXT("order of the two sweeps does not change the outcome"),
+			GetHealth(Target), 500.f - 50.f - 40.f);
+	}
+
+	// --- The coating reaches further than the steel ----------------------------
+	// The reason it is a hitbox of its own rather than a second payload on the
+	// weapon's. A target inside the coating's radius but outside the blade's
+	// takes the fire and nothing else.
+	{
+		const FVector TargetLocation(0.f, 600.f, 0.f);
+		AARPGCombatDummy* Attacker = SpawnDummy(World, FVector(-400.f, 600.f, 0.f), TAG_Faction_Player, 100.f);
 		AARPGCombatDummy* Target = SpawnArmouredTarget(TargetLocation, /*IFrames=*/0.f);
 
-		UARPGHitboxComponent* Hitbox = AttachHitbox(Attacker, Physical, 100.f);
-		Hitbox->SetSourceActor(Attacker);
-		CoatWithFire(Hitbox, 40.f);
+		// AttachHitbox traces at 50; the coating at 4x reaches 200. Stopping short
+		// at 150 out puts the target inside the coating and outside the blade.
+		FSwing Swing = BuildSwing(Attacker, 100.f, 40.f, /*ReachScale=*/4.f);
+		Swing.Arm(FVector(-400.f, 600.f, 0.f));
+		Swing.SweepTo(FVector(-300.f, 600.f, 0.f));
+		Swing.SweepTo(FVector(-150.f, 600.f, 0.f));
 
-		Hitbox->ActivateHitbox();
-		TickAt(Hitbox, FVector(-300.f, 400.f, 0.f));
-		TickAt(Hitbox, TargetLocation);
-		TestEqual(TEXT("coated swing lands both halves"), GetHealth(Target), 500.f - 50.f - 40.f);
+		TestEqual(TEXT("a target the blade cannot reach still takes the fire"),
+			GetHealth(Target), 500.f - 40.f);
 
-		// The next swing is uncoated.
-		Hitbox->ClearElementalRider();
-		Hitbox->DeactivateHitbox();
-		Hitbox->SetWorldLocation(FVector(-400.f, 400.f, 0.f));
-		Hitbox->ActivateHitbox();
-		TickAt(Hitbox, FVector(-300.f, 400.f, 0.f));
-		TickAt(Hitbox, TargetLocation);
+		// And closing the rest of the way lands the steel, on a target the coating
+		// has already hit this activation and will not hit again.
+		Swing.SweepTo(TargetLocation);
+		TestEqual(TEXT("closing to contact adds the steel, and only the steel"),
+			GetHealth(Target), 500.f - 40.f - 50.f);
+	}
 
-		TestEqual(TEXT("the following swing deals steel only"),
-			GetHealth(Target), 500.f - 50.f - 40.f - 50.f);
+	// --- Unpairing restores ordinary i-frames ----------------------------------
+	// The bypass is scoped to one swing. Two hitboxes that are not partners are
+	// two attacks, and the second must still be stopped by the first's window.
+	{
+		const FVector TargetLocation(0.f, 800.f, 0.f);
+		AARPGCombatDummy* Attacker = SpawnDummy(World, FVector(-400.f, 800.f, 0.f), TAG_Faction_Player, 100.f);
+		AARPGCombatDummy* Target = SpawnArmouredTarget(TargetLocation, /*IFrames=*/5.f);
+
+		FSwing Swing = BuildSwing(Attacker, 100.f, 40.f, /*ReachScale=*/1.f);
+		Swing.Arm(FVector(-400.f, 800.f, 0.f));
+		Swing.Disarm();
+
+		// Re-armed as two unrelated hitboxes.
+		Swing.Weapon->SetWorldLocation(FVector(-400.f, 800.f, 0.f));
+		Swing.Coating->SetWorldLocation(FVector(-400.f, 800.f, 0.f));
+		Swing.Weapon->ActivateHitbox();
+		Swing.Coating->ActivateHitbox();
+
+		Swing.SweepTo(FVector(-300.f, 800.f, 0.f));
+		Swing.SweepTo(TargetLocation);
+
+		// The coating swept first, landed, and shut the window on the steel.
+		TestEqual(TEXT("without a pairing the second hitbox is stopped by i-frames"),
+			GetHealth(Target), 500.f - 40.f);
 	}
 
 	return true;

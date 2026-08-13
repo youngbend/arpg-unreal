@@ -36,15 +36,31 @@ class ARPGCOMBAT_API IARPGSwingAugment
 
 public:
 	/**
-	 * Stamp whatever this augment contributes onto one hitbox window, scaled by
+	 * Bring up whatever this augment contributes to one hitbox window, scaled by
 	 * that window's motion value.
 	 *
-	 * Called immediately before the hitbox is armed, so the first sweep already
-	 * carries the payload, and once PER WINDOW -- a double-hit swing asks twice,
-	 * with each window's own motion value.
+	 * Called immediately before the swing's own hitbox is armed, and once PER
+	 * WINDOW -- a double-hit swing asks twice, with each window's own motion
+	 * value.
+	 *
+	 * SwingHitbox is the hitbox the attack is about to arm. It is passed as an
+	 * ANCHOR, not a target: the augment reads its transform, its trace settings
+	 * and its reach to build something alongside it, and must not rewrite its
+	 * payload -- that belongs to the weapon.
 	 */
 	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "ARPG|Combat")
-	void ArmSwingAugment(UARPGHitboxComponent* Hitbox, float MotionValue);
+	void ArmSwingAugment(UARPGHitboxComponent* SwingHitbox, float MotionValue);
+
+	/**
+	 * The window closed. Take down anything ArmSwingAugment brought up; the
+	 * augment itself lives on until NotifySwingEnded.
+	 *
+	 * Called from the melee ability's disarm path, which runs on every exit
+	 * including cancellation -- so an interrupted swing cannot leave a live
+	 * elemental hitbox sweeping behind it.
+	 */
+	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "ARPG|Combat")
+	void DisarmSwingAugment();
 
 	/**
 	 * The attack has ended, cancelled or not. Spend here rather than on the

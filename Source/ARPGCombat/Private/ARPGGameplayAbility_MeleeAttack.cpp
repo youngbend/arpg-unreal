@@ -367,11 +367,9 @@ void UARPGGameplayAbility_MeleeAttack::ArmHitbox(int32 WindowIndex, bool bLandin
 	// hitbox happens to be parented to.
 	Hitbox->SetSourceActor(GetAvatarActorFromActorInfo());
 
-	// Anything riding this swing -- an imbued coating, in practice -- gets its
-	// payload on before the hitbox goes live, so the very first sweep carries it.
-	// Cleared first: a window that is no longer augmented must not inherit the
-	// previous one's rider, and the augment may decline to stamp this window.
-	Hitbox->ClearElementalRider();
+	// Anything riding this swing -- an imbued coating, in practice -- comes up
+	// first, so its own sweep starts from the same frame as the weapon's rather
+	// than a tick behind it. The augment reads this hitbox but does not own it.
 	if (UObject* Augment = ARPGSwingAugments::FindActive(GetAbilitySystemComponentFromActorInfo()))
 	{
 		IARPGSwingAugment::Execute_ArmSwingAugment(Augment, Hitbox, MotionValue);
@@ -383,6 +381,14 @@ void UARPGGameplayAbility_MeleeAttack::ArmHitbox(int32 WindowIndex, bool bLandin
 
 void UARPGGameplayAbility_MeleeAttack::DisarmHitbox()
 {
+	// Before the weapon hitbox goes down, so the coating cannot outlive the
+	// window that raised it -- and unconditionally, since an augment can be armed
+	// on a window this ability then failed to record.
+	if (UObject* Augment = ARPGSwingAugments::FindActive(GetAbilitySystemComponentFromActorInfo()))
+	{
+		IARPGSwingAugment::Execute_DisarmSwingAugment(Augment);
+	}
+
 	if (ArmedHitbox)
 	{
 		ArmedHitbox->DeactivateHitbox();
@@ -391,11 +397,6 @@ void UARPGGameplayAbility_MeleeAttack::DisarmHitbox()
 		{
 			ArmedHitbox->DamageType = CachedHitboxDamageType;
 		}
-
-		// For the same reason the damage type is restored, and unconditionally:
-		// the rider belongs to the window that armed it, and one left behind
-		// would coat every later swing on this character for free.
-		ArmedHitbox->ClearElementalRider();
 
 		ArmedHitbox = nullptr;
 	}

@@ -2,6 +2,7 @@
 
 #include "ARPGGameplayAbility_Imbue.h"
 #include "ARPGElementTintable.h"
+#include "ARPGElementalCoating.h"
 #include "ARPGGameplayTags.h"
 #include "ARPGHitboxComponent.h"
 #include "ARPGMagic.h"
@@ -129,14 +130,60 @@ void UARPGGameplayAbility_Imbue::SpawnImbueEffect()
 	ImbueEffect->AttachToActor(Avatar, FAttachmentTransformRules::SnapToTargetIncludingScale);
 }
 
-bool UARPGGameplayAbility_Imbue::ApplyToHitbox(UARPGHitboxComponent* Hitbox, float MotionValue)
+UARPGHitboxComponent* UARPGGameplayAbility_Imbue::ResolveElementalHitbox(
+	UARPGHitboxComponent* SwingHitbox)
 {
-	if (!Hitbox || !ImbuedElement)
+	if (ElementalHitbox)
+	{
+		return ElementalHitbox;
+	}
+
+	AActor* Avatar = GetAvatarActorFromActorInfo();
+	if (!Avatar || !SwingHitbox)
+	{
+		return nullptr;
+	}
+
+	// An authored one wins. A character given a coating hitbox was given it for a
+	// reason -- its own socket, a shape tuned to the silhouette -- and generating
+	// one anyway would throw that work away. bAllowFallback is false because
+	// there is nothing to fall back TO: borrowing the weapon's own hitbox would
+	// mean two abilities arming the same component every swing.
+	if (UARPGHitboxComponent* Authored = UARPGHitboxComponent::FindOnActor(
+			Avatar, EARPGHitboxSource::Elemental, /*bAllowFallback=*/false))
+	{
+		ElementalHitbox = Authored;
+		bOwnsElementalHitbox = false;
+		return ElementalHitbox;
+	}
+
+	// Otherwise make one. Imbuing has to work on any character that can swing,
+	// not only on those whose content has been revisited -- and the sensible
+	// default shape is the swing's own, scaled.
+	UARPGHitboxComponent* Created = NewObject<UARPGHitboxComponent>(Avatar);
+	Created->HitboxSource = EARPGHitboxSource::Elemental;
+	Created->RegisterComponent();
+
+	// Attached to the SWING'S hitbox rather than to a socket: a coating follows
+	// the blade, and whatever the attack chose to swing -- blade or boot -- is
+	// exactly what it should follow, at whatever offset that hitbox carries.
+	Created->AttachToComponent(SwingHitbox,
+		FAttachmentTransformRules::SnapToTargetIncludingScale);
+
+	ElementalHitbox = Created;
+	bOwnsElementalHitbox = true;
+	return ElementalHitbox;
+}
+
+bool UARPGGameplayAbility_Imbue::ArmElementalHitbox(UARPGHitboxComponent* SwingHitbox,
+	float MotionValue)
+{
+	if (!SwingHitbox || !ImbuedElement)
 	{
 		return false;
 	}
 
-	const AActor* Avatar = GetAvatarActorFromActorInfo();
+	AActor* Avatar = GetAvatarActorFromActorInfo();
 	const UARPGMagicComponent* Magic =
 		Avatar ? Avatar->FindComponentByClass<UARPGMagicComponent>() : nullptr;
 	if (!Magic)
@@ -144,20 +191,72 @@ bool UARPGGameplayAbility_Imbue::ApplyToHitbox(UARPGHitboxComponent* Hitbox, flo
 		return false;
 	}
 
-	// Attribution and the physical payload are the attack's business and are
-	// already set; this adds the elemental half beside them and touches nothing
-	// else on the hitbox.
-	Hitbox->SetElementalRider(Magic->BuildImbueRider(ImbuedElement, MotionValue));
+	UARPGHitboxComponent* Elemental = ResolveElementalHitbox(SwingHitbox);
+	if (!Elemental)
+	{
+		return false;
+	}
+
+	// Rebuilt per window rather than once per imbue: the damage is scaled by the
+	// window's motion value, and a two-window swing hits for different amounts.
+	Magic->BuildImbueCoating(ImbuedElement, MotionValue).ApplyTo(Elemental, *SwingHitbox);
+
+	// The swing belongs to the character, whichever hitbox delivers it.
+	Elemental->SetSourceActor(Avatar);
+
+	// Paired for the length of the window. Without this the wider elemental sweep
+	// and the weapon's own sweep would knock each other out on any target with
+	// i-frames -- see UARPGHitboxComponent::PairWithSwingPartner.
+	Elemental->PairWithSwingPartner(SwingHitbox);
+	Elemental->ActivateHitbox();
+
 	return true;
 }
 
-void UARPGGameplayAbility_Imbue::ArmSwingAugment_Implementation(UARPGHitboxComponent* Hitbox,
+void UARPGGameplayAbility_Imbue::DisarmElementalHitbox()
+{
+	if (!ElementalHitbox)
+	{
+		return;
+	}
+
+	ElementalHitbox->DeactivateHitbox();
+
+	// Unpaired as well as disarmed, so the weapon's hitbox is not left holding a
+	// partner that is no longer part of the swing it is about to make next.
+	ElementalHitbox->ClearSwingPartner();
+}
+
+void UARPGGameplayAbility_Imbue::ReleaseElementalHitbox()
+{
+	if (!ElementalHitbox)
+	{
+		return;
+	}
+
+	DisarmElementalHitbox();
+
+	if (bOwnsElementalHitbox)
+	{
+		ElementalHitbox->DestroyComponent();
+	}
+
+	ElementalHitbox = nullptr;
+	bOwnsElementalHitbox = false;
+}
+
+void UARPGGameplayAbility_Imbue::ArmSwingAugment_Implementation(UARPGHitboxComponent* SwingHitbox,
 	float MotionValue)
 {
-	if (ApplyToHitbox(Hitbox, MotionValue))
+	if (ArmElementalHitbox(SwingHitbox, MotionValue))
 	{
 		bDelivered = true;
 	}
+}
+
+void UARPGGameplayAbility_Imbue::DisarmSwingAugment_Implementation()
+{
+	DisarmElementalHitbox();
 }
 
 void UARPGGameplayAbility_Imbue::NotifySwingEnded_Implementation()
@@ -187,12 +286,15 @@ void UARPGGameplayAbility_Imbue::EndAbility(const FGameplayAbilitySpecHandle Han
 	bool bReplicateEndAbility, bool bWasCancelled)
 {
 	// Runs on every exit including cancellation, so an interrupted imbue cannot
-	// leave a coating actor stuck on the weapon.
+	// leave a coating actor stuck on the weapon -- nor a live elemental hitbox
+	// still sweeping behind a swing that was cut short.
 	if (ImbueEffect)
 	{
 		ImbueEffect->Destroy();
 		ImbueEffect = nullptr;
 	}
+
+	ReleaseElementalHitbox();
 
 	ImbuedElement = nullptr;
 	bDelivered = false;

@@ -6,8 +6,8 @@
 
 #include "ARPGCombatDummy.h"
 #include "ARPGDamageTypeAsset.h"
+#include "ARPGElementalCoating.h"
 #include "ARPGGameplayTags.h"
-#include "ARPGHitboxComponent.h"
 #include "ARPGMagicCaster.h"
 #include "ARPGMagicCombinationTable.h"
 #include "ARPGMagicComponent.h"
@@ -790,27 +790,33 @@ bool FARPGMagicImbueTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Poise likewise"),
 		Rig.Magic->GetImbuePoiseDamage(Rig.Fire, 2.f), 5.f);
 
-	// The rider is the whole payload the swing receives, and it is what actually
-	// reaches the hitbox -- the two formulas above are only half of it. Checked
-	// here rather than through the ability for the reason the discharge formulas
-	// are: an ability needs an avatar, an ASC and a granted spec before it runs.
+	// The coating is the whole payload the swing receives, and it is what
+	// configures the elemental hitbox -- the two formulas above are only part of
+	// it. Checked here rather than through the ability for the reason the
+	// discharge formulas are: an ability needs an avatar, an ASC and a granted
+	// spec before it runs.
 	UARPGDamageTypeAsset* FireDamage = NewObject<UARPGDamageTypeAsset>();
 	Rig.Fire->DamageType = FireDamage;
 	Rig.Fire->StatusDuration = 4.f;
+	Rig.Fire->ImbueReachScale = 2.5f;
 
-	const FARPGElementalRider Rider = Rig.Magic->BuildImbueRider(Rig.Fire, 2.f);
+	const FARPGElementalCoating Coating = Rig.Magic->BuildImbueCoating(Rig.Fire, 2.f);
 
-	TestEqual(TEXT("The rider carries the imbue damage"), Rider.BaseDamage, 20.f);
-	TestEqual(TEXT("And the imbue poise"), Rider.PoiseDamage, 5.f);
+	TestEqual(TEXT("The coating carries the imbue damage"), Coating.BaseDamage, 20.f);
+	TestEqual(TEXT("And the imbue poise"), Coating.PoiseDamage, 5.f);
 	TestSamePtr(TEXT("And the element's own damage type, which is the whole point"),
-		Rider.DamageType.Get(), FireDamage);
+		Coating.DamageType.Get(), FireDamage);
 	TestTrue(TEXT("Stamped with the element that delivered it"),
-		Rider.MagicElementTag == TAG_Element_Fire);
-	TestFalse(TEXT("A rider with damage in it is not empty"), Rider.IsEmpty());
+		Coating.MagicElementTag == TAG_Element_Fire);
 
-	// Nothing readied means nothing rides along, and an empty rider is what the
-	// hitbox tests for before doing any of the second-hit work.
-	TestTrue(TEXT("No element, no rider"), Rig.Magic->BuildImbueRider(nullptr, 2.f).IsEmpty());
+	// Reach travels with the element, not the weapon: this is what makes the
+	// coating a hitbox of its own rather than a second payload on the blade's.
+	TestEqual(TEXT("And the element's reach"), Coating.TraceRadiusScale, 2.5f);
+	TestFalse(TEXT("A coating with damage in it is not empty"), Coating.IsEmpty());
+
+	// Nothing readied means no coating, which is what the imbue checks before
+	// standing up an elemental hitbox at all.
+	TestTrue(TEXT("No element, no coating"), Rig.Magic->BuildImbueCoating(nullptr, 2.f).IsEmpty());
 
 	const float Before = Rig.Mana();
 	UARPGMagicElement* Consumed = Rig.Magic->ConsumeForImbue();

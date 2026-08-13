@@ -21,7 +21,18 @@ enum class EARPGHitboxSource : uint8
 	 * The character's own body. Kicks and unarmed strikes, which have to land
 	 * mid-combo without needing the sword to reach.
 	 */
-	BodyFoot
+	BodyFoot,
+	/**
+	 * An elemental coating's reach, armed alongside the swing it accompanies
+	 * rather than by an attack of its own.
+	 *
+	 * NEVER A FALLBACK TARGET. An attack that asks for a hitbox it does not have
+	 * may borrow another one (see FindOnActor), but not this: it is sized for a
+	 * coating rather than a blade, and it is already owned and armed by the
+	 * imbue. Handing it to a kick would swing the wrong shape and fight the
+	 * imbue for control of it.
+	 */
+	Elemental
 };
 
 /**

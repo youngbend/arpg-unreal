@@ -13,7 +13,6 @@ class UARPGDamageTypeAsset;
 class UARPGHurtboxComponent;
 class UGameplayEffect;
 class UAbilitySystemComponent;
-struct FGameplayEffectContextHandle;
 
 /**
  * Damage is the amount the hitbox APPLIED, before the target's mitigation.
@@ -24,59 +23,6 @@ struct FGameplayEffectContextHandle;
  */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FARPGOnHitLanded,
 	AActor*, HitActor, const FHitResult&, Hit, float, Damage);
-
-/**
- * A second, independently mitigated payload carried by the same contact.
- *
- * An imbued swing is what this exists for. The steel and the fire coating it are
- * not the same damage type, and adding them into one number would force a single
- * type through the mitigation pipeline -- armour would end up answering for the
- * fire, or resistance for the steel, and the interaction that makes imbuing worth
- * doing disappears. Two specs, two damage types, two resistance lookups.
- *
- * DELIVERED FROM ONE SWEEP, NOT A SECOND HITBOX. Two hitbox components tracing
- * the same arc is the more literal reading of "two independent hits", and it is
- * the wrong one: the target's invincibility window opens on the first hit that
- * lands (UARPGHurtboxComponent::TryConsumeHit), so the second would be silently
- * swallowed on any character authored with an InvincibilityDuration -- and two
- * sweeps can disagree about what they touched. What has to stay independent is
- * the MITIGATION, not the collision.
- *
- * The rider does not re-apply knockback or hit-stop. One blow is one shove and
- * one freeze; the coating rides along, it does not strike again.
- */
-USTRUCT(BlueprintType)
-struct FARPGElementalRider
-{
-	GENERATED_BODY()
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Hitbox|Damage")
-	float BaseDamage = 0.f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Hitbox|Damage")
-	float PoiseDamage = 0.f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Hitbox|Damage")
-	TObjectPtr<UARPGDamageTypeAsset> DamageType;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Hitbox|Damage",
-		meta = (Categories = "Element"))
-	FGameplayTag MagicElementTag;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Hitbox|Damage")
-	TArray<TSubclassOf<UGameplayEffect>> OnHitEffects;
-
-	/** Overrides each rider effect's own duration when > 0. As OnHitEffectDuration. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Hitbox|Damage",
-		meta = (ClampMin = "0.0"))
-	float OnHitEffectDuration = 0.f;
-
-	/** The default state, and what an uncoated swing carries. */
-	bool IsEmpty() const
-	{
-		return BaseDamage <= 0.f && PoiseDamage <= 0.f && OnHitEffects.Num() == 0;
-	}
-};
 
 /**
  * Delivers damage along a swing. Port of Godot's HitboxComponent.
@@ -193,24 +139,6 @@ public:
 		meta = (ClampMin = "0.0"))
 	float OnHitEffectDuration = 0.f;
 
-	/**
-	 * An extra elemental hit delivered by the same contact -- see
-	 * FARPGElementalRider. Empty on an ordinary swing.
-	 *
-	 * PER-WINDOW, like BaseDamage and unlike WeaponBaseDamage. Whoever sets it
-	 * owns clearing it: a rider left behind would coat every later swing for
-	 * free, which is the same trap the melee ability's DamageTypeOverride
-	 * snapshot exists to avoid.
-	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Hitbox|Damage")
-	FARPGElementalRider ElementalRider;
-
-	UFUNCTION(BlueprintCallable, Category = "ARPG|Hitbox")
-	void SetElementalRider(const FARPGElementalRider& Rider) { ElementalRider = Rider; }
-
-	UFUNCTION(BlueprintCallable, Category = "ARPG|Hitbox")
-	void ClearElementalRider() { ElementalRider = FARPGElementalRider(); }
-
 	// --- Activation behaviour -------------------------------------------------
 
 	/** Stop monitoring after the first successful hit. */
@@ -280,6 +208,45 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "ARPG|Hitbox")
 	void SetSourceActor(AActor* NewSource) { SourceActorOverride = NewSource; }
 
+	// --- Swing pairing --------------------------------------------------------
+
+	/**
+	 * Marks two hitboxes as halves of ONE swing. Symmetric -- pairing a with b
+	 * pairs b with a.
+	 *
+	 * WHY THIS HAS TO EXIST. An imbued swing arms two hitboxes: the weapon's, and
+	 * a wider one for the coating. Whichever lands first calls TryConsumeHit and
+	 * opens the target's invincibility window, and the other then arrives to find
+	 * it shut -- so on any character authored with an InvincibilityDuration, one
+	 * half of every imbued swing would silently vanish. Which half depended on
+	 * component tick order, so it would not even vanish consistently.
+	 *
+	 * The fix is to say what is actually true: i-frames gate ATTACKS, not the
+	 * individual payloads one attack delivers. A partner that has already cleared
+	 * a target this activation has cleared it for the swing, so the other half
+	 * lands without consuming the window a second time.
+	 *
+	 * This deliberately does NOT loosen anything else. Dodge i-frames and
+	 * State.Invulnerable stop both halves, because neither partner gets to hit at
+	 * all and so neither can vouch for the other. A window opened by a DIFFERENT
+	 * attack still blocks both. And a channelled attack re-hitting the same
+	 * target through TickInterval is one hitbox hitting twice, not two hitboxes
+	 * hitting once, so it is unaffected.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "ARPG|Hitbox")
+	void PairWithSwingPartner(UARPGHitboxComponent* Partner);
+
+	/** Breaks the pairing from both sides. Safe when there is none. */
+	UFUNCTION(BlueprintCallable, Category = "ARPG|Hitbox")
+	void ClearSwingPartner();
+
+	/**
+	 * Whether this hitbox has already damaged a target during the current
+	 * activation -- which means it has already cleared that target's guard.
+	 */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Hitbox")
+	bool HasHitThisActivation(AActor* Target) const;
+
 	UPROPERTY(BlueprintAssignable, Category = "ARPG|Hitbox")
 	FARPGOnHitLanded OnHitLanded;
 
@@ -290,6 +257,10 @@ private:
 
 	UPROPERTY(Transient)
 	TWeakObjectPtr<AActor> SourceActorOverride;
+
+	/** The other half of the same swing, if any. See PairWithSwingPartner. */
+	UPROPERTY(Transient)
+	TWeakObjectPtr<UARPGHitboxComponent> SwingPartner;
 
 	/** Damaged during this activation. Cleared on arm, and every TickInterval. */
 	TSet<TWeakObjectPtr<AActor>> HitTargets;
@@ -310,13 +281,4 @@ private:
 	UAbilitySystemComponent* ResolveSourceASC() const;
 	void PerformSweep();
 	void DeliverHit(UARPGHurtboxComponent* Hurtbox, const FHitResult& Hit);
-
-	/** The elemental half of one contact. Only called when the rider is set. */
-	void DeliverElementalRider(UAbilitySystemComponent* SourceASC,
-		UAbilitySystemComponent* TargetASC, const FHitResult& Hit, bool bCritical);
-
-	/** Shared by the physical hit and the rider, which differ only in what they carry. */
-	static void ApplyOnHitEffects(UAbilitySystemComponent* SourceASC,
-		UAbilitySystemComponent* TargetASC, const FGameplayEffectContextHandle& ContextHandle,
-		const TArray<TSubclassOf<UGameplayEffect>>& Effects, float DurationOverride);
 };

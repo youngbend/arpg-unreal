@@ -450,29 +450,31 @@ float UARPGMagicComponent::GetImbuePoiseDamage(const UARPGMagicElement* Element,
 	return Element->BasePoiseDamage * ImbueDamageMultiplier * MotionValue;
 }
 
-FARPGElementalRider UARPGMagicComponent::BuildImbueRider(const UARPGMagicElement* Element,
+FARPGElementalCoating UARPGMagicComponent::BuildImbueCoating(const UARPGMagicElement* Element,
 	float MotionValue) const
 {
-	FARPGElementalRider Rider;
+	FARPGElementalCoating Coating;
 	if (!Element)
 	{
-		return Rider;
+		return Coating;
 	}
 
-	Rider.BaseDamage = GetImbueDamage(Element, MotionValue);
-	Rider.PoiseDamage = GetImbuePoiseDamage(Element, MotionValue);
-	Rider.DamageType = Element->DamageType;
-	Rider.MagicElementTag = Element->ElementTag;
+	Coating.BaseDamage = GetImbueDamage(Element, MotionValue);
+	Coating.PoiseDamage = GetImbuePoiseDamage(Element, MotionValue);
+	Coating.DamageType = Element->DamageType;
+	Coating.MagicElementTag = Element->ElementTag;
+	Coating.TraceRadiusScale = Element->ImbueReachScale;
 
 	// Read off whichever element is active at the moment of consumption, so a
-	// resolved combination brings its own status rather than either half's.
+	// resolved combination brings its own status, damage type and reach rather
+	// than either half's.
 	if (Element->OnHitEffect)
 	{
-		Rider.OnHitEffects.Add(Element->OnHitEffect);
-		Rider.OnHitEffectDuration = Element->StatusDuration;
+		Coating.OnHitEffects.Add(Element->OnHitEffect);
+		Coating.OnHitEffectDuration = Element->StatusDuration;
 	}
 
-	return Rider;
+	return Coating;
 }
 
 // ---------------------------------------------------------------------------

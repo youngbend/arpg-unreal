@@ -96,6 +96,23 @@ public:
 	float BasePoiseDamage = 0.f;
 
 	/**
+	 * How far past the blade this element reaches when it coats a weapon, as a
+	 * multiple of that weapon's own hitbox radius.
+	 *
+	 * A coating is not painted on the edge -- a burning sword swings a sheath of
+	 * hot air, and a frost one a wider chill -- so an imbued swing arms a second,
+	 * larger hitbox for the element and this is how much larger. 1 keeps it
+	 * exactly on the edge, which is the safe default; above that the coating
+	 * starts catching things the steel misses.
+	 *
+	 * A multiple rather than an absolute radius so one authored number reads the
+	 * same on a dagger and a greatsword.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Damage",
+		meta = (ClampMin = "0.01"))
+	float ImbueReachScale = 1.f;
+
+	/**
 	 * Damage per second to anything standing inside a reservoir volume made of
 	 * this element -- a lava pool.
 	 *

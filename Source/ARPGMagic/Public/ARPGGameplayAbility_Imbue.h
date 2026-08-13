@@ -20,20 +20,27 @@ class UARPGMagicElement;
  * That is also why it can use an ordinary one-shot cost path while the four
  * chargeable types cannot.
  *
- * THE ELEMENTAL HIT IS SEPARATE FROM THE WEAPON'S. The weapon deals its own
+ * THE ELEMENTAL HITBOX IS SEPARATE FROM THE WEAPON'S. The weapon deals its own
  * physical damage and the imbue deals elemental damage on the same swing, as two
- * independent hits. Folding them into one would force a single damage type
- * through the mitigation pipeline and lose exactly the interaction that makes
- * imbuing worthwhile -- armour resists the steel, resistance resists the fire,
- * and they are not the same number. Separate MITIGATION, one contact: the
- * payload rides the weapon's own hitbox as an FARPGElementalRider, which is
- * documented there and is not the same thing as a second hitbox.
+ * independent hits, from two hitboxes. Folding them into one would force a
+ * single damage type through the mitigation pipeline and lose exactly the
+ * interaction that makes imbuing worthwhile -- armour resists the steel,
+ * resistance resists the fire, and they are not the same number. And a coating
+ * reaches further than the edge it is on, which one hitbox cannot express at
+ * all: see FARPGElementalCoating::TraceRadiusScale.
+ *
+ * The ability OWNS that hitbox, creating one at runtime when the character has
+ * no authored EARPGHitboxSource::Elemental of its own, so imbuing works on every
+ * character without anyone having to remember to add a component. It is paired
+ * with the weapon's hitbox for the duration of each window, which is what stops
+ * the two halves cancelling each other out on the target's i-frames -- see
+ * UARPGHitboxComponent::PairWithSwingPartner.
  *
  * THE SWING DRIVES THIS, NOT THE OTHER WAY AROUND. The ability holds the coating
- * and waits; UARPGGameplayAbility_MeleeAttack stamps it onto each hitbox window
- * and tells it when the attack ended, through IARPGSwingAugment. Combat cannot
- * name anything in ARPGMagic -- see that interface for why it has to be this way
- * round.
+ * and waits; UARPGGameplayAbility_MeleeAttack raises it for each hitbox window,
+ * takes it down again, and tells it when the attack ended, through
+ * IARPGSwingAugment. Combat cannot name anything in ARPGMagic -- see that
+ * interface for why it has to be this way round.
  *
  * ONE COATING AT A TIME. InstancedPerActor and not retriggerable, so a second
  * press while a coating is already held is refused: the readied element stays
@@ -73,17 +80,20 @@ public:
 	bool IsImbued() const { return ImbuedElement != nullptr; }
 
 	/**
-	 * Stamps the imbue's elemental payload onto a hitbox as a rider, for one
-	 * window, scaled by that window's motion value. Returns false when there is
-	 * nothing to stamp.
+	 * Brings up the elemental hitbox alongside SwingHitbox for one window, scaled
+	 * by that window's motion value. Returns false when there is nothing to arm.
 	 *
-	 * A RIDER, NOT A REWRITE. The hitbox's own BaseDamage, DamageType and
-	 * OnHitEffects are the WEAPON's and are left exactly as the attack armed
-	 * them -- writing the element over them would replace the physical hit
-	 * instead of accompanying it, which is the opposite of the point.
+	 * ACCOMPANIES, NEVER REWRITES. SwingHitbox is read for its transform, reach
+	 * and trace settings and is otherwise left exactly as the attack armed it --
+	 * its damage and damage type are the WEAPON's, and writing the element over
+	 * them would replace the physical hit instead of adding to it.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "ARPG|Imbue")
-	bool ApplyToHitbox(class UARPGHitboxComponent* Hitbox, float MotionValue);
+	bool ArmElementalHitbox(class UARPGHitboxComponent* SwingHitbox, float MotionValue);
+
+	/** Takes the elemental hitbox back down. The coating itself survives. */
+	UFUNCTION(BlueprintCallable, Category = "ARPG|Imbue")
+	void DisarmElementalHitbox();
 
 	/** Spends the imbue and ends the ability, dropping the coating and its VFX. */
 	UFUNCTION(BlueprintCallable, Category = "ARPG|Imbue")
@@ -91,18 +101,42 @@ public:
 
 	// --- IARPGSwingAugment ----------------------------------------------------
 
-	virtual void ArmSwingAugment_Implementation(UARPGHitboxComponent* Hitbox,
+	virtual void ArmSwingAugment_Implementation(UARPGHitboxComponent* SwingHitbox,
 		float MotionValue) override;
+	virtual void DisarmSwingAugment_Implementation() override;
 	virtual void NotifySwingEnded_Implementation() override;
 
 private:
 	void SpawnImbueEffect();
+
+	/**
+	 * The character's authored elemental hitbox, or a fresh one attached to the
+	 * swing's hitbox so it traces the same arc at its own size.
+	 *
+	 * Attached to the WEAPON HITBOX rather than to a socket, in the created case:
+	 * a coating follows the blade, and whatever the attack chose to swing --
+	 * blade or boot -- is exactly what this needs to follow, at whatever offset
+	 * that hitbox has been authored with.
+	 */
+	UARPGHitboxComponent* ResolveElementalHitbox(UARPGHitboxComponent* SwingHitbox);
+
+	/** Destroys the elemental hitbox if this ability was the one that made it. */
+	void ReleaseElementalHitbox();
 
 	UPROPERTY(Transient)
 	TObjectPtr<UARPGMagicElement> ImbuedElement;
 
 	UPROPERTY(Transient)
 	TObjectPtr<AActor> ImbueEffect;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UARPGHitboxComponent> ElementalHitbox;
+
+	/**
+	 * Whether ElementalHitbox is ours to destroy. False when the character
+	 * authored one -- borrowing a component does not entitle us to delete it.
+	 */
+	bool bOwnsElementalHitbox = false;
 
 	/**
 	 * Whether the coating actually reached a live hitbox window.

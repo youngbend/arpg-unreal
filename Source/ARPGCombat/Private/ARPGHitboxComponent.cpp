@@ -49,7 +49,56 @@ UARPGHitboxComponent* UARPGHitboxComponent::FindOnActor(const AActor* Actor,
 		}
 	}
 
-	return (bAllowFallback && Hitboxes.Num() > 0) ? Hitboxes[0] : nullptr;
+	if (!bAllowFallback)
+	{
+		return nullptr;
+	}
+
+	// The fallback answers "any hitbox that can carry an ordinary attack", and an
+	// elemental one cannot -- see EARPGHitboxSource::Elemental. Skipping it here
+	// rather than at the call sites is what keeps a character that has been given
+	// a coating hitbox from having it borrowed by the next kick.
+	for (UARPGHitboxComponent* Hitbox : Hitboxes)
+	{
+		if (Hitbox->HitboxSource != EARPGHitboxSource::Elemental)
+		{
+			return Hitbox;
+		}
+	}
+
+	return nullptr;
+}
+
+void UARPGHitboxComponent::PairWithSwingPartner(UARPGHitboxComponent* Partner)
+{
+	if (Partner == this)
+	{
+		return;
+	}
+
+	SwingPartner = Partner;
+
+	// Set from both ends, because the rule it enables is symmetric: whichever
+	// half sweeps first is decided by component tick order, and neither is
+	// entitled to assume it was the one that opened the window.
+	if (Partner)
+	{
+		Partner->SwingPartner = this;
+	}
+}
+
+void UARPGHitboxComponent::ClearSwingPartner()
+{
+	if (UARPGHitboxComponent* Partner = SwingPartner.Get())
+	{
+		Partner->SwingPartner = nullptr;
+	}
+	SwingPartner = nullptr;
+}
+
+bool UARPGHitboxComponent::HasHitThisActivation(AActor* Target) const
+{
+	return Target && HitTargets.Contains(Target);
 }
 
 void UARPGHitboxComponent::ActivateHitbox()
@@ -215,7 +264,15 @@ void UARPGHitboxComponent::PerformSweep()
 			continue;
 		}
 
-		if (!Hurtbox->TryConsumeHit())
+		// The other half of this same swing already got through this target's
+		// guard, so this half is not asked to get through it again -- see
+		// PairWithSwingPartner. Without this the wider elemental sweep and the
+		// weapon's own sweep would cancel each other out on any target with
+		// i-frames, and which one survived would depend on tick order.
+		const UARPGHitboxComponent* Partner = SwingPartner.Get();
+		const bool bPartnerAlreadyCleared = Partner && Partner->HasHitThisActivation(HitActor);
+
+		if (!bPartnerAlreadyCleared && !Hurtbox->TryConsumeHit())
 		{
 			continue; // i-frames
 		}
@@ -254,19 +311,6 @@ void UARPGHitboxComponent::DeliverHit(UARPGHurtboxComponent* Hurtbox, const FHit
 		return;
 	}
 
-	// Rolled HERE, on the server, and carried on the context. Rolling it inside
-	// the execution would be equally authoritative but would let the client's hit
-	// reaction disagree with the number it is reacting to. The wielder's own crit
-	// chance (archetype, weapon affixes, buffs) plus whatever this attack adds.
-	//
-	// Hoisted out of the context block so the elemental rider can be handed the
-	// SAME roll: one contact crits or it does not, and a swing that crit with its
-	// steel but not with its fire would be indefensible on screen.
-	const float TotalCritChance = FMath::Clamp(
-		SourceASC->GetNumericAttribute(UARPGOffenseSet::GetCritChanceAttribute()) + CriticalChance,
-		0.f, 1.f);
-	const bool bCritical = TotalCritChance > 0.f && FMath::FRand() < TotalCritChance;
-
 	FGameplayEffectContextHandle ContextHandle = SourceASC->MakeEffectContext();
 	ContextHandle.AddSourceObject(this);
 	ContextHandle.AddHitResult(Hit);
@@ -285,7 +329,16 @@ void UARPGHitboxComponent::DeliverHit(UARPGHurtboxComponent* Hurtbox, const FHit
 		Context->Penetration = PenetrationOverride;
 		Context->bUnblockable = bUnblockable;
 		Context->MagicElementTag = MagicElementTag;
-		Context->bIsCritical = bCritical;
+
+		// Rolled HERE, on the server, and carried on the context. Rolling it
+		// inside the execution would be equally authoritative but would let the
+		// client's hit reaction disagree with the number it is reacting to.
+		// The wielder's own crit chance (archetype, weapon affixes, buffs) plus
+		// whatever this particular attack adds on top.
+		const float TotalCritChance = FMath::Clamp(
+			SourceASC->GetNumericAttribute(UARPGOffenseSet::GetCritChanceAttribute()) + CriticalChance,
+			0.f, 1.f);
+		Context->bIsCritical = TotalCritChance > 0.f && FMath::FRand() < TotalCritChance;
 	}
 
 	const FGameplayEffectSpecHandle SpecHandle =
@@ -307,88 +360,12 @@ void UARPGHitboxComponent::DeliverHit(UARPGHurtboxComponent* Hurtbox, const FHit
 	UARPGHitStopComponent::ApplyToPair(
 		SourceASC->GetAvatarActor(), TargetASC->GetAvatarActor(), HitStopDuration);
 
-	ApplyOnHitEffects(SourceASC, TargetASC, ContextHandle, OnHitEffects, OnHitEffectDuration);
-
-	// The coating goes through the pipeline as its OWN hit, with its own damage
-	// type -- see FARPGElementalRider. Last, so the physical blow and anything it
-	// inflicted resolve first, exactly as the status effects do.
-	if (!ElementalRider.IsEmpty())
-	{
-		DeliverElementalRider(SourceASC, TargetASC, Hit, bCritical);
-	}
-
-	// The PHYSICAL amount only. These feed progression and hit feedback, and an
-	// imbued swing is not a bigger weapon hit than an uncoated one -- folding the
-	// element in here would pay weapon proficiency for the spell.
-	Hurtbox->OnHitReceived.Broadcast(ContextHandle, BaseDamage);
-	OnHitLanded.Broadcast(Hit.GetActor(), Hit, BaseDamage);
-}
-
-void UARPGHitboxComponent::DeliverElementalRider(UAbilitySystemComponent* SourceASC,
-	UAbilitySystemComponent* TargetASC, const FHitResult& Hit, bool bCritical)
-{
-	if (!DamageEffectClass)
-	{
-		return;
-	}
-
-	// A context of its own rather than a second spec off the physical one: the
-	// damage type is the thing that has to differ, and it is carried on the
-	// context, not the spec.
-	FGameplayEffectContextHandle ContextHandle = SourceASC->MakeEffectContext();
-	ContextHandle.AddSourceObject(this);
-	ContextHandle.AddHitResult(Hit);
-
-	if (FARPGGameplayEffectContext* Context =
-			FARPGGameplayEffectContext::ExtractFrom(ContextHandle))
-	{
-		Context->SourceHitbox = this;
-		Context->DamageType = ElementalRider.DamageType;
-		Context->ContactPoint = Hit.ImpactPoint;
-		Context->bHasContactPoint = true;
-		Context->PoiseDamage = ElementalRider.PoiseDamage;
-		Context->MagicElementTag = ElementalRider.MagicElementTag;
-		Context->bIsCritical = bCritical;
-
-		// Blockability follows the SWING. A coating cannot make an unblockable
-		// attack blockable, or the reverse -- the player is reading the wind-up,
-		// not the element.
-		Context->bUnblockable = bUnblockable;
-
-		// Left at the default so the ELEMENT's damage type decides how much
-		// resistance is ignored. PenetrationOverride is the weapon's answer for
-		// steel and has nothing to say about fire.
-		Context->Penetration = -1.f;
-
-		// KnockbackForce and HitStopDuration stay at zero, and no second
-		// ApplyToPair call follows: the physical hit already shoved and froze.
-	}
-
-	const FGameplayEffectSpecHandle SpecHandle =
-		SourceASC->MakeOutgoingSpec(DamageEffectClass, 1.f, ContextHandle);
-
-	if (!SpecHandle.IsValid())
-	{
-		return;
-	}
-
-	SpecHandle.Data->SetSetByCallerMagnitude(TAG_Data_Damage, ElementalRider.BaseDamage);
-	SourceASC->ApplyGameplayEffectSpecToTarget(*SpecHandle.Data, TargetASC);
-
-	ApplyOnHitEffects(SourceASC, TargetASC, ContextHandle,
-		ElementalRider.OnHitEffects, ElementalRider.OnHitEffectDuration);
-}
-
-void UARPGHitboxComponent::ApplyOnHitEffects(UAbilitySystemComponent* SourceASC,
-	UAbilitySystemComponent* TargetASC, const FGameplayEffectContextHandle& ContextHandle,
-	const TArray<TSubclassOf<UGameplayEffect>>& Effects, float DurationOverride)
-{
 	// Applied AFTER the damage, and through the same context, so a status can be
 	// read alongside the hit that carried it -- and so a target killed by the
 	// damage does not also catch fire. Each gets its own spec rather than being
 	// folded into the damage effect: they have their own durations, stacking and
 	// application gating, none of which the damage pipeline knows about.
-	for (const TSubclassOf<UGameplayEffect>& EffectClass : Effects)
+	for (const TSubclassOf<UGameplayEffect>& EffectClass : OnHitEffects)
 	{
 		if (!EffectClass)
 		{
@@ -402,18 +379,21 @@ void UARPGHitboxComponent::ApplyOnHitEffects(UAbilitySystemComponent* SourceASC,
 			continue;
 		}
 
-		if (DurationOverride > 0.f)
+		if (OnHitEffectDuration > 0.f)
 		{
 			// SetDuration rather than a SetByCaller magnitude: the status effects
 			// carry fixed authored durations, and overriding on the spec means an
 			// element can retime one without every status having to be rebuilt
 			// around a caller-supplied duration it usually does not want.
 			// bLockDuration stops the effect recomputing it back on application.
-			StatusSpec.Data->SetDuration(DurationOverride, /*bLockDuration=*/true);
+			StatusSpec.Data->SetDuration(OnHitEffectDuration, /*bLockDuration=*/true);
 		}
 
 		SourceASC->ApplyGameplayEffectSpecToTarget(*StatusSpec.Data, TargetASC);
 	}
+
+	Hurtbox->OnHitReceived.Broadcast(ContextHandle, BaseDamage);
+	OnHitLanded.Broadcast(Hit.GetActor(), Hit, BaseDamage);
 }
 
 AActor* UARPGHitboxComponent::ResolveSourceActor() const
