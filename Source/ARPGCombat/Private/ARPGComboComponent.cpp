@@ -505,6 +505,24 @@ void UARPGComboComponent::StartAttack(EARPGAttackInput Input, bool bEmpowered)
 		return;
 	}
 
+	// Chain depth, snapshotted for the beat about to run. The root-fallback
+	// branch above has already cleared CurrentNode where it applies, but the
+	// counter is reset here rather than there so both the fresh-chain and
+	// continuation cases are visible in one place.
+	if (bFallsBackToRoot)
+	{
+		BeatsThisChain = 0;
+	}
+	ChainDepth = BeatsThisChain;
+
+	// An override ends the chain rather than extending it, so it does not count
+	// itself. That is what lets it be paid for what the player had already built
+	// without also inflating the next thing to read this.
+	if (Next != OverrideNode)
+	{
+		++BeatsThisChain;
+	}
+
 	CurrentNode = Next;
 	bAttacking = true;
 	ResetTimer = 0.f;
@@ -602,6 +620,7 @@ void UARPGComboComponent::ResetCombo()
 	}
 
 	CurrentNode = nullptr;
+	BeatsThisChain = 0;
 	ResetTimer = 0.f;
 	RefreshTickState();
 	OnComboReset.Broadcast();
@@ -663,6 +682,7 @@ void UARPGComboComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 		if (ResetTimer <= 0.f)
 		{
 			CurrentNode = nullptr;
+			BeatsThisChain = 0;
 			OnComboReset.Broadcast();
 		}
 	}

@@ -156,8 +156,10 @@ ELEMENTS = [
         # chain. Everything above is a continuation imbue.
         #
         # It earns the type by not being expressible as one. Every other element
-        # answers "what is this hit made of"; magnetism answers "where is
-        # everyone standing", and a damage type cannot say that.
+        # answers "what is this hit made of", and could therefore be a coating.
+        # Magnetism takes the weapon out of your hands and flies it -- which is
+        # not a property of the hit at all, it is a different attack. No damage
+        # type can say that, so it gets three moves instead.
         "id": "Magnetism", "tag": "Element.Magnetism", "display": "Magnetism",
         "core": colour(0.72, 0.74, 0.82), "glow": colour(0.35, 0.42, 0.72, 0.95),
         "edge": colour(0.12, 0.14, 0.3, 0.0), "emission": 3.0,
@@ -167,54 +169,73 @@ ELEMENTS = [
         "base_damage": 18.0, "poise": 5.0, "cost": 0.0, "usage": 1.3,
         "complexity": 2,
         "status": "Shocked", "status_duration": 3.0,
-        # A FIELD, NOT AN EDGE. Three times the blade's reach is the mechanical
-        # expression of the fantasy: the pull catches people the sword cannot,
-        # which is the entire reason it is worth ending a combo for.
-        "imbue_reach": 3.0,
+        # A FIELD, NOT AN EDGE. The coating measures itself against the swing's
+        # hitbox AFTER that attack's own hitbox_radius has been applied, so these
+        # compound: the attack says how far out the weapon is flying, and this
+        # says how far the field extends past it. 1.6 on the floating slash's 2.2
+        # puts the lightning at 3.5x a held blade's reach.
+        "imbue_reach": 1.6,
         "imbue_type": unreal.ARPGImbueType.SPECIFIC_ATTACK,
         "imbue_attacks": {
-            "light": "MagnetismPull",
-            "heavy": "MagnetismRepulse",
-            "special": "MagnetismRail",
+            "light": "MagnetismFloatingSlash",
+            "heavy": "MagnetismSpin",
+            "special": "MagnetismToss",
         },
     },
 ]
 
-# The three moves magnetism performs instead of a swing.
+# The three moves magnetism performs instead of a swing. All three are the same
+# idea -- the weapon leaves the hand and is flown by the field -- read three ways.
 #
 # MONTAGES ARE LEFT UNSET, exactly as the VFX slots are: animation is authoring
 # work this script cannot do, and the melee ability already logs and releases the
-# combo cleanly for an attack with no montage. Everything else -- the timings
-# that make them read as commitments, and the displacement that is the point --
-# is here.
+# combo cleanly for an attack with no montage.
 #
-# NEGATIVE KnockbackPower PULLS. See UARPGCombatLibrary::ApplyKnockback.
+# THE ANIMATION CARRIES THE DISTANCE. The hitbox is attached to the weapon socket
+# and sweeps between frames, so a montage that sends the blade out on its own
+# extends the attack's reach for free and cannot tunnel past anything on the way.
+# hitbox_radius is only the looseness on top of that -- a blade flown at range
+# connects broadly, not on its edge.
+#
+# chain_bonus is the payoff for where the move was thrown from. Every one of
+# these ends the chain, so each is worth more the more chain it spends: at depth
+# 3 the light swings for 1.75x and the toss for 2.05x. Thrown from neutral they
+# are worth exactly their base, which is the trade the whole type rests on.
 MAGNETISM_ATTACKS = [
     {
-        # Light: the quick one. Low damage, and the damage is not why you press
-        # it -- you press it to drag a caster out of the back line, or to stop
-        # something walking away from you.
-        "id": "MagnetismPull", "display": "Lodestone Pull",
-        "motion_value": 0.5, "poise": 2.0, "knockback": -1200.0,
-        "stamina": 8.0, "speed_factor": 0.3, "lockout": 0.15, "hit_stop": 0.05,
+        # Light: the sword lets go and swings on its own, further out than an arm
+        # reaches. The cheapest of the three and the one that still feels like a
+        # sword attack -- it is the swing, just not held.
+        "id": "MagnetismFloatingSlash", "display": "Floating Slash",
+        "motion_value": 1.0, "hitbox_radius": 2.2,
+        "poise": 3.0, "poise_scales": False, "knockback": 250.0,
+        "stamina": 10.0, "speed_factor": 0.5, "lockout": 0.2, "hit_stop": 0.06,
+        "chain_bonus": 0.25,
     },
     {
-        # Heavy: the panic button. Rooted and hyperarmoured, because a move whose
-        # job is escaping a surround has to survive being surrounded while it
-        # comes out. Poise damage is where its value is, not the 0.8 motion.
-        "id": "MagnetismRepulse", "display": "Repulsion Field",
-        "motion_value": 0.8, "poise": 12.0, "knockback": 1400.0,
-        "stamina": 18.0, "speed_factor": 0.0, "lockout": 0.5, "hit_stop": 0.12,
-        "hyperarmor": True,
+        # Heavy: the weapon spins in front of the player. MULTIHIT is the whole
+        # move, and it is the hitbox's re-hit interval rather than anything new --
+        # the same mechanism a drill attack uses. Low motion value per tick,
+        # because it lands many of them.
+        #
+        # KNOCKBACK IS ZERO ON PURPOSE. Any shove per tick would push the target
+        # straight out of the spin and turn a blender into one hit.
+        "id": "MagnetismSpin", "display": "Spinning Guard",
+        "motion_value": 0.45, "hitbox_radius": 1.6, "tick_interval": 0.12,
+        "poise": 2.5, "poise_scales": True, "knockback": 0.0,
+        "stamina": 18.0, "speed_factor": 0.25, "lockout": 0.45, "hit_stop": 0.04,
+        "hyperarmor": True, "chain_bonus": 0.2,
     },
     {
-        # Special: the payoff. Rails the weapon out and back -- unblockable,
-        # heavily committed, and the long lockout is what stops it opening every
-        # fight instead of finishing one.
-        "id": "MagnetismRail", "display": "Rail",
-        "motion_value": 2.2, "poise": 8.0, "knockback": 600.0,
-        "stamina": 22.0, "speed_factor": 0.2, "lockout": 0.8, "hit_stop": 0.15,
-        "unblockable": True,
+        # Special: thrown like a spear and yanked back into the hand. TWO
+        # WINDOWS, which the attack definition already speaks -- motion_value is
+        # the throw and motion_value2 the return, so a target in the lane is hit
+        # going out and again coming back.
+        "id": "MagnetismToss", "display": "Rail Toss",
+        "motion_value": 1.6, "motion_value_2": 1.2, "hitbox_radius": 3.0,
+        "poise": 6.0, "poise_scales": True, "knockback": 400.0,
+        "stamina": 22.0, "speed_factor": 0.1, "lockout": 0.8, "hit_stop": 0.15,
+        "unblockable": True, "chain_bonus": 0.35,
     },
 ]
 
@@ -313,14 +334,20 @@ def make_imbue_attacks():
         asset.set_editor_property("attack_id", spec["id"])
         asset.set_editor_property("display_name", unreal.Text(spec["display"]))
         asset.set_editor_property("motion_value", spec["motion_value"])
+        asset.set_editor_property("motion_value2", spec.get("motion_value_2", 1.0))
+        asset.set_editor_property("hitbox_radius_scale", spec.get("hitbox_radius", 1.0))
+        asset.set_editor_property("hitbox_tick_interval", spec.get("tick_interval", 0.0))
         asset.set_editor_property("poise_damage", spec["poise"])
 
-        # Absolute, not a coefficient: these are utility moves whose stagger is
-        # the point, and scaling it by a deliberately low motion value would
-        # quietly undo the thing they are for.
-        asset.set_editor_property("poise_scales_with_motion", False)
+        # Scaled where the move's payoff should grow with the chain it spent,
+        # absolute where the stagger is a fixed utility the player is relying on.
+        asset.set_editor_property("poise_scales_with_motion", spec.get("poise_scales", True))
 
         asset.set_editor_property("knockback_power", spec["knockback"])
+
+        # What makes ending the chain a decision rather than a tax.
+        asset.set_editor_property("chain_depth_bonus", spec.get("chain_bonus", 0.0))
+        asset.set_editor_property("max_chain_depth", spec.get("max_chain_depth", 3))
         asset.set_editor_property("stamina_cost", spec["stamina"])
         asset.set_editor_property("movement_speed_factor", spec["speed_factor"])
         asset.set_editor_property("finisher_lockout", spec["lockout"])

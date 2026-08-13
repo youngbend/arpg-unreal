@@ -84,6 +84,11 @@ void UARPGGameplayAbility_MeleeAttack::ActivateAbility(
 	bMontageFinishHandled = false;
 	bWarnedHitboxFallback = false;
 	ChargeFraction = 1.f;
+
+	// What the player had already built when this beat started. Zero for a swing
+	// out of neutral, which is exactly the point -- see ChainDepthBonus.
+	const UARPGComboComponent* Combo = ResolveCombo();
+	ChainDepth = Combo ? Combo->GetChainDepth() : 0;
 	bCharging = CurrentAttack->bChargeable;
 	bChanneling = CurrentAttack->bChannel;
 	bChannelLoopEnded = false;
@@ -338,6 +343,12 @@ void UARPGGameplayAbility_MeleeAttack::ArmHitbox(int32 WindowIndex, bool bLandin
 		return; // a landing beat authored as pure visual, with no hit
 	}
 
+	// The chain-depth payoff, applied AFTER charge and to every window rather
+	// than only the first. Charge is deliberately limited to the opening blow
+	// because the player charged once; depth is different -- it is what the whole
+	// attack was bought with, so the whole attack is worth more.
+	MotionValue = CurrentAttack->GetChainScaledMotionValue(MotionValue, ChainDepth);
+
 	Hitbox->BaseDamage = Hitbox->WeaponBaseDamage * MotionValue;
 	Hitbox->PoiseDamage = CurrentAttack->GetEffectivePoiseDamage(MotionValue);
 	Hitbox->KnockbackForce = CurrentAttack->KnockbackPower;
@@ -361,6 +372,20 @@ void UARPGGameplayAbility_MeleeAttack::ArmHitbox(int32 WindowIndex, bool bLandin
 			bOverrodeDamageType = true;
 		}
 		Hitbox->DamageType = CurrentAttack->DamageTypeOverride;
+	}
+
+	// Reach, snapshotted the same way and for the same reason. Applied BEFORE the
+	// augment is armed just below, so a coating measuring itself against this
+	// hitbox measures the widened swing -- a field around a blade held out at
+	// arm's length is further out than the arm is.
+	if (!FMath::IsNearlyEqual(CurrentAttack->HitboxRadiusScale, 1.f))
+	{
+		if (!bOverrodeHitboxRadius)
+		{
+			CachedHitboxRadius = Hitbox->TraceRadius;
+			bOverrodeHitboxRadius = true;
+		}
+		Hitbox->TraceRadius = CachedHitboxRadius * CurrentAttack->HitboxRadiusScale;
 	}
 
 	// Attribution: the swing belongs to the character, not to whatever actor the
@@ -407,6 +432,11 @@ void UARPGGameplayAbility_MeleeAttack::DisarmHitbox()
 			ArmedHitbox->DamageType = CachedHitboxDamageType;
 		}
 
+		if (bOverrodeHitboxRadius)
+		{
+			ArmedHitbox->TraceRadius = CachedHitboxRadius;
+		}
+
 		ArmedHitbox = nullptr;
 	}
 
@@ -414,6 +444,8 @@ void UARPGGameplayAbility_MeleeAttack::DisarmHitbox()
 	// a stale snapshot for the next one to restore.
 	CachedHitboxDamageType = nullptr;
 	bOverrodeDamageType = false;
+	CachedHitboxRadius = 0.f;
+	bOverrodeHitboxRadius = false;
 }
 
 // ---------------------------------------------------------------------------

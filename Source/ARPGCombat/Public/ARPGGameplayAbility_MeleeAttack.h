@@ -136,6 +136,20 @@ private:
 	TObjectPtr<UARPGDamageTypeAsset> CachedHitboxDamageType;
 	bool bOverrodeDamageType = false;
 
+	/** Same snapshot-and-restore for HitboxRadiusScale, and for the same reason. */
+	float CachedHitboxRadius = 0.f;
+	bool bOverrodeHitboxRadius = false;
+
+	/**
+	 * Beats already played when this attack began, read once from the combo
+	 * component. See UARPGComboComponent::GetChainDepth.
+	 *
+	 * Latched at activation rather than read at each window: the chain is what
+	 * the swing was BOUGHT with, and a component whose state moved on mid-swing
+	 * must not retroactively change what the swing is worth.
+	 */
+	int32 ChainDepth = 0;
+
 	/** Guards against the combo window notify firing twice on a looping montage. */
 	bool bComboWindowOpened = false;
 

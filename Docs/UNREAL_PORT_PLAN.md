@@ -698,11 +698,30 @@ to the magic needs one authoring pass rather than one per weapon. That also
 forced `RouteAttack` to activate the imbue *before* handing the press to the
 combo component, since the coating has to exist while the beat is being chosen.
 
+**What ending the chain is worth.** A chain-ender that costs the same whenever
+it is thrown makes neutral the cheapest place to throw it — there is no chain to
+lose there — so using it late is strictly worse and the "cash in now or push for
+one more beat" decision never exists. `ChainDepthBonus` fixes that: an attack may
+be authored to scale with how many beats preceded it, capped by `MaxChainDepth`.
+`UARPGComboComponent::GetChainDepth` measures beats *already played*, and an
+override beat deliberately does not count itself — it is paid for the chain it
+spends, not for ending it. Off by default, so nothing already authored moves.
+
 **Magnetism** (earth + lightning, hand scope only) is the first one, and the
-first element authored for Unreal rather than transcribed from Godot. Light
-pulls, heavy repulses, special rails the weapon out and back; its coating runs at
-3x the blade's reach, so the pull catches what the sword cannot — which is the
-whole reason it is worth ending a chain for.
+first element authored for Unreal rather than transcribed from Godot. All three
+moves are one idea read three ways — the weapon leaves the hand and is flown by
+the field. Light is a slash at extended reach, heavy spins it in front of the
+player as a multi-hit (the hitbox's existing re-hit interval, with knockback
+zeroed so nothing is shoved out of the blender), and special throws it like a
+spear and yanks it back, hitting going out and coming back through the
+definition's two motion values.
+
+Reach mostly comes from the montage — the hitbox rides the weapon socket and
+sweeps between frames, so an animation that sends the blade out extends the
+attack for free and cannot tunnel past anything. `HitboxRadiusScale` is only the
+looseness on top, for a blade flown at range that should connect broadly rather
+than on its edge, and it compounds with the element's `ImbueReachScale` because
+the coating measures itself against the already-widened swing.
 
 Two things it needed that did not exist. `bCanBeElemental` had been sitting
 unread on every attack definition since phase 4 and is now the attack's veto over

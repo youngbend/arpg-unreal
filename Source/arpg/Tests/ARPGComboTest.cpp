@@ -389,7 +389,7 @@ bool FARPGComboAugmentOverrideTest::RunTest(const FString& Parameters)
 	FRig Rig = BuildRig(World);
 	UAbilitySystemComponent* ASC = Rig.Actor->GetAbilitySystemComponent();
 
-	UARPGAttackDefinition* Pull = MakeAttack(TEXT("MagnetismPull"));
+	UARPGAttackDefinition* Slash = MakeAttack(TEXT("MagnetismFloatingSlash"));
 
 	FGameplayAbilitySpec Spec(UARPGTestSwingAugment::StaticClass(), 1);
 	const FGameplayAbilitySpecHandle Handle = ASC->GiveAbility(Spec);
@@ -416,7 +416,7 @@ bool FARPGComboAugmentOverrideTest::RunTest(const FString& Parameters)
 		return false;
 	}
 
-	Augment->OverrideLight = Pull;
+	Augment->OverrideLight = Slash;
 
 	// Mid-chain: the tree would have gone L1 -> L2. The element takes the beat.
 	Rig.Combo->ReceiveInput(EARPGAttackInput::Light);
@@ -424,7 +424,7 @@ bool FARPGComboAugmentOverrideTest::RunTest(const FString& Parameters)
 	UARPGComboAttackNode* OverrideNode = Rig.Combo->GetCurrentNode();
 	TestNotEqual(TEXT("the element's move replaces the follow-up"), OverrideNode, Rig.L2);
 	TestEqual(TEXT("and it is the element's own attack"),
-		OverrideNode ? OverrideNode->Attack.Get() : nullptr, Pull);
+		OverrideNode ? OverrideNode->Attack.Get() : nullptr, Slash);
 
 	// THE COST. A leaf is how this component says the chain stops here, and it is
 	// what makes the next press start over rather than continuing to L3.
@@ -444,6 +444,111 @@ bool FARPGComboAugmentOverrideTest::RunTest(const FString& Parameters)
 	Rig.Combo->ReceiveInput(EARPGAttackInput::Light);
 	TestEqual(TEXT("once spent, the tree has the beat back"),
 		Rig.Combo->GetCurrentNode(), Rig.L1);
+
+	return true;
+}
+
+/**
+ * Chain depth: what an attack that ends the chain is paid for ending it.
+ *
+ * Without this the cheapest moment to throw a chain-ender is from neutral, where
+ * there is no chain to lose -- so using it late is strictly worse and the
+ * "should I cash in or push for one more beat" decision does not exist. The
+ * counter has to measure beats ALREADY PLAYED, and an override must not count
+ * itself, or a move would be paid for the chain it just ended.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGComboChainDepthTest,
+	"ARPG.Combat.ChainDepthPaysForTheChainSpent",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGComboChainDepthTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGComboTestUtils;
+
+	FTestWorld TestWorld;
+	UWorld* World = TestWorld.World;
+
+	// --- The counter ----------------------------------------------------------
+	{
+		FRig Rig = BuildRig(World);
+
+		Rig.Combo->ReceiveInput(EARPGAttackInput::Light);
+		TestEqual(TEXT("a swing from neutral has nothing behind it"),
+			Rig.Combo->GetChainDepth(), 0);
+
+		Rig.Combo->NotifyAttackFinished();
+		Rig.Combo->ReceiveInput(EARPGAttackInput::Light);
+		TestEqual(TEXT("the second beat follows one"), Rig.Combo->GetChainDepth(), 1);
+
+		Rig.Combo->NotifyAttackFinished();
+		Rig.Combo->ReceiveInput(EARPGAttackInput::Light);
+		TestEqual(TEXT("and the third follows two"), Rig.Combo->GetChainDepth(), 2);
+
+		// Back to root: the chain is gone and so is what it was worth.
+		Rig.Combo->NotifyAttackFinished();
+		Rig.Combo->ResetCombo();
+		Rig.Combo->ReceiveInput(EARPGAttackInput::Light);
+		TestEqual(TEXT("a reset chain is worth nothing again"),
+			Rig.Combo->GetChainDepth(), 0);
+	}
+
+	// --- An override reads the chain it interrupts, and does not extend it -----
+	{
+		FRig Rig = BuildRig(World);
+		UAbilitySystemComponent* ASC = Rig.Actor->GetAbilitySystemComponent();
+
+		FGameplayAbilitySpec Spec(UARPGTestSwingAugment::StaticClass(), 1);
+		const FGameplayAbilitySpecHandle Handle = ASC->GiveAbility(Spec);
+		ASC->TryActivateAbility(Handle);
+
+		UARPGTestSwingAugment* Augment = nullptr;
+		if (const FGameplayAbilitySpec* Found = ASC->FindAbilitySpecFromHandle(Handle))
+		{
+			Augment = Cast<UARPGTestSwingAugment>(Found->GetPrimaryInstance());
+		}
+
+		if (!Augment)
+		{
+			AddError(TEXT("no augment instance -- the rest of this case cannot run"));
+			return false;
+		}
+
+		Augment->OverrideHeavy = MakeAttack(TEXT("MagnetismSpin"));
+
+		// Two beats of chain, then cash it in.
+		Rig.Combo->ReceiveInput(EARPGAttackInput::Light);
+		Rig.Combo->NotifyAttackFinished();
+		Rig.Combo->ReceiveInput(EARPGAttackInput::Light);
+		Rig.Combo->NotifyAttackFinished();
+
+		Rig.Combo->ReceiveInput(EARPGAttackInput::Heavy);
+		TestEqual(TEXT("the element's move is paid for the chain it spends"),
+			Rig.Combo->GetChainDepth(), 2);
+	}
+
+	// --- The scaling itself ---------------------------------------------------
+	{
+		UARPGAttackDefinition* Toss = MakeAttack(TEXT("MagnetismToss"));
+		Toss->MotionValue = 1.6f;
+		Toss->ChainDepthBonus = 0.35f;
+		Toss->MaxChainDepth = 3;
+
+		TestEqual(TEXT("from neutral it is worth exactly its base"),
+			Toss->GetChainScaledMotionValue(Toss->MotionValue, 0), 1.6f);
+		TestEqual(TEXT("three beats in it is worth 2.05x"),
+			Toss->GetChainScaledMotionValue(Toss->MotionValue, 3), 1.6f * 2.05f);
+
+		// Capped, so a long chain cannot be farmed into an unbounded hit.
+		TestEqual(TEXT("past the cap it stops growing"),
+			Toss->GetChainScaledMotionValue(Toss->MotionValue, 9),
+			Toss->GetChainScaledMotionValue(Toss->MotionValue, 3));
+
+		// Off by default, so nothing already authored changes.
+		UARPGAttackDefinition* Plain = MakeAttack(TEXT("L1"));
+		Plain->MotionValue = 1.f;
+		TestEqual(TEXT("an attack with no bonus is untouched by depth"),
+			Plain->GetChainScaledMotionValue(1.f, 5), 1.f);
+	}
 
 	return true;
 }

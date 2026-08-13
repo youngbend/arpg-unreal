@@ -195,6 +195,23 @@ public:
 	UFUNCTION(BlueprintPure, Category = "ARPG|Combo")
 	int32 GetAttackSequenceNumber() const { return AttackSequenceNumber; }
 
+	/**
+	 * How many beats of the current chain were played BEFORE the one running now.
+	 * 0 for a swing from neutral, 1 for the second beat, and so on.
+	 *
+	 * Distinct from AttackSequenceNumber, which counts beats for the lifetime of
+	 * the component and never resets. This resets with the chain, because what it
+	 * measures is how much the player has already committed -- which is what an
+	 * attack that cashes the chain in should be paid for.
+	 *
+	 * AN OVERRIDE BEAT DOES NOT EXTEND THE CHAIN, so an element's own attack
+	 * reads the depth of the chain it interrupted rather than adding to it. That
+	 * is the number it is scaled by, and it is why firing one from neutral is
+	 * worth less than firing one three beats in.
+	 */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Combo")
+	int32 GetChainDepth() const { return ChainDepth; }
+
 	UPROPERTY(BlueprintAssignable, Category = "ARPG|Combo")
 	FARPGOnAttackStarted OnAttackStarted;
 
@@ -272,6 +289,12 @@ private:
 
 	bool bAttacking = false;
 	int32 AttackSequenceNumber = 0;
+
+	/** Beats before the current one. See GetChainDepth. */
+	int32 ChainDepth = 0;
+
+	/** Running count for the chain in progress; ChainDepth is snapshotted off it. */
+	int32 BeatsThisChain = 0;
 
 	int32 BufferedInput = INDEX_NONE;
 	bool bBufferedEmpowered = false;

@@ -140,6 +140,24 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Damage")
 	EARPGHitboxSource HitboxSource = EARPGHitboxSource::Weapon;
 
+	/**
+	 * Widens this attack's hitbox for the duration of its windows, as a multiple
+	 * of the hitbox's authored TraceRadius.
+	 *
+	 * REACH MOSTLY COMES FROM THE MONTAGE, not from here. The hitbox is attached
+	 * to the weapon socket and sweeps between frames, so an animation that sends
+	 * the blade out on its own already extends the attack's reach for free, and
+	 * the sweep cannot tunnel past anything on the way. This is for the part
+	 * animation cannot express: a swing that should connect loosely rather than
+	 * on the edge, because the thing swinging is a floating blade in a magnetic
+	 * field rather than a held one.
+	 *
+	 * Restored when the window closes, like DamageTypeOverride.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Damage",
+		meta = (ClampMin = "0.01"))
+	float HitboxRadiusScale = 1.f;
+
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Damage")
 	TObjectPtr<UARPGDamageTypeAsset> DamageTypeOverride;
 
@@ -217,6 +235,33 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Combo",
 		meta = (ClampMin = "0.0"))
 	float FinisherLockout = 0.f;
+
+	/**
+	 * Extra motion value for each combo beat that came before this attack, as a
+	 * fraction. 0.25 with three preceding beats swings for 1.75x.
+	 *
+	 * WHAT THIS IS FOR. An attack that ENDS the chain -- an element's own move,
+	 * or an authored finisher -- otherwise costs the same whenever it is thrown,
+	 * which means the cheapest moment to use it is from neutral, where there is
+	 * no chain to lose. That is backwards: the interesting decision is whether to
+	 * cash in now or push for one more beat, and it only exists if the payout
+	 * grows with what is being spent.
+	 *
+	 * Off by default, so no existing attack changes. It is not restricted to
+	 * chain-enders either -- a mid-chain beat may be authored to reward depth
+	 * too, and nothing here needs to know the difference.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Combo",
+		meta = (ClampMin = "0.0"))
+	float ChainDepthBonus = 0.f;
+
+	/**
+	 * Beats past which the bonus stops growing, so a long chain cannot be farmed
+	 * into an unbounded hit.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Combo",
+		meta = (ClampMin = "0", EditCondition = "ChainDepthBonus > 0.0"))
+	int32 MaxChainDepth = 3;
 
 	/**
 	 * Holding the input keeps the chain going automatically once this attack
@@ -317,6 +362,26 @@ public:
 		return bChargeable
 			? FMath::Lerp(ChargeMotionMin, ChargeMotionMax, FMath::Clamp(Charge, 0.f, 1.f))
 			: MotionValue;
+	}
+
+	/**
+	 * The same motion value after the chain-depth payoff. Applied on top of
+	 * whatever the window resolved to, charge included.
+	 *
+	 * Poise follows through GetEffectivePoiseDamage where the attack scales its
+	 * poise with motion -- a finisher earned by a long chain should stagger
+	 * harder as well as hurt more, and one authored with absolute poise opts out.
+	 */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Attack")
+	float GetChainScaledMotionValue(float InMotionValue, int32 ChainDepth) const
+	{
+		if (ChainDepthBonus <= 0.f || ChainDepth <= 0)
+		{
+			return InMotionValue;
+		}
+
+		const int32 Counted = FMath::Min(ChainDepth, FMath::Max(0, MaxChainDepth));
+		return InMotionValue * (1.f + ChainDepthBonus * Counted);
 	}
 
 	/** Poise damage for a swing at the given effective motion value. */
