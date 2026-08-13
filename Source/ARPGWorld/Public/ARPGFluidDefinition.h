@@ -68,6 +68,66 @@ public:
 		meta = (ClampMin = "0.0001"))
 	float Density = 0.001f;
 
+	// --- Running off a slab -------------------------------------------------
+	//
+	// ON THE FLUID AND NOT THE SLAB, which is where these started and where they
+	// were wrong. Viscosity is a property of water or lava, not of the ice or
+	// earth it happens to be running over: with the knob on the solid you would
+	// tune "how thick is lava" inside the earth asset, and a second solid that
+	// melted into lava would need the same numbers copied and kept in step.
+	//
+	// A slab reads these through its own MeltsInto, so it never has to know.
+
+	/**
+	 * How much of the available head the film moves per second.
+	 *
+	 * NOT A SPEED IN CM/S. The solver moves a fraction of the height difference
+	 * between neighbouring cells, so this is a rate of settling: high is a thin
+	 * quick sheet, low is a slow ooze.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Runoff",
+		meta = (ClampMin = "0.0"))
+	float FlowRate = 6.f;
+
+	/**
+	 * Head, in cm per cell, below which this fluid does not move at all.
+	 *
+	 * THE HALF OF VISCOSITY A RATE CANNOT EXPRESS, and the one that gives lava its
+	 * character. A slower rate makes a fluid arrive later; a yield slope makes it
+	 * STOP -- on a gradient water would sheet straight off, lava sits where it is
+	 * and goes no further. It is also what makes a viscous film pile up thick
+	 * rather than spreading, which falls out rather than being written: a fluid
+	 * that needs more head before it moves necessarily stands deeper.
+	 *
+	 * Zero for water, which runs off anything.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Runoff",
+		meta = (ClampMin = "0.0"))
+	float YieldSlope = 0.f;
+
+	/**
+	 * Below this depth in cm a cell is dry.
+	 *
+	 * A FLOOR, or the film never finishes: each step moves a fraction of what is
+	 * left, so depth approaches zero and never arrives, and a slab carrying a
+	 * millionth of a millimetre would tick forever. A viscous fluid leaves more
+	 * behind, which is also true of the real thing.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Runoff",
+		meta = (ClampMin = "0.001"))
+	float MinimumFilm = 0.05f;
+
+	/**
+	 * Least volume worth spawning a body for, in cubic cm, when runoff lands.
+	 *
+	 * Runoff arrives in dribbles by design, and every deposit is a polygon merge
+	 * or an actor spawn. Without a threshold a melting tower would make that call
+	 * every tick for a teaspoon.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Runoff",
+		meta = (ClampMin = "0.0"))
+	float RunoffBatch = 20000.f;
+
 	/** How much energy the body's volume carries per unit of area. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Body",
 		meta = (ClampMin = "0.0"))

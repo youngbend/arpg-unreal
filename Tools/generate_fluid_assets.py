@@ -268,6 +268,11 @@ FLUIDS = [
         # Water, and the number every solid's own density is compared against to
         # decide whether it floats. Nothing in the code names either substance.
         "density": 0.001,
+        # Thin: runs off anything, arrives quickly, leaves almost nothing.
+        "flow_rate": 6.0,
+        "yield_slope": 0.0,
+        "minimum_film": 0.05,
+        "runoff_batch": 20000.0,
         "surface": "M_ARPG_Water_Placeholder",
     },
     {
@@ -302,6 +307,17 @@ FLUIDS = [
         # Basalt magma, and the number obsidian is compared against to decide
         # whether a crust floats on it. It does not -- see DA_Solid_Obsidian.
         "density": 0.0027,
+        # VISCOSITY, as the two numbers it actually takes. An eighth of water's
+        # rate makes it arrive late; a yield slope of 2cm per cell makes it STOP,
+        # which is the half a rate cannot express and the half that reads as lava.
+        # It also stands four times thicker before it will move at all, and leaves
+        # far more behind when it finally sets.
+        "flow_rate": 0.75,
+        "yield_slope": 2.0,
+        "minimum_film": 0.4,
+        # Bigger dribbles: a slow flow that deposited as often as water would ask
+        # for a polygon merge every few frames for a spoonful.
+        "runoff_batch": 40000.0,
         "surface": "M_ARPG_Lava_Placeholder",
     },
 ]
@@ -371,8 +387,15 @@ SOLIDS = [
         # skips such a slab entirely -- and it is also what keeps the body budget
         # from culling a wall the player raised on purpose. See IsPermanent.
         "melt_rate": 0.0,
-        # And nothing to give back. Earth is not frozen water.
-        "melts_into": None,
+        # BUT FIRE STILL TURNS IT TO LAVA, and this is the pair of independent
+        # questions doing its job: time cannot take an earth wall, a spell can,
+        # and what a spell leaves behind is molten rock.
+        #
+        # Naming it here rather than leaving the reaction's own product to do it
+        # matters twice. The lava runs down the pillar through the film instead of
+        # appearing at its foot, and the reaction ledger stops the product
+        # depositing a second helping of the same lava at the same point.
+        "melts_into": "DA_Fluid_Lava",
 
         "minimum_area": 2500.0,
 
@@ -412,7 +435,7 @@ SOLIDS = [
         "thickness": 60.0,
         "standable": True,
         "melt_rate": 0.0,
-        "melts_into": None,
+        "melts_into": "DA_Fluid_Lava",
         "minimum_area": 2500.0,
         # Half the pillar's. A wall is thinner, covers far more ground, and
         # should be the thing that comes down first.
@@ -600,6 +623,10 @@ def main():
         fluid.set_editor_property("evaporation_rate", spec["evaporation_rate"])
         fluid.set_editor_property("merge_distance", spec["merge_distance"])
         fluid.set_editor_property("density", spec["density"])
+        fluid.set_editor_property("flow_rate", spec["flow_rate"])
+        fluid.set_editor_property("yield_slope", spec["yield_slope"])
+        fluid.set_editor_property("minimum_film", spec["minimum_film"])
+        fluid.set_editor_property("runoff_batch", spec["runoff_batch"])
         fluid.set_editor_property("surface_material", surfaces[spec["surface"]])
 
         save(fluid, "{}/{}".format(FLUID_DIR, spec["name"]))

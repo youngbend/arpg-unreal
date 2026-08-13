@@ -199,6 +199,10 @@ struct ARPGWORLD_API FARPGSolidField
 	 * Every cell reads the same snapshot.
 	 *
 	 * @param Rate how much of the available head moves per second.
+	 * @param YieldSlope head in cm per cell below which nothing moves at all --
+	 *        the half of viscosity a rate cannot express. Zero for water, which
+	 *        runs off anything; high for lava, which stops on a slope and stands
+	 *        thick because it needs more head before it will go.
 	 * @param MinimumFilm below this a cell is dry. Without a floor the film
 	 *        approaches zero asymptotically and the slab ticks forever.
 	 * @param OutShedAt filled with the volume-weighted place it ran off, when any
@@ -206,7 +210,8 @@ struct ARPGWORLD_API FARPGSolidField
 	 * @return volume that left the slab entirely, in cubic cm -- over an edge, or
 	 *         through a hole. This is what becomes a puddle on the ground.
 	 */
-	double FlowStep(float DeltaTime, float Rate, float MinimumFilm, FVector2D& OutShedAt);
+	double FlowStep(float DeltaTime, float Rate, float YieldSlope, float MinimumFilm,
+		FVector2D& OutShedAt);
 
 	// --- Writing ---------------------------------------------------------------
 

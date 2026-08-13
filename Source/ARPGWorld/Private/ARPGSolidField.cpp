@@ -231,8 +231,8 @@ double FARPGSolidField::Pour(const FVector2D& At, float Radius, double Volume)
 	return Share * (Covered - Landed);
 }
 
-double FARPGSolidField::FlowStep(float DeltaTime, float Rate, float MinimumFilm,
-	FVector2D& OutShedAt)
+double FARPGSolidField::FlowStep(float DeltaTime, float Rate, float YieldSlope,
+	float MinimumFilm, FVector2D& OutShedAt)
 {
 	OutShedAt = CachedCentroid;
 
@@ -293,7 +293,17 @@ double FARPGSolidField::FlowStep(float DeltaTime, float Rate, float MinimumFilm,
 					? Surface
 					: Surface - (Top[Index(NX, NY)] * 0.1f + Wet[Index(NX, NY)]);
 
-				if (Drop > 0.f)
+				// THE YIELD SLOPE, which is the half of viscosity a rate cannot
+				// express. A rate makes a fluid arrive later; this makes it STOP.
+				// Lava on a gradient water would sheet off simply sits there, and
+				// because it needs more head before it will go anywhere it also
+				// stands thicker -- the piling-up nobody had to write.
+				//
+				// An edge is exempt. Nothing is holding the fluid back over a
+				// cliff, however thick it is, and a viscous flow that reached the
+				// rim of a slab and refused to fall off it would be a bug rather
+				// than a behaviour.
+				if (Drop > YieldSlope || (Drop > 0.f && (bOffGrid || !IsSolid(NX, NY))))
 				{
 					Drops[Side] = Drop;
 					TotalDrop += Drop;

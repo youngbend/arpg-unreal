@@ -911,7 +911,8 @@ bool FARPGFilmFlowTest::RunTest(const FString& Parameters)
 	for (int32 Step = 0; Step < 20; ++Step)
 	{
 		FVector2D StepAt;
-		Shed += Field.FlowStep(1.f / 20.f, /*Rate=*/6.f, /*MinimumFilm=*/0.05f, StepAt);
+		Shed += Field.FlowStep(1.f / 20.f, /*Rate=*/6.f, /*YieldSlope=*/0.f,
+			/*MinimumFilm=*/0.05f, StepAt);
 
 		if (Shed > 0.0)
 		{
@@ -955,7 +956,7 @@ bool FARPGFilmSettlesTest::RunTest(const FString& Parameters)
 	FVector2D ShedAt;
 	for (int32 Step = 0; Step < 400; ++Step)
 	{
-		Field.FlowStep(1.f / 20.f, 6.f, 0.05f, ShedAt);
+		Field.FlowStep(1.f / 20.f, 6.f, 0.f, 0.05f, ShedAt);
 	}
 
 	TestFalse(TEXT("Twenty seconds later the slab is dry"), Field.HasWet());
@@ -1030,9 +1031,6 @@ bool FARPGRunoffArrivesTest::RunTest(const FString& Parameters)
 	UARPGSolidDefinition* IceDefinition = MakeIce(Ice);
 	IceDefinition->Thickness = 200.f;
 	IceDefinition->MeltsInto = WaterDefinition;
-	IceDefinition->FlowRate = 6.f;
-	IceDefinition->MinimumFilm = 0.05f;
-	IceDefinition->RunoffBatch = 20000.f;
 
 	Fluids->Definitions = { WaterDefinition };
 	Fluids->Solids = { IceDefinition };
@@ -1114,7 +1112,6 @@ bool FARPGMeltFeedsTheFilmTest::RunTest(const FString& Parameters)
 	UARPGSolidDefinition* IceDefinition = MakeIce(Ice);
 	IceDefinition->Thickness = 200.f;
 	IceDefinition->MeltsInto = WaterDefinition;
-	IceDefinition->FlowRate = 6.f;
 
 	Fluids->Definitions = { WaterDefinition };
 	Fluids->Solids = { IceDefinition };
@@ -1183,6 +1180,11 @@ namespace ARPGFluidTestUtils
 		Definition->EvaporationRate = 0.f;   // held still, so a test can assert on area
 		Definition->MergeDistance = 90.f;
 		Definition->Density = 0.0027f;
+		// Thick: an eighth of water's rate, and a yield slope that stops it on a
+		// gradient water would sheet off.
+		Definition->FlowRate = 0.75f;
+		Definition->YieldSlope = 2.f;
+		Definition->MinimumFilm = 0.4f;
 		return Definition;
 	}
 
@@ -1411,6 +1413,69 @@ bool FARPGObsidianCrustTest::RunTest(const FString& Parameters)
 	// AND IT MELTS INTO NOTHING. Rock that formed on lava is not frozen lava:
 	// break it and you get rubble, not a flow back into the pool.
 	TestNull(TEXT("It gives nothing back"), ObsidianDefinition->MeltsInto.Get());
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGViscosityTest,
+	"ARPG.World.Fluid.Runoff.AThickFluidStopsOnASlopeAThinOneRunsDown",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGViscosityTest::RunTest(const FString& Parameters)
+{
+	// The same ramp twice, with the same volume on it, differing only in the two
+	// numbers that describe the fluid.
+	auto RunRamp = [](float Rate, float Yield, float Floor, double& OutShed) -> double
+	{
+		FARPGSolidField Field;
+		Field.BuildFrom(ARPGFluidGeometry::MakeCircle(FVector2D::ZeroVector, 300.0), 20.f, 100.f);
+
+		for (int32 Y = 0; Y < Field.CountY; ++Y)
+		{
+			for (int32 X = 0; X < Field.CountX; ++X)
+			{
+				if (Field.IsSolid(X, Y))
+				{
+					// A GENTLE GRADE: 1mm of fall per cm eastward, so a cell sits
+					// 2cm above its eastern neighbour. Water sheets off that; lava
+					// with a 2cm yield slope is right on the edge of moving at all.
+					const float West = 300.f - static_cast<float>(Field.CentreOf(X, Y).X);
+					Field.Top[Field.Index(X, Y)] += static_cast<int16>(West);
+				}
+			}
+		}
+		Field.Refresh();
+
+		Field.Pour(FVector2D(-200, 0), 60.f, 300000.0);
+
+		OutShed = 0.0;
+		FVector2D ShedAt;
+
+		for (int32 Step = 0; Step < 60; ++Step)
+		{
+			OutShed += Field.FlowStep(1.f / 20.f, Rate, Yield, Floor, ShedAt);
+		}
+
+		// How far east the fluid actually got.
+		return Field.WetAt(FVector2D(120, 0));
+	};
+
+	double ThinShed = 0.0;
+	double ThickShed = 0.0;
+
+	const double ThinReach = RunRamp(/*Rate=*/6.f, /*Yield=*/0.f, /*Floor=*/0.05f, ThinShed);
+	const double ThickReach = RunRamp(/*Rate=*/0.75f, /*Yield=*/2.f, /*Floor=*/0.4f, ThickShed);
+
+	// THIN RUNS. Three seconds is plenty for water to cross a six-metre ramp and
+	// start pouring off the far rim.
+	TestTrue(TEXT("Water reaches the far side"), ThinReach > 0.0);
+	TestTrue(TEXT("And runs off the end"), ThinShed > 0.0);
+
+	// THICK DOES NOT, and that is the half of viscosity a rate alone cannot give.
+	// A slower rate would only make lava arrive later; the yield slope is what
+	// makes it stop -- on a gradient water sheets straight off, it sits.
+	TestTrue(TEXT("Lava has not crossed the ramp"), ThickReach < ThinReach);
+	TestTrue(TEXT("And far less of it has left"), ThickShed < ThinShed * 0.5);
 
 	return true;
 }

@@ -602,7 +602,7 @@ void AARPGSolidBody::ReturnMeltedFluid(double MeltedVolume, const FVector2D& At)
 	// was hit. Pour hands back only what found nowhere to land -- through a hole
 	// melted clean through, or off a slab too small to have a grid -- and that
 	// carries on to the ground exactly as all of it used to.
-	if (Definition->FlowRate > 0.f)
+	if (Fluid->FlowRate > 0.f)
 	{
 		FluidVolume = Field.Pour(At, Definition->MeltRadius, FluidVolume);
 
@@ -652,9 +652,18 @@ void AARPGSolidBody::TickRunoff(float DeltaTime)
 		return;
 	}
 
+	// HOW IT FLOWS IS THE FLUID'S BUSINESS, not the slab's. Water off ice and lava
+	// off earth are the same solver told two different sets of numbers, and the
+	// slab reads them through its own MeltsInto rather than carrying a copy.
+	const UARPGFluidDefinition* Fluid = Definition->MeltsInto;
+	if (!Fluid)
+	{
+		return; // nothing it could be wet with
+	}
+
 	FVector2D ShedAt = FVector2D::ZeroVector;
-	const double Shed = Field.FlowStep(DeltaTime, Definition->FlowRate,
-		Definition->MinimumFilm, ShedAt);
+	const double Shed = Field.FlowStep(DeltaTime, Fluid->FlowRate, Fluid->YieldSlope,
+		Fluid->MinimumFilm, ShedAt);
 
 	if (Shed > 0.0)
 	{
@@ -678,7 +687,7 @@ void AARPGSolidBody::TickRunoff(float DeltaTime)
 	// eventually notices.
 	const bool bFinished = !Field.HasWet();
 
-	if (PendingRunoff <= 0.0 || (!bFinished && PendingRunoff < Definition->RunoffBatch))
+	if (PendingRunoff <= 0.0 || (!bFinished && PendingRunoff < Fluid->RunoffBatch))
 	{
 		return;
 	}
