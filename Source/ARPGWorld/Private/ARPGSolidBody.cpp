@@ -367,6 +367,11 @@ void AARPGSolidBody::Tick(float DeltaTime)
 		return;
 	}
 
+	// WHEREVER THE SLAB IS. Water running off a floe is the same water running off
+	// a tower, so this sits above the split rather than in either half -- and it
+	// costs one cached comparison on a slab nobody has melted.
+	TickRunoff(DeltaTime);
+
 	// ROOTED, so there is nothing to float on and nothing to work out. A slab
 	// raised out of the ground has no FloatsOn: it does not settle, it does not
 	// drift, and every query below would be asked of a surface that is not there.
@@ -565,36 +570,57 @@ void AARPGSolidBody::ReturnMeltedFluid(double MeltedVolume, const FVector2D& At)
 
 	UARPGFluidDefinition* Fluid = Definition->MeltsInto;
 
+	UARPGFluidSurfaceSubsystem* Fluids =
+		GetWorld() ? GetWorld()->GetSubsystem<UARPGFluidSurfaceSubsystem>() : nullptr;
+
+	// SAID FIRST, AND SAID WHATEVER HAPPENS NEXT. The reaction's own product would
+	// otherwise deposit this same fluid a second time when its discharge lands --
+	// for fire + ice -> water those are one body of water described twice.
+	//
+	// Above every early return below on purpose. Absorbed into a lake counts as
+	// accounted for, and so does running down a tower: that the water has not
+	// arrived yet does not mean nobody is bringing it.
+	if (Fluids)
+	{
+		Fluids->NoteFluidReturned(Fluid->GetElementTag());
+	}
+
 	// MASS IS WHAT IS CONSERVED, not volume. Ice is lighter than the water it came
 	// from, so a cubic metre of it does not melt into a cubic metre -- it melts
 	// into the volume of water that weighs the same. The same two densities that
 	// decide whether the slab floats decide how much water it is worth, which is
 	// the point of them being densities rather than a float called Buoyancy.
-	const double FluidVolume = MeltedVolume
+	double FluidVolume = MeltedVolume
 		* Definition->Density / FMath::Max(KINDA_SMALL_NUMBER, Fluid->Density);
 
-	// BACK INTO WHATEVER IT IS FLOATING ON, first, and the floe never learns which
-	// kind of thing that is: a lake takes it and nothing appears, a puddle takes it
-	// by growing its outline. Only a slab that has been left on dry land -- its
-	// pool evaporated out from under it -- falls through to making a body of its
-	// own.
+	// ONTO THE SLAB FIRST, so the water has to get down before it is anywhere.
+	//
+	// THIS IS THE JOURNEY THAT USED TO BE MISSING. Melting the top of a tower put
+	// a puddle at its foot in the same instant -- the right destination reached by
+	// no route at all. Poured at the bowl the fireball cut, the film runs down the
+	// slab's own heightfield and arrives over a second or two, on the side that
+	// was hit. Pour hands back only what found nowhere to land -- through a hole
+	// melted clean through, or off a slab too small to have a grid -- and that
+	// carries on to the ground exactly as all of it used to.
+	if (Definition->FlowRate > 0.f)
+	{
+		FluidVolume = Field.Pour(At, Definition->MeltRadius, FluidVolume);
+
+		if (FluidVolume <= 0.0)
+		{
+			return;
+		}
+	}
+
+	// BACK INTO WHATEVER IT IS FLOATING ON, and the slab never learns which kind
+	// of thing that is: a lake takes it and nothing appears, a puddle takes it by
+	// growing its outline. Only a slab left on dry land -- its pool evaporated out
+	// from under it -- falls through to making a body of its own.
 	//
 	// IsValid rather than a null check: a pool destroyed this frame has not been
 	// garbage collected yet, so the interface still points at it.
-	IARPGElementalSurface* Riding = IsValid(FloatsOn.GetObject()) ? FloatsOn.GetInterface() : nullptr;
-
-	UARPGFluidSurfaceSubsystem* Fluids =
-		GetWorld() ? GetWorld()->GetSubsystem<UARPGFluidSurfaceSubsystem>() : nullptr;
-
-	// SAID BEFORE IT IS DONE, and said whichever way it goes. The reaction's own
-	// product would otherwise deposit this same fluid a second time when its
-	// discharge lands -- for fire + ice -> water those are one body of water
-	// described twice. Absorbed into a lake counts: the material was accounted
-	// for, and the fact that nothing is visible does not make it unaccounted.
-	if (Fluids)
-	{
-		Fluids->NoteFluidReturned(Fluid->GetElementTag());
-	}
+	IARPGElementalSurface* Riding =
+		IsValid(FloatsOn.GetObject()) ? FloatsOn.GetInterface() : nullptr;
 
 	if (Riding && Riding->IsSurfaceAt(At) && Riding->AbsorbSurfaceVolume(FluidVolume))
 	{
@@ -606,14 +632,73 @@ void AARPGSolidBody::ReturnMeltedFluid(double MeltedVolume, const FVector2D& At)
 		return;
 	}
 
-	// THE BED, not the waterline. GroundHeight on a solid tracks the surface it
-	// rides, which is where the ice is -- but water lies on the bottom. For a floe
+	// THE BED, not the waterline. GroundHeight on a slab tracks the surface it
+	// rides, which is where the slab is -- but fluid lies on the bottom. For a floe
 	// melting on a puddle those are centimetres apart and either would do; for one
 	// melting on dry land after its pool evaporated, the bed is the only answer
 	// that is not in the air.
 	const float Bed = Riding ? Riding->GetSurfaceBedAt(At) : GroundHeight;
 
 	Fluids->ReturnFluid(At, Bed, FluidVolume, Fluid);
+}
+
+void AARPGSolidBody::TickRunoff(float DeltaTime)
+{
+	// FREE WHEN DRY, which is nearly always. HasWet is a cached total rather than
+	// a sweep, so a slab nobody has melted pays one comparison per tick and an
+	// earth wall pays that for the whole level.
+	if (!Definition || !Field.HasWet())
+	{
+		return;
+	}
+
+	FVector2D ShedAt = FVector2D::ZeroVector;
+	const double Shed = Field.FlowStep(DeltaTime, Definition->FlowRate,
+		Definition->MinimumFilm, ShedAt);
+
+	if (Shed > 0.0)
+	{
+		// WEIGHTED BY WHERE IT LEFT, so a tower melted down one side sheds on that
+		// side and the puddle forms there rather than under the middle. Averaged
+		// across the batch below for the same reason.
+		RunoffAt = PendingRunoff > 0.0
+			? (RunoffAt * PendingRunoff + ShedAt * Shed) / (PendingRunoff + Shed)
+			: ShedAt;
+
+		PendingRunoff += Shed;
+	}
+
+	// BATCHED. Runoff arrives in dribbles by design and every deposit is a polygon
+	// merge or an actor spawn, so putting each one down as it comes would charge a
+	// melting tower a boolean op every frame for a teaspoon of water.
+	//
+	// FLUSHED EARLY when the film has finished, whatever is held: the last of it
+	// is always under the batch, and water that never arrives because it was the
+	// remainder is the kind of loss nobody can see happening but everybody
+	// eventually notices.
+	const bool bFinished = !Field.HasWet();
+
+	if (PendingRunoff <= 0.0 || (!bFinished && PendingRunoff < Definition->RunoffBatch))
+	{
+		return;
+	}
+
+	if (UARPGFluidSurfaceSubsystem* Fluids =
+			GetWorld() ? GetWorld()->GetSubsystem<UARPGFluidSurfaceSubsystem>() : nullptr)
+	{
+		// ON THE GROUND UNDER WHERE IT RAN OFF, which for a rooted tower is the
+		// slab's own base and for a floe is the bed of whatever it floats in. The
+		// slab is not ground -- the deposit path already knows to trace past every
+		// body this subsystem owns.
+		IARPGElementalSurface* Riding =
+			IsValid(FloatsOn.GetObject()) ? FloatsOn.GetInterface() : nullptr;
+
+		const float Bed = Riding ? Riding->GetSurfaceBedAt(RunoffAt) : GroundHeight;
+
+		Fluids->ReturnFluid(RunoffAt, Bed, PendingRunoff, Definition->MeltsInto);
+	}
+
+	PendingRunoff = 0.0;
 }
 
 bool AARPGSolidBody::IsStandableAt(FVector WorldPoint) const

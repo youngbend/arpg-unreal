@@ -89,6 +89,12 @@ struct ARPGWORLD_API FARPGSolidField
 	 */
 	void Refresh();
 
+	/**
+	 * Re-totals the film and drops any of it left on cells that are no longer
+	 * solid. Called by Refresh, so melting cannot strand water over a hole.
+	 */
+	void RefreshWet();
+
 	int32 Index(int32 X, int32 Y) const { return Y * CountX + X; }
 
 	/** Cell containing a world XY, or (-1,-1) when it is off the grid. */
@@ -123,6 +129,84 @@ struct ARPGWORLD_API FARPGSolidField
 
 	/** Cells still carrying material. Zero means the slab is gone. */
 	int32 SolidCellCount() const { return CachedCells; }
+
+	// --- The film running over it ----------------------------------------------
+	//
+	// MELTWATER HAS TO GET DOWN, and until now it did not: melting the top of an
+	// ice tower produced water that appeared instantly in a puddle at the tower's
+	// foot, because a fluid body has one flat height and the only height a slab
+	// could name was its own base. The journey was missing entirely.
+	//
+	// THE GRID IS ALREADY HERE, which is the whole reason this is cheap. A shallow
+	// water solver IS a heightfield with a depth per cell and an exchange rule
+	// between neighbours -- the same object the slab has been since it stopped
+	// being an outline. So the film is a third array over the two that exist, and
+	// the flow is one sweep with no boolean ops, no offsetter and no outline to
+	// retriangulate. Cost stays bounded by the cell count, exactly as melting is.
+	//
+	// WHAT THIS IS NOT is a fluid simulation of the world. It runs on a slab and
+	// nowhere else, which happens to be the case worth having -- water off a
+	// melting tower, lava off a softening pillar -- and it leaves the pool model
+	// completely untouched. Fluid crossing open terrain would need pools to become
+	// heightfields too, which is a rewrite rather than an addition.
+
+	/**
+	 * Depth of fluid lying on each cell, in CENTIMETRES above that cell's top.
+	 *
+	 * FLOATS AND NOT REPLICATED, unlike Top and Bottom, and both halves of that
+	 * are deliberate. Not replicated because a film is presentation -- what the
+	 * film DOES that matters is arrive at the bottom, and what arrives is a pool,
+	 * which replicates already. Floats because the integer millimetres that make
+	 * Top affordable on the wire would quantise a two-millimetre film into
+	 * nothing: every flow step would round its way to zero and the water would
+	 * evaporate on the way down.
+	 */
+	UPROPERTY(Transient)
+	TArray<float> Wet;
+
+	/** Fluid lying at a world XY, in cm. Zero everywhere dry. */
+	float WetAt(const FVector2D& World) const;
+
+	/** Total fluid on the slab, in cubic cm. */
+	double WetVolume() const;
+
+	/** Is there anything to flow? Cheap enough to gate a tick on. */
+	bool HasWet() const { return Wet.Num() > 0 && CachedWet > 0.0; }
+
+	/**
+	 * Puts fluid onto the slab, spread over a disc.
+	 *
+	 * WHERE THE MELT HAPPENED, so the water starts at the bowl a fireball cut and
+	 * runs from there. Fluid poured onto a cell that is not solid -- a hole melted
+	 * clean through -- falls straight past and is returned rather than kept.
+	 *
+	 * @return the volume that found nowhere to land, in cubic cm.
+	 */
+	double Pour(const FVector2D& At, float Radius, double Volume);
+
+	/**
+	 * Runs the film downhill one step.
+	 *
+	 * THE PIPE MODEL, which is the standard shallow-water discretisation and is
+	 * about as simple as a flow solver gets: a cell compares its own surface
+	 * height against its four neighbours and gives volume to whichever are lower,
+	 * in proportion to how much lower. Half the difference, so two cells trading
+	 * across a step settle level instead of oscillating across it forever.
+	 *
+	 * DOUBLE BUFFERED, because otherwise a sweep in raster order runs faster
+	 * downhill to the east than to the west -- the same cell's new depth would be
+	 * read by the neighbour visited after it and not by the one visited before.
+	 * Every cell reads the same snapshot.
+	 *
+	 * @param Rate how much of the available head moves per second.
+	 * @param MinimumFilm below this a cell is dry. Without a floor the film
+	 *        approaches zero asymptotically and the slab ticks forever.
+	 * @param OutShedAt filled with the volume-weighted place it ran off, when any
+	 *        did. Meaningless when the return is zero.
+	 * @return volume that left the slab entirely, in cubic cm -- over an edge, or
+	 *         through a hole. This is what becomes a puddle on the ground.
+	 */
+	double FlowStep(float DeltaTime, float Rate, float MinimumFilm, FVector2D& OutShedAt);
 
 	// --- Writing ---------------------------------------------------------------
 
@@ -189,4 +273,8 @@ private:
 
 	UPROPERTY(Transient)
 	int32 CachedCells = 0;
+
+	/** Total film volume, so HasWet is a read rather than a sweep. */
+	UPROPERTY(Transient)
+	double CachedWet = 0.0;
 };

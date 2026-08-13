@@ -850,6 +850,316 @@ bool FARPGFluidReservoirMeltTest::RunTest(const FString& Parameters)
 }
 
 // ---------------------------------------------------------------------------
+// The film running off a slab
+//
+// MELTWATER HAS TO GET DOWN. Melting the top of an ice tower used to put a
+// puddle at its foot in the same instant -- the right destination reached by no
+// route at all. The grid the slab already has IS a shallow-water solver's grid,
+// so the flow is a third array over the two that exist and one sweep per step.
+//
+// NOT A FLUID SIMULATION OF THE WORLD. It runs on a slab and nowhere else, which
+// is the case worth having, and leaves the pool model untouched.
+// ---------------------------------------------------------------------------
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFilmFlowTest,
+	"ARPG.World.Fluid.Runoff.WaterRunsDownhillAndOffTheEdge",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGFilmFlowTest::RunTest(const FString& Parameters)
+{
+	FARPGSolidField Field;
+	Field.BuildFrom(ARPGFluidGeometry::MakeCircle(FVector2D::ZeroVector, 300.0),
+		/*CellSize=*/20.f, /*Thickness=*/100.f);
+
+	// A RAMP. Raise one side so the slab has a gradient for water to find -- the
+	// field stores a top per cell, which is exactly what a flow solver needs and
+	// exactly what an outline could never have carried.
+	for (int32 Y = 0; Y < Field.CountY; ++Y)
+	{
+		for (int32 X = 0; X < Field.CountX; ++X)
+		{
+			if (Field.IsSolid(X, Y))
+			{
+				// Half a millimetre of rise per cm westward: 30cm of fall across the
+				// six-metre slab. Gentle, and unambiguous about which way is down.
+				const float West = 300.f - static_cast<float>(Field.CentreOf(X, Y).X);
+				Field.Top[Field.Index(X, Y)] += static_cast<int16>(West * 0.5f);
+			}
+		}
+	}
+	Field.Refresh();
+
+	// WORLD POSITIONS, not cell indices. BuildFrom leaves a margin of empty cells
+	// around the ring, so column 2 of the grid is off the slab entirely and a pour
+	// there would land on nothing.
+	const FVector2D High(-200, 0);
+	const FVector2D Low(200, 0);
+
+	const double Poured = 400000.0;   // 0.4 cubic metres, at the high end
+	const double Fell = Field.Pour(High, 60.f, Poured);
+
+	TestEqual(TEXT("All of it landed on the slab"), Fell, 0.0, 1.0);
+	TestEqual(TEXT("And is on it"), Field.WetVolume(), Poured, Poured * 0.01);
+	TestTrue(TEXT("Where it was poured"), Field.WetAt(High) > 0.f);
+	TestEqual(TEXT("And nowhere else yet"), Field.WetAt(Low), 0.f);
+
+	// DOWNHILL. Each step moves a fraction of the height difference toward lower
+	// neighbours, so the water walks along the ramp rather than teleporting.
+	double Shed = 0.0;
+	FVector2D ShedAt = FVector2D::ZeroVector;
+
+	for (int32 Step = 0; Step < 20; ++Step)
+	{
+		FVector2D StepAt;
+		Shed += Field.FlowStep(1.f / 20.f, /*Rate=*/6.f, /*MinimumFilm=*/0.05f, StepAt);
+
+		if (Shed > 0.0)
+		{
+			ShedAt = StepAt;
+		}
+	}
+
+	TestTrue(TEXT("A second later it has reached the low end"), Field.WetAt(Low) > 0.f);
+
+	// AND OFF THE RIM. The edge of the grid, and any hole, is a cliff rather than
+	// a neighbour: there is nothing over there to hold water at any height, so
+	// the film pours off instead of pooling against it.
+	TestTrue(TEXT("And some has run off the slab entirely"), Shed > 0.0);
+	TestTrue(TEXT("On the downhill side"), ShedAt.X > 0.f);
+
+	// NOTHING IS INVENTED AND NOTHING VANISHES. What is on the slab plus what ran
+	// off is what was poured, give or take the floor that dries the last film.
+	TestTrue(TEXT("The volume is conserved"),
+		Field.WetVolume() + Shed <= Poured + 1.0);
+	TestTrue(TEXT("And most of it is still accounted for"),
+		Field.WetVolume() + Shed > Poured * 0.9);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFilmSettlesTest,
+	"ARPG.World.Fluid.Runoff.TheFilmFinishesInsteadOfDribblingForever",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGFilmSettlesTest::RunTest(const FString& Parameters)
+{
+	FARPGSolidField Field;
+	Field.BuildFrom(ARPGFluidGeometry::MakeCircle(FVector2D::ZeroVector, 200.0), 20.f, 60.f);
+
+	Field.Pour(FVector2D::ZeroVector, 80.f, 200000.0);
+	TestTrue(TEXT("There is a film"), Field.HasWet());
+
+	// A FLOOR, or it never ends. Each step moves a fraction of what is left, so
+	// depth approaches zero and never arrives -- and a slab carrying a millionth
+	// of a millimetre would tick, rebuild and re-cook for the rest of the level.
+	FVector2D ShedAt;
+	for (int32 Step = 0; Step < 400; ++Step)
+	{
+		Field.FlowStep(1.f / 20.f, 6.f, 0.05f, ShedAt);
+	}
+
+	TestFalse(TEXT("Twenty seconds later the slab is dry"), Field.HasWet());
+	TestEqual(TEXT("With nothing left on it"), Field.WetVolume(), 0.0, 0.001);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFilmHoleTest,
+	"ARPG.World.Fluid.Runoff.WaterPouredOnAHoleFallsThrough",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGFilmHoleTest::RunTest(const FString& Parameters)
+{
+	FARPGSolidField Field;
+	Field.BuildFrom(ARPGFluidGeometry::MakeCircle(FVector2D::ZeroVector, 200.0), 20.f, 40.f);
+
+	// Melt clean through the middle, which is a hole: the cells where the top has
+	// met the bottom. Not a ring, so there is nothing to pour "into" -- the cells
+	// simply are not there.
+	Field.MeltBowl(FVector2D::ZeroVector, 100.f, 200.f);
+	TestFalse(TEXT("Setup: melted through"), Field.IsSolidAt(FVector2D::ZeroVector));
+
+	const double Fell = Field.Pour(FVector2D::ZeroVector, 60.f, 100000.0);
+
+	// PROPORTIONALLY, rather than all or nothing. The disc covers the hole and its
+	// rim, so what lands on the rim stays and what is over the gap falls -- which
+	// is the honest answer and takes no branch for either case.
+	TestTrue(TEXT("Most of it fell through the hole"), Fell > 100000.0 * 0.5);
+	TestTrue(TEXT("But the caller is told exactly how much"), Fell <= 100000.0);
+	TestEqual(TEXT("And what stayed is what did not fall"),
+		Field.WetVolume(), 100000.0 - Fell, 1.0);
+
+	// AND MELTING THROUGH UNDER A FILM DROPS IT. FlowStep skips cells that are not
+	// solid, so water stranded on one would keep the slab's total above zero and
+	// keep it ticking for the rest of the level.
+	FARPGSolidField Second;
+	Second.BuildFrom(ARPGFluidGeometry::MakeCircle(FVector2D::ZeroVector, 200.0), 20.f, 40.f);
+	Second.Pour(FVector2D::ZeroVector, 150.f, 100000.0);
+
+	TestTrue(TEXT("A film on an intact slab"), Second.HasWet());
+
+	Second.MeltBowl(FVector2D::ZeroVector, 150.f, 200.f);
+
+	TestTrue(TEXT("Melting through under it drops what it was holding"),
+		Second.WetVolume() < 100000.0);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGRunoffArrivesTest,
+	"ARPG.World.Fluid.Runoff.ATowerPuddlesAtItsFootOverTimeRatherThanAtOnce",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGRunoffArrivesTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+	UARPGMagicElement* Ice = MakeElement(GetTransientPackage(), TAG_Element_Ice);
+
+	UARPGFluidDefinition* WaterDefinition = MakeWater(GetTransientPackage(), Water);
+	WaterDefinition->EvaporationRate = 0.f;
+	WaterDefinition->MinimumArea = 100.f;
+
+	// A TOWER: two metres thick, rooted, with no fluid under it. FloatsOn stays
+	// null, so the buoyancy path never runs and the only thing its tick does is
+	// carry water down.
+	UARPGSolidDefinition* IceDefinition = MakeIce(Ice);
+	IceDefinition->Thickness = 200.f;
+	IceDefinition->MeltsInto = WaterDefinition;
+	IceDefinition->FlowRate = 6.f;
+	IceDefinition->MinimumFilm = 0.05f;
+	IceDefinition->RunoffBatch = 20000.f;
+
+	Fluids->Definitions = { WaterDefinition };
+	Fluids->Solids = { IceDefinition };
+
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	AARPGSolidBody* Tower = Scope.World->SpawnActor<AARPGSolidBody>(
+		AARPGSolidBody::StaticClass(), FTransform::Identity, Params);
+
+	Tower->Setup(IceDefinition, ARPGFluidGeometry::MakeCircle(FVector2D::ZeroVector, 250.0), 0.f);
+
+	// POURED DIRECTLY, rather than melted, and deliberately so. A fireball into
+	// the MIDDLE of a two-metre slab cuts a bowl that holds its own meltwater --
+	// correct, and rather good, but it means a melt is the wrong way to ask
+	// whether runoff reaches the ground. This asks that question on its own.
+	Tower->Field.Pour(FVector2D::ZeroVector, 200.f, 500000.0);
+
+	TestTrue(TEXT("There is water on the tower"), Tower->GetFilmVolume() > 0.0);
+	TestEqual(TEXT("And none on the ground yet"), Fluids->GetPools().Num(), 0);
+
+	// NOT IN ONE TICK. The whole point is the journey: the film walks down the
+	// slab's own heightfield and off its rim, and the puddle grows at the bottom
+	// while it does.
+	Tower->Tick(1.f / 20.f);
+	TestEqual(TEXT("Nor after a single frame"), Fluids->GetPools().Num(), 0);
+
+	for (int32 Step = 0; Step < 200 && Fluids->GetPools().Num() == 0; ++Step)
+	{
+		Tower->Tick(1.f / 20.f);
+	}
+
+	// AT LEAST ONE, not exactly one. Runoff leaves all round the rim and arrives in
+	// batches, so whether the second batch merges into the first or starts its own
+	// body depends on where on the rim it came off against the fluid's own merge
+	// distance. Both are correct; a ring of wet round a melting tower is not wrong.
+	TestTrue(TEXT("A moment later there is a puddle at the foot"),
+		Fluids->GetPools().Num() >= 1);
+
+	for (const AARPGFluidPool* Puddle : Fluids->GetPools())
+	{
+		// AT THE TOWER'S BASE, not at the height the water was standing at. A slab
+		// is not ground; the deposit traces past every body this subsystem owns.
+		TestEqual(TEXT("At the base and not the top"), Puddle->GroundHeight, 0.f, 1.f);
+	}
+
+	// AND IT FINISHES, holding nothing back. The last of a film is always under
+	// the batch threshold, so drying has to flush whatever is pending -- water
+	// lost because it was the remainder is the kind of leak nobody watches happen
+	// and everybody eventually notices.
+	for (int32 Step = 0; Step < 600; ++Step)
+	{
+		Tower->Tick(1.f / 20.f);
+	}
+
+	TestFalse(TEXT("The tower dries"), Tower->GetFilmVolume() > 0.0);
+	TestEqual(TEXT("Holding nothing back"), Tower->GetPendingRunoff(), 0.0, 0.001);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGMeltFeedsTheFilmTest,
+	"ARPG.World.Fluid.Runoff.MeltwaterGoesOntoTheSlabBeforeTheGround",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGMeltFeedsTheFilmTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+	UARPGMagicElement* Ice = MakeElement(GetTransientPackage(), TAG_Element_Ice);
+
+	UARPGFluidDefinition* WaterDefinition = MakeWater(GetTransientPackage(), Water);
+	WaterDefinition->EvaporationRate = 0.f;
+	WaterDefinition->MinimumArea = 100.f;
+
+	UARPGSolidDefinition* IceDefinition = MakeIce(Ice);
+	IceDefinition->Thickness = 200.f;
+	IceDefinition->MeltsInto = WaterDefinition;
+	IceDefinition->FlowRate = 6.f;
+
+	Fluids->Definitions = { WaterDefinition };
+	Fluids->Solids = { IceDefinition };
+
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	AARPGSolidBody* Tower = Scope.World->SpawnActor<AARPGSolidBody>(
+		AARPGSolidBody::StaticClass(), FTransform::Identity, Params);
+
+	Tower->Setup(IceDefinition, ARPGFluidGeometry::MakeCircle(FVector2D::ZeroVector, 250.0), 0.f);
+
+	// A SHALLOW DISH in the middle: enough area consumed to cut a bowl, not enough
+	// to punch through two metres of ice. The bowl holds what it makes, which is
+	// exactly right and is why this test is about the film rather than the puddle.
+	Tower->NoteContactAt(FVector2D::ZeroVector);
+	Tower->ConsumeSurfaceArea(6000.0);
+
+	TestTrue(TEXT("Melting puts water on the slab"), Tower->GetFilmVolume() > 0.0);
+	TestEqual(TEXT("Rather than under it"), Fluids->GetPools().Num(), 0);
+
+	// AND IT IS STILL ON THE LEDGER. The reaction's own water product must not
+	// deposit this same water again just because the film has not arrived: that
+	// the journey takes a second does not mean nobody is bringing it.
+	TestTrue(TEXT("The melt is accounted for while it is still on its way"),
+		Fluids->WasFluidReturned(TAG_Element_Water));
+
+	// A BOWL HOLDS ITS OWN MELTWATER, which is worth stating because it is the
+	// behaviour a fireball into the middle of a thick slab should have and it
+	// falls out of the heightfield rather than being written.
+	const double Held = Tower->GetFilmVolume();
+
+	for (int32 Step = 0; Step < 100; ++Step)
+	{
+		Tower->Tick(1.f / 20.f);
+	}
+
+	TestTrue(TEXT("A dish in the middle keeps what it melted"),
+		Tower->GetFilmVolume() > Held * 0.5);
+	TestEqual(TEXT("So nothing reaches the ground"), Fluids->GetPools().Num(), 0);
+
+	return true;
+}
+
+
+// ---------------------------------------------------------------------------
 // Lava, and what it sets into
 //
 // THE WORKED EXAMPLE THIS SYSTEM KEPT CITING. Every comment about a solid that

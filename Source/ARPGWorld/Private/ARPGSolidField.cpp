@@ -93,6 +93,286 @@ void FARPGSolidField::Refresh()
 
 	CachedArea = CachedCells * CellArea;
 	CachedCentroid = CachedCells > 0 ? Sum / CachedCells : Origin;
+
+	RefreshWet();
+}
+
+void FARPGSolidField::RefreshWet()
+{
+	CachedWet = 0.0;
+
+	// A REBUILD DROPS THE FILM. The array is sized to the cells and a field that
+	// has just been rebuilt from a ring has no relationship to whatever was on the
+	// old one, so keeping it would put water at arbitrary places on a new shape.
+	if (Wet.Num() != Top.Num())
+	{
+		Wet.Reset();
+		return;
+	}
+
+	const double CellArea = static_cast<double>(CellSize) * CellSize;
+
+	for (int32 Y = 0; Y < CountY; ++Y)
+	{
+		for (int32 X = 0; X < CountX; ++X)
+		{
+			const int32 At = Index(X, Y);
+
+			// WATER ON A CELL THAT JUST MELTED THROUGH HAS NOWHERE TO BE. FlowStep
+			// skips cells that are not solid, so leaving it would strand a volume
+			// that keeps CachedWet above zero and keeps the slab ticking for the
+			// rest of the level. Dropped rather than shed: it is the film that was
+			// sitting on the bit of slab a fireball just removed, and the same
+			// fireball is producing far more meltwater through the front door.
+			if (!IsSolid(X, Y))
+			{
+				Wet[At] = 0.f;
+				continue;
+			}
+
+			CachedWet += static_cast<double>(Wet[At]) * CellArea;
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The film running over it
+// ---------------------------------------------------------------------------
+
+float FARPGSolidField::WetAt(const FVector2D& World) const
+{
+	if (Wet.Num() != Top.Num())
+	{
+		return 0.f;
+	}
+
+	const FIntPoint Cell = CellAt(World);
+	return Cell.X >= 0 ? Wet[Index(Cell.X, Cell.Y)] : 0.f;
+}
+
+double FARPGSolidField::WetVolume() const
+{
+	return CachedWet;
+}
+
+double FARPGSolidField::Pour(const FVector2D& At, float Radius, double Volume)
+{
+	if (Volume <= 0.0 || !IsValidField())
+	{
+		return Volume;
+	}
+
+	// The film array is grown lazily. A slab that never melts never pays for it,
+	// which is most of them -- an earth wall exists to be stood behind.
+	if (Wet.Num() != Top.Num())
+	{
+		Wet.SetNumZeroed(Top.Num());
+		CachedWet = 0.0;
+	}
+
+	// EVERY CELL THE DISC TOUCHES, solid or not. The ones that are not solid are
+	// counted and then given nothing, so fluid poured over a hole falls through
+	// in proportion rather than piling onto the rim -- which is what a bowl melted
+	// clean through should do.
+	const float Reach = FMath::Max(Radius, CellSize);
+	const double ReachSq = static_cast<double>(Reach) * Reach;
+
+	const FIntPoint Low = CellAt(At - FVector2D(Reach, Reach));
+	const FIntPoint High = CellAt(At + FVector2D(Reach, Reach));
+
+	const int32 MinX = FMath::Max(0, Low.X >= 0 ? Low.X : 0);
+	const int32 MinY = FMath::Max(0, Low.Y >= 0 ? Low.Y : 0);
+	const int32 MaxX = FMath::Min(CountX - 1, High.X >= 0 ? High.X : CountX - 1);
+	const int32 MaxY = FMath::Min(CountY - 1, High.Y >= 0 ? High.Y : CountY - 1);
+
+	int32 Covered = 0;
+	int32 Landed = 0;
+
+	for (int32 Y = MinY; Y <= MaxY; ++Y)
+	{
+		for (int32 X = MinX; X <= MaxX; ++X)
+		{
+			if (FVector2D::DistSquared(CentreOf(X, Y), At) > ReachSq)
+			{
+				continue;
+			}
+
+			++Covered;
+			Landed += IsSolid(X, Y) ? 1 : 0;
+		}
+	}
+
+	// Nothing under the pour at all -- the disc is off the grid, or entirely over
+	// a hole. All of it falls.
+	if (Covered == 0 || Landed == 0)
+	{
+		return Volume;
+	}
+
+	const double CellArea = static_cast<double>(CellSize) * CellSize;
+	const double Share = Volume / Covered;
+	const float Depth = static_cast<float>(Share / CellArea);
+
+	for (int32 Y = MinY; Y <= MaxY; ++Y)
+	{
+		for (int32 X = MinX; X <= MaxX; ++X)
+		{
+			if (!IsSolid(X, Y) || FVector2D::DistSquared(CentreOf(X, Y), At) > ReachSq)
+			{
+				continue;
+			}
+
+			Wet[Index(X, Y)] += Depth;
+			CachedWet += Share;
+		}
+	}
+
+	// What fell through the holes, for the caller to put on the ground.
+	return Share * (Covered - Landed);
+}
+
+double FARPGSolidField::FlowStep(float DeltaTime, float Rate, float MinimumFilm,
+	FVector2D& OutShedAt)
+{
+	OutShedAt = CachedCentroid;
+
+	if (!HasWet() || Wet.Num() != Top.Num() || DeltaTime <= 0.f)
+	{
+		return 0.0;
+	}
+
+	const double CellArea = static_cast<double>(CellSize) * CellSize;
+	const float Step = FMath::Clamp(Rate * DeltaTime, 0.f, 1.f);
+
+	// DOUBLE BUFFERED. A single sweep in raster order would let a cell read its
+	// eastern neighbour's depth from this step and its western neighbour's from
+	// the last, so water would run downhill faster in one direction than the
+	// other -- a bias you can see, on a symmetrical dome, as a film that drifts.
+	TArray<float> Next = Wet;
+
+	double Shed = 0.0;
+	FVector2D ShedMoment = FVector2D::ZeroVector;
+
+	// Four-neighbour rather than eight. A diagonal step is 1.41 cells long and
+	// weighting for that is the sort of correction whose absence nobody sees on a
+	// film, while the extra four lookups per cell are paid on every one of them.
+	const FIntPoint Steps[4] = { {1, 0}, {-1, 0}, {0, 1}, {0, -1} };
+
+	for (int32 Y = 0; Y < CountY; ++Y)
+	{
+		for (int32 X = 0; X < CountX; ++X)
+		{
+			const int32 Here = Index(X, Y);
+			const float Depth = Wet[Here];
+
+			if (Depth <= 0.f || !IsSolid(X, Y))
+			{
+				continue;
+			}
+
+			// Slab-local cm. Top is millimetres, the film is centimetres, and this
+			// is the one place the two are added -- get it wrong and a 30cm slab
+			// looks like a 3m cliff to the water on it.
+			const float Surface = Top[Here] * 0.1f + Depth;
+
+			float Drops[4] = { 0.f, 0.f, 0.f, 0.f };
+			float TotalDrop = 0.f;
+
+			for (int32 Side = 0; Side < 4; ++Side)
+			{
+				const int32 NX = X + Steps[Side].X;
+				const int32 NY = Y + Steps[Side].Y;
+
+				const bool bOffGrid = NX < 0 || NY < 0 || NX >= CountX || NY >= CountY;
+
+				// OFF THE EDGE OR INTO A HOLE IS A CLIFF, not a neighbour. There is
+				// nothing over there to hold water at any height, so the whole of
+				// this cell's own surface is the drop -- which is what makes a film
+				// pour off the rim of a slab instead of pooling against it.
+				const float Drop = (bOffGrid || !IsSolid(NX, NY))
+					? Surface
+					: Surface - (Top[Index(NX, NY)] * 0.1f + Wet[Index(NX, NY)]);
+
+				if (Drop > 0.f)
+				{
+					Drops[Side] = Drop;
+					TotalDrop += Drop;
+				}
+			}
+
+			if (TotalDrop <= 0.f)
+			{
+				continue; // sitting in a dish with nowhere lower to go
+			}
+
+			// HALF THE HEAD, not all of it. Two cells trading across a step want to
+			// settle level; moving the whole difference overshoots and they swap
+			// heights forever, which on a flat slab reads as a shimmer.
+			const float Moving = FMath::Min(Depth, TotalDrop * 0.5f) * Step;
+			if (Moving <= 0.f)
+			{
+				continue;
+			}
+
+			Next[Here] -= Moving;
+
+			for (int32 Side = 0; Side < 4; ++Side)
+			{
+				if (Drops[Side] <= 0.f)
+				{
+					continue;
+				}
+
+				const float Portion = Moving * (Drops[Side] / TotalDrop);
+
+				const int32 NX = X + Steps[Side].X;
+				const int32 NY = Y + Steps[Side].Y;
+				const bool bOffGrid = NX < 0 || NY < 0 || NX >= CountX || NY >= CountY;
+
+				if (bOffGrid || !IsSolid(NX, NY))
+				{
+					// GONE FROM THE SLAB. Weighted by where it left, so a tower
+					// melted on one side sheds down that side and the puddle forms
+					// there rather than under the middle.
+					const double Volume = static_cast<double>(Portion) * CellArea;
+
+					Shed += Volume;
+					ShedMoment += CentreOf(X, Y) * Volume;
+					continue;
+				}
+
+				Next[Index(NX, NY)] += Portion;
+			}
+		}
+	}
+
+	// A FLOOR, or the film never finishes. Each step moves a fraction of what is
+	// left, so depth approaches zero and never arrives -- and a slab with a
+	// millionth of a millimetre on it would tick, rebuild and re-cook forever.
+	// What is swept up this way is dried in place rather than shed: it is a damp
+	// patch, not a drip, and inventing a puddle out of it would be worse.
+	double Remaining = 0.0;
+
+	for (float& Depth : Next)
+	{
+		if (Depth < MinimumFilm)
+		{
+			Depth = 0.f;
+			continue;
+		}
+
+		Remaining += static_cast<double>(Depth) * CellArea;
+	}
+
+	Wet = MoveTemp(Next);
+	CachedWet = Remaining;
+
+	if (Shed > 0.0)
+	{
+		OutShedAt = ShedMoment / Shed;
+	}
+
+	return Shed;
 }
 
 double FARPGSolidField::SupportDistance(const FVector2D& From, const FVector2D& Direction) const

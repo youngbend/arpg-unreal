@@ -1462,6 +1462,63 @@ changing, which is the real test of whether the slab model came off ice.
 
 3 new cases under `ARPG.World.Fluid.Lava`.
 
+**MELTWATER LEARNED TO GET DOWN -- a film on the slab, not a fluid simulation of
+the world.** Melting the top of an ice tower used to put a puddle at its foot in
+the same instant: the right destination reached by no route at all. What was
+missing was the whole journey.
+
+- **THE GRID WAS ALREADY THERE**, which is the entire reason this is cheap rather
+  than a rewrite. A shallow-water solver IS a heightfield with a depth per cell
+  and an exchange rule between neighbours -- the same object a slab has been since
+  it stopped being an outline. So the film is a third array over the two that
+  exist, and a step is one sweep: no booleans, no offsetter, no outline to
+  retriangulate, cost bounded by cell count exactly as melting is.
+- **The pipe model, half the head, double buffered.** A cell compares its surface
+  against its four neighbours and gives volume to whichever are lower, in
+  proportion. Half the difference, or two cells trading across a step swap
+  heights forever and a flat slab shimmers. Double buffered, or a raster-order
+  sweep runs downhill faster east than west and the film visibly drifts.
+- **The rim and every hole are a CLIFF, not a neighbour.** There is nothing over
+  there to hold water at any height, so the whole of a cell's surface is the drop
+  -- which is what makes a film pour off the edge instead of pooling against it,
+  with no boundary case written anywhere.
+- **The film is floats and is NOT replicated**, and both halves are deliberate.
+  Not replicated because what a film DOES that matters is arrive at the bottom,
+  and what arrives is a pool, which replicates already -- and because tripling
+  the heaviest thing on the wire to send presentation would be indefensible while
+  dirty-region updates are still owed. Floats because the integer millimetres
+  that make `Top` affordable would quantise a two-millimetre film to nothing and
+  the water would round its way out of existence on the way down.
+- **A BOWL HOLDS ITS OWN MELTWATER**, and this fell out rather than being written.
+  A fireball into the middle of a two-metre slab cuts a dish, and a dish keeps
+  what it melts; only a melt that breaches the rim runs off. That is the right
+  behaviour and it is also why the runoff test pours directly instead of melting
+  -- a melt is the wrong question to ask about arrival.
+- **Runoff is batched and flushed on drying.** Every deposit is a polygon merge or
+  an actor spawn, so a melting tower putting each dribble down as it came would
+  charge itself a boolean op per frame for a teaspoon. The flush matters more than
+  the batch: the last of a film is always under the threshold, and water lost
+  because it was the remainder is the kind of leak nobody watches happen.
+- **Melting reports to the reaction ledger BEFORE it pours**, above every early
+  return. That the water has not arrived yet does not mean nobody is bringing it,
+  and the product must not deposit the same water again while the film is still
+  on its way down.
+
+**WHAT IS DELIBERATELY NOT HERE.** The film is not drawn. `BuildFieldMesh` builds
+from `Top` and `Bottom`, and putting a wet sheet on the surface is a second mesh
+section or a material parameter -- editor work, not something to write blind. The
+runoff arriving over a second or two instead of instantly is a visible change
+without it, but the wet slab is not. Clients do not run the film either: it is
+server-side, so the pool arrives correctly everywhere and the sheet on the way
+down is currently a server-only fact. Both are named gaps rather than oversights.
+
+Fluid crossing open terrain would still need pools to become heightfields, which
+is a rewrite under a working system rather than an addition -- and it needs
+dirty-region replication in front of it, not after.
+
+5 new cases under `ARPG.World.Fluid.Runoff`, four of them pure grid arithmetic
+with no world at all.
+
 **Phase 11 -- code complete. Not in the original ten: this is the layer that
 makes the other ten reachable from a controller.** The modal control scheme, the
 speed tiers, the buffering, and auto-sheathe. 13 new cases; 99 pass in total.

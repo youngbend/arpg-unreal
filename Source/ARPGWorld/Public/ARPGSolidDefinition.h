@@ -179,6 +179,49 @@ public:
 		meta = (ClampMin = "0.1"))
 	float RiseSpeed = 14.f;
 
+	// --- The film running off it -----------------------------------------------
+	//
+	// MELTWATER HAS TO GET DOWN. Until this existed, melting the top of an ice
+	// tower put a puddle at its foot instantly -- the right destination by the
+	// wrong route, with no journey at all. The film runs on the slab's own
+	// heightfield, so it costs a sweep of cells and nothing else.
+
+	/**
+	 * How much of the available head the film moves per second.
+	 *
+	 * NOT A SPEED IN CM/S. The pipe model moves a fraction of the height
+	 * difference between neighbouring cells, so this is a rate of settling rather
+	 * than a velocity: high is a thin quick sheet, low is a slow ooze. 6 gets
+	 * water off a two-metre tower in about a second; lava wants far less.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Runoff",
+		meta = (ClampMin = "0.0"))
+	float FlowRate = 6.f;
+
+	/**
+	 * Below this depth in cm a cell is dry.
+	 *
+	 * A FLOOR, or the film never finishes: each step moves a fraction of what is
+	 * left, so the depth approaches zero and never arrives, and a slab carrying a
+	 * millionth of a millimetre would tick forever. What this sweeps up is dried
+	 * in place rather than shed -- a damp patch, not a drip.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Runoff",
+		meta = (ClampMin = "0.001"))
+	float MinimumFilm = 0.05f;
+
+	/**
+	 * Least volume worth spawning a body for, in cubic cm, when runoff lands.
+	 *
+	 * Runoff arrives in dribbles by design, and each one asks the fluid subsystem
+	 * to put fluid on the ground. Without a threshold a melting tower would make
+	 * that call every tick for a teaspoon, and each call is a polygon merge or an
+	 * actor spawn. Held until it is worth spending.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Runoff",
+		meta = (ClampMin = "0.0"))
+	float RunoffBatch = 20000.f;
+
 	/**
 	 * How much of the current it takes, 0-1.
 	 *

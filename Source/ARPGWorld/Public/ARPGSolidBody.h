@@ -131,6 +131,31 @@ public:
 	 */
 	void ReturnMeltedFluid(double MeltedVolume, const FVector2D& At);
 
+	// --- Runoff -----------------------------------------------------------------
+
+	/**
+	 * Runs the film over the slab and puts down whatever came off the edge.
+	 *
+	 * TICKED WHEREVER THE SLAB IS, floating or rooted, because water running off a
+	 * floe is the same water running off a tower. Costs nothing at all when the
+	 * slab is dry, which is nearly always -- HasWet is a cached read.
+	 */
+	void TickRunoff(float DeltaTime);
+
+	/** Fluid currently on the slab, in cubic cm. */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
+	double GetFilmVolume() const { return Field.WetVolume(); }
+
+	/**
+	 * Runoff held back because it was not yet worth a body, in cubic cm.
+	 *
+	 * The film sheds in dribbles by design and every deposit is a polygon merge or
+	 * an actor spawn, so it is batched. Visible for the tests, which would
+	 * otherwise have to infer it from a puddle that has not appeared yet.
+	 */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
+	double GetPendingRunoff() const { return PendingRunoff; }
+
 	/**
 	 * Where the last reaction touched this slab, in world XY.
 	 *
@@ -193,4 +218,11 @@ protected:
 
 	FVector2D PendingContact = FVector2D::ZeroVector;
 	bool bHasPendingContact = false;
+
+	/** Runoff waiting to be worth a deposit, and where it ran off. */
+	UPROPERTY(Transient)
+	double PendingRunoff = 0.0;
+
+	UPROPERTY(Transient)
+	FVector2D RunoffAt = FVector2D::ZeroVector;
 };
