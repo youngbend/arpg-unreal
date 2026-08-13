@@ -9,7 +9,9 @@
 #include "ARPGSolidBody.h"
 #include "ARPGSolidDefinition.h"
 #include "ARPGWorld.h"
+#include "Components/DynamicMeshComponent.h"
 #include "Engine/World.h"
+#include "Materials/MaterialInterface.h"
 
 namespace
 {
@@ -164,6 +166,18 @@ void AARPGRaiseSlabEffect::InitializeFromContext(const FARPGDischargeContext& In
 
 AARPGLaunchSlabProjectile::AARPGLaunchSlabProjectile()
 {
+	// EMPTY UNTIL SOMETHING IS THROWN. Most casts of this spell are a plain
+	// conjured boulder and never touch it, so it costs a component and no
+	// geometry -- the mesh is built exactly once, at the moment a slab is picked
+	// up, and never edited afterwards.
+	Carriage = CreateDefaultSubobject<UDynamicMeshComponent>(TEXT("Carriage"));
+	Carriage->SetupAttachment(RootComponent);
+	Carriage->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	Carriage->SetCastShadow(true);
+
+	// Tumbling needs a tick; a conjured boulder does not, and finds out on the
+	// first frame that it has nothing to turn.
+	PrimaryActorTick.bCanEverTick = true;
 }
 
 void AARPGLaunchSlabProjectile::InitializeFromContext(const FARPGDischargeContext& InContext)
@@ -229,6 +243,22 @@ void AARPGLaunchSlabProjectile::InitializeFromContext(const FARPGDischargeContex
 		Volume->SetEnergy(Volume->GetEnergy() * Bigger);
 	}
 
+	// TAKE THE ROCK WITH IT, rather than a note of how big it was. The field is
+	// snapshotted whole, so what lands is what was thrown -- melt scars and all --
+	// and the mesh is baked ONCE here and never touched again. Everything that
+	// makes a mesh the wrong representation for a slab standing in the world is an
+	// argument about repeated boolean editing; a mesh built once and discarded has
+	// none of it, and it is the only thing that can tumble.
+	Carried = Slab->Field;
+	CarriedDefinition = Slab->Definition;
+
+	ARPGFluidGeometry::BuildFieldMesh(Carriage, Carried, Carried.SolidCentroid());
+
+	if (UMaterialInterface* Rock = Slab->GetSurfaceMaterial())
+	{
+		Carriage->SetMaterial(0, Rock);
+	}
+
 	// AND THE WALL IS GONE, which is the cost of the spell: cover you throw is
 	// cover you no longer have. Unregistered explicitly rather than left to the
 	// next sweep, because the register is walked by conduction the same frame.
@@ -240,4 +270,87 @@ void AARPGLaunchSlabProjectile::InitializeFromContext(const FARPGDischargeContex
 	UE_LOG(LogARPGWorld, Verbose,
 		TEXT("Threw a slab of '%s' (%.0f cubic cm) instead of conjuring a boulder."),
 		*InContext.PrimaryElement->ElementTag.ToString(), Volume);
+}
+
+void AARPGLaunchSlabProjectile::Tick(float DeltaTime)
+{
+	Super::Tick(DeltaTime);
+
+	// THE WHOLE REASON THE MESH IS HERE. A heightfield's columns run along world
+	// Z, so a slab can yaw and keep every one of them vertical -- but a thrown
+	// rock pitches and rolls, and that is the rotation z = f(x,y) has no way to
+	// hold. In the air it is a mesh, and a mesh turns any way it likes.
+	if (bLaunchedFromSlab && Carriage)
+	{
+		Carriage->AddLocalRotation(FRotator(
+			TumbleRate.Y * DeltaTime, TumbleRate.Z * DeltaTime, TumbleRate.X * DeltaTime));
+	}
+}
+
+AARPGSolidBody* AARPGLaunchSlabProjectile::PutDown(const FVector& Where)
+{
+	UWorld* World = GetWorld();
+
+	if (bPutDown || !bLaunchedFromSlab || !bLandsAsSlab || !CarriedDefinition
+		|| !World || World->GetNetMode() == NM_Client)
+	{
+		return nullptr;
+	}
+
+	bPutDown = true;
+
+	UARPGFluidSurfaceSubsystem* Fluids = World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+	if (!Fluids || Carried.SolidCellCount() == 0)
+	{
+		return nullptr;
+	}
+
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+	AARPGSolidBody* Landed = World->SpawnActor<AARPGSolidBody>(
+		AARPGSolidBody::StaticClass(), FTransform(Where), Params);
+
+	if (!Landed)
+	{
+		return nullptr;
+	}
+
+	// THE FIELD ITSELF, not a ring it was built from. Setup seeds from an outline
+	// and would hand back a fresh unmarked slab; adopting the snapshot is what
+	// makes the pillar that lands the pillar that was thrown.
+	Landed->AdoptField(CarriedDefinition, Carried, Where,
+		static_cast<float>(GetActorRotation().Yaw));
+
+	Fluids->RegisterSolid(Landed);
+
+	UE_LOG(LogARPGWorld, Verbose, TEXT("A thrown slab of '%s' came to rest at %s."),
+		*CarriedDefinition->GetElementTag().ToString(), *Where.ToCompactString());
+
+	return Landed;
+}
+
+void AARPGLaunchSlabProjectile::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	// WHERE IT STOPPED IS WHERE IT LANDS. A projectile ends by hitting something
+	// or by expiring, and both are the rock coming to rest -- there is no third
+	// outcome worth a branch. Only on Destroyed, so tearing down a level does not
+	// scatter walls across it on the way out.
+	if (EndPlayReason == EEndPlayReason::Destroyed)
+	{
+		FVector Ground = GetActorLocation();
+
+		if (UARPGFluidSurfaceSubsystem* Fluids =
+				GetWorld() ? GetWorld()->GetSubsystem<UARPGFluidSurfaceSubsystem>() : nullptr)
+		{
+			// Reuse the deposit probe, which already knows to trace past every body
+			// this subsystem owns -- including, importantly, the one this rock is
+			// about to become.
+			Ground.Z = Fluids->GroundUnder(Ground, this);
+		}
+
+		PutDown(Ground);
+	}
+
+	Super::EndPlay(EndPlayReason);
 }

@@ -343,6 +343,36 @@ void AARPGSolidBody::UpdateAnchoring()
 	}
 }
 
+void AARPGSolidBody::AdoptField(UARPGSolidDefinition* InDefinition,
+	const FARPGSolidField& InField, const FVector& Where, float Yaw)
+{
+	Definition = InDefinition;
+	Field = InField;
+	GroundHeight = static_cast<float>(Where.Z);
+
+	if (Definition && Definition->Element)
+	{
+		Volume->Element = Definition->Element;
+	}
+
+	// THE FRAME PLACES IT. The field's cells are wherever they were when it was
+	// picked up, and moving those would be resampling a grid -- so the frame is
+	// set so that the field's centroid lands on the point asked for.
+	//
+	// UPRIGHT, whatever it was doing in the air, and only yaw survives the flight.
+	// A heightfield's columns are vertical by construction; landing one on its
+	// side would mean resampling through an arbitrary rotation, which is lossy,
+	// expensive, and exactly what makes tumbling hard for this shape. It slams
+	// down flat, which is also the readable outcome.
+	FieldYaw = Yaw;
+	FieldOrigin = FVector2D(Where.X, Where.Y) - Field.SolidCentroid().GetRotated(Yaw);
+
+	// The transient totals do not survive a copy any more than they survive the
+	// wire, so the rebuild has to start by putting them back.
+	Field.Refresh();
+	RebuildFromRing();
+}
+
 void AARPGSolidBody::BeginBuried(float Depth)
 {
 	Draft = FMath::Max(0.f, Depth);
@@ -728,6 +758,17 @@ void AARPGSolidBody::ReturnMeltedFluid(double MeltedVolume, const FVector2D& At)
 	Fluids->ReturnFluid(At, Bed, FluidVolume, Fluid);
 }
 
+float AARPGSolidBody::GroundBelow() const
+{
+	// A ROOTED SLAB STANDS ON ITS OWN BASE, and a floating one on the bed of
+	// whatever carries it. Both are already known, so a trace would be paying for
+	// an answer the body is holding.
+	const IARPGElementalSurface* Riding =
+		IsValid(FloatsOn.GetObject()) ? FloatsOn.GetInterface() : nullptr;
+
+	return Riding ? Riding->GetSurfaceBedAt(GetWorldCentre()) : GroundHeight;
+}
+
 void AARPGSolidBody::TickRunoff(float DeltaTime)
 {
 	// FREE WHEN DRY, which is nearly always. HasWet is a cached total rather than
@@ -780,6 +821,36 @@ void AARPGSolidBody::TickRunoff(float DeltaTime)
 		return;
 	}
 
+	// AND THEN IT FALLS. Water that has left the rim of a two-metre tower is not
+	// yet water on the ground, and the gap is the most legible part of the whole
+	// effect -- the puddle appearing a beat after the film reaches the edge is
+	// what reads as "it ran down". Timed rather than simulated, because a
+	// heightfield has no vertical face for anything to run down: a face is many
+	// heights at one column, which is precisely what z = f(x,y) cannot hold.
+	if (RunoffFall <= 0.f)
+	{
+		const float Drop = FMath::Max(0.f, GetSurfaceHeight() - GroundBelow());
+
+		// s = ut + at^2/2 with u = 0, in cm and seconds.
+		RunoffFall = FMath::Sqrt(2.f * Drop / 980.f);
+
+		// Nothing worth waiting for on a floe riding flush with the water.
+		if (RunoffFall < 0.05f)
+		{
+			RunoffFall = 0.f;
+		}
+	}
+
+	if (RunoffFall > 0.f)
+	{
+		RunoffFall = FMath::Max(0.f, RunoffFall - DeltaTime);
+
+		if (RunoffFall > 0.f)
+		{
+			return; // still in the air
+		}
+	}
+
 	if (UARPGFluidSurfaceSubsystem* Fluids =
 			GetWorld() ? GetWorld()->GetSubsystem<UARPGFluidSurfaceSubsystem>() : nullptr)
 	{
@@ -796,6 +867,7 @@ void AARPGSolidBody::TickRunoff(float DeltaTime)
 	}
 
 	PendingRunoff = 0.0;
+	RunoffFall = 0.f;
 }
 
 bool AARPGSolidBody::IsStandableAt(FVector WorldPoint) const

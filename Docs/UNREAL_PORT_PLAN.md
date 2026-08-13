@@ -1519,6 +1519,70 @@ dirty-region replication in front of it, not after.
 5 new cases under `ARPG.World.Fluid.Runoff`, four of them pure grid arithmetic
 with no world at all.
 
+**THREE LIMITS OF A HEIGHTFIELD, told apart and answered separately.** Asked
+whether a mesh would be the better representation, the honest answer turned out
+to be that "the heightfield cannot do X" was three different X's wearing one
+coat, and only one of them wanted a mesh.
+
+- **No overhangs** -- z = f(x,y) has one height per column, so a bowl cut into a
+  SIDE, an arch, or a hole through a wall are unrepresentable. Only spans (a list
+  of intervals per column) fix this, and it is deferred: it justifies itself on
+  breaching cover, not on fluids, and at 40-60cm cells a chest-height window is
+  two cells and reads as a slot.
+- **No surface on a vertical face**, so a film cannot flow down one. Answered by
+  admitting it: what happens off a rim is a FALL, and a fall is a delay. Runoff
+  now waits `sqrt(2h/g)` before it lands, so a five-metre tower puddles about a
+  second after the water leaves the edge -- which is the part the eye was reading
+  all along, at three orders of magnitude less than a face solver.
+- **No rotation**, and this one turned out to be two questions. **Yaw is fine**:
+  columns run along world Z, so spinning about the up axis leaves every one of
+  them vertical. Only pitch and roll break the shape -- and a floe spins on the
+  water rather than tumbling.
+
+**So the field got its own frame, and a floe turns.** The field was addressed by
+world XY, which worked only because the actor's rotation was always identity: a
+latent coupling, not a decision. `FieldOrigin` and `FieldYaw` on the body now
+carry where the cells are and which way round, every world-facing call converts
+at the boundary, and the mesh needed no change at all -- it was already built in
+field space relative to the centroid, so the component's transform carries the
+yaw. Drift moves the frame instead of translating the field, which is cheaper,
+and spin comes from the shear in the current: sample the flow at both flanks and
+the difference along it is what puts a couple on anything floating there.
+
+**And a thrown slab is a mesh for exactly as long as it is in the air.** This is
+where the argument against meshes stops applying, and the difference is one word:
+EDITED. Unbounded vertex growth, sliver accumulation, a cook that worsens every
+time, an object you cannot replicate -- every one of those is about REPEATED
+boolean editing, which is the failure the heightfield replaced. A mesh baked
+once, carried, and discarded has none of them, and it is the only thing that can
+tumble.
+
+- **The field goes with it, whole.** What lands is what was thrown, melt scars
+  and all -- `AdoptField` is the other door into a slab, next to the `Setup` that
+  seeds one from an outline.
+- **It lands upright.** Only the yaw survives the flight, because putting a
+  heightfield down on its side means resampling the grid through an arbitrary
+  rotation: lossy, expensive, and precisely what makes tumbling hard for this
+  shape. It slams down flat, which is the readable outcome anyway.
+- **Which makes Project a way of MOVING your cover** rather than only spending
+  it, and that is a better spell than the generic boulder it replaced.
+
+**Viscosity moved onto the fluid**, where it belonged: with the knob on the slab
+you would tune "how thick is lava" inside the earth asset. And a rate was only
+half of it -- a slower rate makes a fluid arrive later, it never makes it STOP.
+`YieldSlope` is head per cell below which nothing moves, so lava sits on a
+gradient water sheets off, and the piling-up comes free because a fluid that
+needs more head necessarily stands deeper. An edge is exempt: nothing holds a
+fluid back over a cliff however thick it is.
+
+**Earth melts into lava now**, so a pillar sheds down its own face through the
+film instead of the reaction's product appearing at its foot -- and the ledger
+stops the two of them both depositing.
+
+5 new cases under `ARPG.World.Fluid.Runoff` and `.Slabs`, including the same ramp
+run twice differing only in the two viscosity numbers, and a rotation test on a
+long bar because a disc would pass by symmetry and tell you nothing.
+
 **Phase 11 -- code complete. Not in the original ten: this is the layer that
 makes the other ten reachable from a controller.** The modal control scheme, the
 speed tiers, the buffering, and auto-sheathe. 13 new cases; 99 pass in total.

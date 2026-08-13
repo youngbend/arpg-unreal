@@ -683,6 +683,14 @@ AARPGFluidPool* UARPGFluidSurfaceSubsystem::FindPoolAt(FVector WorldPosition) co
 	return nullptr;
 }
 
+float UARPGFluidSurfaceSubsystem::GroundUnder(FVector WorldPosition, const AActor* Ignore) const
+{
+	FVector Ground;
+	return TraceToGround(WorldPosition, Ignore, Ground)
+		? static_cast<float>(Ground.Z)
+		: static_cast<float>(WorldPosition.Z);
+}
+
 AARPGSolidBody* UARPGFluidSurfaceSubsystem::FindSolidAt(FVector WorldPosition) const
 {
 	for (AARPGSolidBody* Solid : ActiveSolids)

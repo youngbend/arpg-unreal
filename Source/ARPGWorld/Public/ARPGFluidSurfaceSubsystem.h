@@ -205,6 +205,17 @@ public:
 	AARPGSolidBody* FindSolidAt(FVector WorldPosition) const;
 
 	/**
+	 * Height of the real ground under a point, ignoring every body this owns.
+	 *
+	 * The same probe a deposit uses, offered to anything else that needs to put
+	 * something DOWN -- a thrown slab coming to rest, most of all, which must not
+	 * land on the puddle it is about to sit in. Returns the point's own Z when
+	 * there is no ground, which is the honest answer for a cast over a drop.
+	 */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
+	float GroundUnder(FVector WorldPosition, const AActor* Ignore) const;
+
+	/**
 	 * The nearest slab of a given element within a reach, or null.
 	 *
 	 * What a spell asks before deciding what it is. An earth Project cast at a

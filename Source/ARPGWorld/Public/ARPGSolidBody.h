@@ -149,6 +149,10 @@ public:
 	 */
 	void TickRunoff(float DeltaTime);
 
+	/** Height of whatever the slab is standing on or floating in. */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
+	float GroundBelow() const;
+
 	/** Fluid currently on the slab, in cubic cm. */
 	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
 	double GetFilmVolume() const { return Field.WetVolume(); }
@@ -250,6 +254,18 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "ARPG|Fluid")
 	void BeginBuried(float Depth);
 
+	/**
+	 * Adopts a field wholesale, rather than building one from an outline.
+	 *
+	 * WHAT LANDS IS WHAT WAS THROWN. Setup seeds a field from a ring, which is
+	 * right when a slab is being made and wrong when one is being put back: a
+	 * pillar that was carved by two fireballs before it was picked up should come
+	 * down carved. This is the other door into the same object.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "ARPG|Fluid")
+	void AdoptField(UARPGSolidDefinition* InDefinition, const FARPGSolidField& InField,
+		const FVector& Where, float Yaw);
+
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
 	void Setup(UARPGSolidDefinition* InDefinition, const TArray<FVector2D>& InRing,
@@ -289,4 +305,18 @@ protected:
 
 	UPROPERTY(Transient)
 	FVector2D RunoffAt = FVector2D::ZeroVector;
+
+	/**
+	 * How long the batch still has to fall before it lands.
+	 *
+	 * WATER LEAVING A RIM IS NOT WATER ON THE GROUND. A heightfield has no
+	 * vertical face for a film to cling to -- a face is many heights at one
+	 * column, which is the one thing z = f(x,y) cannot say -- so nothing can flow
+	 * DOWN the side of a tower. What actually happens off a rim is a fall, and a
+	 * fall is a delay: the puddle appears a beat after the water leaves, which is
+	 * the whole of what the eye is reading. Cheaper than a face solver by three
+	 * orders of magnitude and, for a drop, not obviously less true.
+	 */
+	UPROPERTY(Transient)
+	float RunoffFall = 0.f;
 };

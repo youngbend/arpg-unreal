@@ -4,9 +4,11 @@
 
 #include "CoreMinimal.h"
 #include "ARPGPlaceholderEffect.h"
+#include "ARPGSolidField.h"
 #include "ARPGSlabEffects.generated.h"
 
 class AARPGSolidBody;
+class UDynamicMeshComponent;
 class UARPGSolidDefinition;
 
 /**
@@ -155,7 +157,79 @@ public:
 	UFUNCTION(BlueprintPure, Category = "ARPG|Slab")
 	bool WasLaunchedFromSlab() const { return bLaunchedFromSlab; }
 
+	// --- Carrying the rock rather than a stand-in --------------------------------
+	//
+	// A MESH IS RIGHT HERE AND WRONG EVERYWHERE ELSE IN THIS SYSTEM, and the
+	// difference is one word: EDITED. Everything against meshes -- unbounded vertex
+	// growth, sliver accumulation, a collision cook that gets worse every time, an
+	// object you cannot replicate -- is an argument about REPEATED boolean editing,
+	// which is the failure the heightfield replaced. A mesh built once, carried,
+	// and thrown away has none of it.
+	//
+	// AND ROTATION IS THE ONE THING A HEIGHTFIELD CANNOT DO. Its columns run along
+	// world Z; yaw leaves them vertical (see AARPGSolidBody's frame) but tumbling
+	// does not, and a thrown rock tumbles. So the two states want two
+	// representations, and the conversions are single events at each end: bake on
+	// launch, rebuild on impact.
+
+	/**
+	 * The slab this was, kept whole so it can be put back down.
+	 *
+	 * WHAT LANDS IS WHAT WAS THROWN, melt scars and all. Without the snapshot the
+	 * spell would consume a carved pillar and drop a generic one, which is the
+	 * sort of detail nobody articulates and everybody notices.
+	 */
+	UPROPERTY(Transient)
+	FARPGSolidField Carried;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UARPGSolidDefinition> CarriedDefinition;
+
+	/**
+	 * How fast the thrown rock tumbles, in degrees per second on each axis.
+	 *
+	 * The reason this class exists rather than a projectile with a rock mesh on
+	 * it: a slab standing in the world cannot pitch or roll, and one in the air
+	 * has to.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ARPG|Slab")
+	FVector TumbleRate = FVector(140.f, 90.f, 60.f);
+
+	/**
+	 * Whether the rock is put back down as a slab where it lands.
+	 *
+	 * On, a thrown pillar becomes cover wherever it comes to rest -- which is a
+	 * better spell than a rock that vanishes, and turns Project into a way of
+	 * MOVING your cover rather than only spending it. Off, it shatters.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ARPG|Slab")
+	bool bLandsAsSlab = true;
+
+	virtual void Tick(float DeltaTime) override;
+
+	/** Puts the carried slab back into the world. Called when the throw ends. */
+	UFUNCTION(BlueprintCallable, Category = "ARPG|Slab")
+	AARPGSolidBody* PutDown(const FVector& Where);
+
+	/**
+	 * What the rock is drawn with in the air. Empty until something is thrown.
+	 *
+	 * ITS OWN COMPONENT rather than the placeholder's sphere, because the two say
+	 * different things: the sphere is honestly a stand-in, and this is the actual
+	 * slab that was picked up. Presentation only -- the hitbox is what hurts
+	 * things, and a carried mesh that collided would shoulder the caster aside on
+	 * the way out.
+	 */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UDynamicMeshComponent> Carriage;
+
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+
 protected:
 	UPROPERTY(Transient)
 	bool bLaunchedFromSlab = false;
+
+	/** So a throw that is destroyed for any other reason does not drop a wall. */
+	UPROPERTY(Transient)
+	bool bPutDown = false;
 };

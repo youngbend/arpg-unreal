@@ -12,6 +12,7 @@
 #include "ARPGElementalVolumeComponent.h"
 #include "ARPGSurfaceBody.h"
 #include "ARPGSolidBody.h"
+#include "ARPGSlabEffects.h"
 #include "ARPGFluidDefinition.h"
 #include "ARPGSolidDefinition.h"
 #include "ARPGFluidGeometry.h"
@@ -1709,6 +1710,149 @@ bool FARPGSlabRiseTest::RunTest(const FString& Parameters)
 	Slab->Tick(1.f);
 	TestEqual(TEXT("Then it never moves again"),
 		Slab->GetActorLocation().Z, Resting, 0.01f);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGRunoffFallsTest,
+	"ARPG.World.Fluid.Runoff.WaterOffATallSlabTakesTimeToReachTheGround",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGRunoffFallsTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+	UARPGMagicElement* Ice = MakeElement(GetTransientPackage(), TAG_Element_Ice);
+
+	UARPGFluidDefinition* WaterDefinition = MakeWater(GetTransientPackage(), Water);
+	WaterDefinition->EvaporationRate = 0.f;
+	WaterDefinition->MinimumArea = 100.f;
+
+	UARPGSolidDefinition* IceDefinition = MakeIce(Ice);
+	IceDefinition->Thickness = 500.f;   // a five-metre tower
+	IceDefinition->MeltsInto = WaterDefinition;
+
+	Fluids->Definitions = { WaterDefinition };
+	Fluids->Solids = { IceDefinition };
+
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	AARPGSolidBody* Tower = Scope.World->SpawnActor<AARPGSolidBody>(
+		AARPGSolidBody::StaticClass(), FTransform::Identity, Params);
+
+	Tower->Setup(IceDefinition, ARPGFluidGeometry::MakeCircle(FVector2D::ZeroVector, 250.0), 0.f);
+	Tower->Field.Pour(FVector2D::ZeroVector, 200.f, 500000.0);
+
+	// A HEIGHTFIELD HAS NO VERTICAL FACE for a film to run down -- a face is many
+	// heights at one column, which is the one thing z = f(x,y) cannot say. What
+	// happens off a rim is a FALL, and a fall is a delay: the puddle appears a
+	// beat after the water leaves, which is the whole of what the eye reads.
+	int32 Ticks = 0;
+	while (Fluids->GetPools().Num() == 0 && Ticks < 400)
+	{
+		Tower->Tick(1.f / 60.f);
+		++Ticks;
+	}
+
+	TestTrue(TEXT("It gets there"), Fluids->GetPools().Num() >= 1);
+
+	// Five metres is about a second of falling, on top of however long the film
+	// took to reach the rim. The assertion is only that the drop is PAID FOR --
+	// a tower this tall cannot puddle in a couple of frames.
+	TestTrue(TEXT("But not instantly, from five metres up"), Ticks > 60);
+
+	// And the last of it still arrives: the flush on drying is what stops the
+	// remainder being lost because it was under the batch.
+	for (int32 Step = 0; Step < 600; ++Step)
+	{
+		Tower->Tick(1.f / 60.f);
+	}
+
+	TestEqual(TEXT("Holding nothing back once it is dry"),
+		Tower->GetPendingRunoff(), 0.0, 0.001);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGThrownSlabTest,
+	"ARPG.World.Fluid.Slabs.AThrownSlabLandsAsTheSlabThatWasThrown",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGThrownSlabTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	UARPGMagicElement* Earth = MakeElement(GetTransientPackage(), TAG_Element_Earth);
+	UARPGSolidDefinition* EarthDefinition = MakeEarth(Earth);
+	Fluids->Solids = { EarthDefinition };
+
+	AARPGSolidBody* Pillar = RaiseSlab(Scope.World, Fluids, EarthDefinition,
+		FVector2D::ZeroVector, 200.0);
+
+	// CARVED FIRST, because that is the whole point of carrying the field rather
+	// than its volume: a pillar two fireballs have chewed should come down chewed.
+	Pillar->MeltAt(FVector2D(120, 0), 70.f, 60.f);
+
+	const FARPGSolidField Before = Pillar->Field;
+	const int32 CellsBefore = Before.SolidCellCount();
+	const double VolumeBefore = Before.SolidVolume();
+
+	TestTrue(TEXT("Setup: the pillar is marked"), CellsBefore > 0);
+
+	// Stand in for the launch: the projectile picks the field up whole.
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	AARPGLaunchSlabProjectile* Throw = Scope.World->SpawnActor<AARPGLaunchSlabProjectile>(
+		AARPGLaunchSlabProjectile::StaticClass(), FTransform::Identity, Params);
+
+	Throw->Carried = Before;
+	Throw->CarriedDefinition = EarthDefinition;
+
+	Fluids->UnregisterSolid(Pillar);
+	Pillar->Destroy();
+
+	TestEqual(TEXT("Nothing is standing while it is in the air"),
+		Fluids->GetSolids().Num(), 0);
+
+	// AND IT COMES BACK DOWN. Somewhere else, upright, and carrying every mark it
+	// had when it was picked up.
+	AARPGSolidBody* Landed = Throw->PutDown(FVector(2000, 500, 0));
+
+	TestNotNull(TEXT("A thrown slab lands as a slab"), Landed);
+	if (!Landed)
+	{
+		return false;
+	}
+
+	TestEqual(TEXT("Back on the register"), Fluids->GetSolids().Num(), 1);
+	TestEqual(TEXT("With the cells it was carrying"),
+		Landed->Field.SolidCellCount(), CellsBefore);
+	TestEqual(TEXT("And the volume"), Landed->Field.SolidVolume(), VolumeBefore, 1.0);
+
+	// The transient totals do not survive a copy any more than they survive the
+	// wire, so adopting a field has to put them back before anything reads them.
+	TestTrue(TEXT("Its totals were rebuilt, not inherited empty"),
+		Landed->Field.SolidVolume() > 0.0);
+
+	// WHERE IT WAS PUT, which is the frame doing the placing rather than the cells
+	// moving. Resampling a grid through a translation would be paying to lose
+	// detail for nothing.
+	TestEqual(TEXT("At the place it came to rest"),
+		Landed->GetWorldCentre().X, 2000.f, 5.f);
+	TestEqual(TEXT("In both axes"), Landed->GetWorldCentre().Y, 500.f, 5.f);
+	TestTrue(TEXT("And standable there"), Landed->IsStandableAt(FVector(2000, 500, 0)));
+
+	// PUT DOWN ONCE. A projectile ends by hitting something or by expiring and
+	// both run the same path, so without the guard a throw could drop two walls.
+	TestNull(TEXT("And only once"), Throw->PutDown(FVector(3000, 0, 0)));
+	TestEqual(TEXT("However often it is asked"), Fluids->GetSolids().Num(), 1);
 
 	return true;
 }
