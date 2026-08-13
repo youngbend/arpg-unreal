@@ -1412,6 +1412,56 @@ discharge type and authoring three entries is authoring three spells.
 
 4 new cases under `ARPG.World.Fluid.Slabs`.
 
+**LAVA AND OBSIDIAN, which is the example this system kept citing.** Every
+comment about a solid that is permanent, that melts into nothing, and that is
+compared by density against the fluid it formed on has said "obsidian" and meant
+a thing that did not exist. It exists now and none of those comments needed
+changing, which is the real test of whether the slab model came off ice.
+
+- **Fire + earth is lava in HAND AND IN THE WORLD**, and that is the unusual
+  part. Scope exists because most pairs mean different things in a caster's hands
+  and out in the world -- air and water is ice in the hand and merely weather over
+  a lake. This pair does not care: fusing fire and earth is molten rock, and
+  throwing fire at rock is molten rock. Scope `Hand | Collision`, and NOT Field,
+  because a grass fire crossing stony ground is a grass fire.
+- **The consumption ratio is the Melt row inverted.** Fire + ice spends the ice
+  fast, because a fireball melts a lot of it cheaply. Fire + earth spends the
+  FIRE fast, because rock is not ice -- which is what makes lava expensive rather
+  than the obvious opener.
+- **OBSIDIAN IS KEPT OUT OF THE HAND BY SCOPING, AND NOTHING ELSE.** There is no
+  mechanism that forbids holding an element, and none was added: what an element
+  can be in a caster's hands is exactly what some row produces in the Hand scope,
+  so a Quench row scoped to Surface is the entire restriction. No flag, no list of
+  forbidden results, nothing to keep in sync with the table.
+- **And the same pair still means something in the air.** Water crossing lava
+  mid-flight is steam, on a second row in the Collision scope -- the exact shape
+  of the ice-shard-versus-jet-versus-puddle split this codebase already lives by.
+  Without it a Surface-only row would have left the pair silently neutralising,
+  which is the quiet hole that scoping one row narrowly leaves behind.
+- **Obsidian answers no to both permanence questions**, the pair `MeltRate` and
+  `EnergyPerArea` were split apart to express: time does not take it and neither
+  does a spell. It is the one thing in the game that, once made, is simply part
+  of the level -- and a reaction against a zero-energy surface is refused before
+  anything is computed, so that is cheap as well as absolute.
+- **A crust floats, barely, and the numbers do the talking.** Real obsidian is
+  2.4 against basalt magma's 2.7, so at 89% of the flow's density a 25cm slab
+  rides 22cm under and 3cm proud -- awash, scabbing the surface, nothing like the
+  12cm of freeboard ice gets from being tuned to 60%. Same Archimedes, same code
+  path, two numbers apart. (My first pass had obsidian heavier than lava, which
+  would have sunk the crust to the bed and left molten rock on top of the thing
+  the player just quenched. It is also backwards: obsidian is the lighter of the
+  two. A slab heavier than what it formed on is still supported -- it rests on
+  the bed -- it just is not this one.)
+- **Lava's conductivity is 0.05**, which the water definition's own comment
+  predicted verbatim ("lava would be near zero") long before there was any lava.
+  A bolt does not flood across a flow, and the conduction solver learned nothing.
+- **The placeholder surface grew an emissive term**, because molten rock that
+  does not glow reads as mud and the whole job of a placeholder is that you can
+  tell at a glance what you are looking at. Zero for every surface that came
+  before it.
+
+3 new cases under `ARPG.World.Fluid.Lava`.
+
 **Phase 11 -- code complete. Not in the original ten: this is the layer that
 makes the other ten reachable from a controller.** The modal control scheme, the
 speed tiers, the buffering, and auto-sheathe. 13 new cases; 99 pass in total.

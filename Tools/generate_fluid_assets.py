@@ -134,6 +134,29 @@ SURFACES = [
         "opacity_grazing": 1.0,
         "fresnel_exponent": 1.0,
     },
+    {
+        "name": "M_ARPG_Lava_Placeholder",
+        "colour": (0.85, 0.20, 0.03),
+        "roughness": 0.55,
+        # OPAQUE, unlike water. You do not see the ground through molten rock, and
+        # a translucent lava pool would read as tinted glass over the floor.
+        "opacity_facing": 1.0,
+        "opacity_grazing": 1.0,
+        "fresnel_exponent": 2.0,
+        # And it lights itself. The one surface here that is a light source.
+        "emissive": 6.0,
+    },
+    {
+        "name": "M_ARPG_Obsidian_Placeholder",
+        "colour": (0.045, 0.04, 0.06),
+        # VOLCANIC GLASS: nearly black and nearly a mirror, which is the whole
+        # visual difference between it and the earth slab beside it. Both are
+        # rock you stand on; only one of them was liquid an instant ago.
+        "roughness": 0.08,
+        "opacity_facing": 1.0,
+        "opacity_grazing": 1.0,
+        "fresnel_exponent": 1.0,
+    },
 ]
 
 
@@ -185,6 +208,22 @@ def build_surface(spec):
     unreal.MaterialEditingLibrary.connect_material_property(
         constant(material, 1.0, -600, 680), "", unreal.MaterialProperty.MP_SPECULAR)
 
+    # EMISSIVE, for anything that is its own light source. Molten rock that does
+    # not glow reads as mud, and the placeholder's whole job is that you can tell
+    # at a glance what you are looking at. Zero for everything else, which is
+    # every surface that came before this one.
+    glow = spec.get("emissive", 0.0)
+    if glow > 0.0:
+        emissive = unreal.MaterialEditingLibrary.create_material_expression(
+            material, unreal.MaterialExpressionMultiply, -300, 800)
+
+        unreal.MaterialEditingLibrary.connect_material_expressions(
+            colour, "", emissive, "A")
+        unreal.MaterialEditingLibrary.connect_material_expressions(
+            constant(material, glow, -600, 860), "", emissive, "B")
+        unreal.MaterialEditingLibrary.connect_material_property(
+            emissive, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+
     unreal.MaterialEditingLibrary.recompile_material(material)
     save(material, "{}/{}".format(MATERIAL_DIR, spec["name"]))
 
@@ -230,6 +269,40 @@ FLUIDS = [
         # decide whether it floats. Nothing in the code names either substance.
         "density": 0.001,
         "surface": "M_ARPG_Water_Placeholder",
+    },
+    {
+        "name": "DA_Fluid_Lava", "element": "Lava",
+        # DEEPER THAN WATER, because molten rock does not spread thin: the same
+        # volume covers less ground and stands taller on it. Depth is also the
+        # exchange rate between volume and area for anything that melts back into
+        # this, so obsidian returning to lava would return a smaller pool than the
+        # same volume of ice returns as water.
+        "depth": 35.0,
+        "minimum_area": 2500.0,
+        # NO SUCH THING AS A LAVA LAKE from casting. Set far above anything a
+        # session could accumulate, because "bottomless and damping" is a
+        # statement about a body of water someone authored -- a spell landing in
+        # a pool of lava should very much still explode.
+        "reservoir_area": 100000000.0,
+        # FIVE TIMES WATER. A fireball boils a puddle away; it does nothing to a
+        # lava flow, because they are the same substance in temperament and the
+        # energy has nowhere to go. This is also what makes it expensive for water
+        # to quench: the Quench row spends against this number.
+        "energy_per_area": 0.005,
+        # NEAR ZERO, exactly as the water definition's own comment predicted. Lava
+        # is not the medium a bolt floods across -- and this being data is why
+        # nothing in the conduction solver had to learn the difference.
+        "conductivity": 0.05,
+        # Rain does not grow it, and it does not dry -- it COOLS, which at this
+        # system's resolution looks the same as shrinking. Slower than water, so a
+        # flow outlasts a puddle and is worth routing around.
+        "rain_growth_rate": 0.0,
+        "evaporation_rate": 0.6,
+        "merge_distance": 90.0,
+        # Basalt magma, and the number obsidian is compared against to decide
+        # whether a crust floats on it. It does not -- see DA_Solid_Obsidian.
+        "density": 0.0027,
+        "surface": "M_ARPG_Lava_Placeholder",
     },
 ]
 
@@ -357,6 +430,64 @@ SOLIDS = [
         "drift_response": 0.0,
         "rise_speed": 18.0,
         "surface": "M_ARPG_Earth_Placeholder",
+    },
+
+    # --- Obsidian ------------------------------------------------------------
+    #
+    # THE CASE THIS FILE HAS BEEN CITING SINCE IT WAS WRITTEN. Every comment about
+    # a solid that is permanent, that melts into nothing, that is denser than the
+    # fluid it formed on and therefore does NOT float, has said "obsidian" and
+    # meant a thing that did not exist. It exists now, and none of those comments
+    # needed changing -- which is the test of whether the slab model was really
+    # taken off ice.
+    {
+        "name": "DA_Solid_Obsidian", "element": "Obsidian",
+        # A CRUST, not a raft. Water quenches the SURFACE of a flow; what sets is
+        # a skin over molten rock, and the lava is still down there.
+        "thickness": 25.0,
+        "standable": True,
+
+        # PERMANENT, both ways, and these are the two independent questions the
+        # solid definition exists to keep apart. MeltRate 0: time does not take
+        # it. EnergyPerArea 0: neither does a spell -- volcanic glass is the one
+        # thing in this game that, once made, is simply part of the level.
+        #
+        # A reaction against a zero-energy surface is refused early rather than
+        # computed and discarded, so this is cheap as well as absolute.
+        "melt_rate": 0.0,
+        "energy_per_area": 0.0,
+        # AND NOTHING TO GIVE BACK. Rock that formed on lava is not frozen lava:
+        # break it and you get rubble, not a flow. Null is the documented answer
+        # and the reason ReturnMeltedFluid checks for it first.
+        "melts_into": None,
+
+        "minimum_area": 2500.0,
+        # Finer than earth. A crust is thin and its edge against the flow is the
+        # thing you look at, where a pillar is a block that takes hits.
+        "cell_size": 25.0,
+        "melt_radius": 70.0,
+
+        # LIGHTER THAN THE LAVA UNDER IT, so a crust floats -- which is both what
+        # real obsidian does (2.4 against basalt magma's 2.7) and the only thing
+        # that looks right: quench the surface of a flow and you should SEE black
+        # glass, not watch it sink and leave lava on top.
+        #
+        # Barely lighter, though, and that is the interesting part. At 89% of the
+        # lava's density a 25cm crust rides 22cm under and 3cm proud -- awash,
+        # scabbing the surface, nothing like the 12cm of freeboard ice gets. Same
+        # Archimedes, and the difference is entirely these two numbers.
+        #
+        # A slab HEAVIER than what it formed on is still a supported case -- it
+        # rests on the bed through GetSurfaceBedAt -- it just is not this one.
+        "density": 0.0024,
+        "occupant_mass": 80.0,
+        # Sitting on the bottom. Neither number is ever read, because the aground
+        # branch skips both -- set to the same "do nothing" values earth uses so
+        # nobody reads them as tuning.
+        "load_response": 100000.0,
+        "settle_speed": 1000.0,
+        "drift_response": 0.0,
+        "surface": "M_ARPG_Obsidian_Placeholder",
     },
 ]
 

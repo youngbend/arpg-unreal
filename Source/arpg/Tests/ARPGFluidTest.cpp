@@ -850,6 +850,262 @@ bool FARPGFluidReservoirMeltTest::RunTest(const FString& Parameters)
 }
 
 // ---------------------------------------------------------------------------
+// Lava, and what it sets into
+//
+// THE WORKED EXAMPLE THIS SYSTEM KEPT CITING. Every comment about a solid that
+// is permanent, melts into nothing, and is compared by density against the fluid
+// it formed on has said "obsidian" and meant something that did not exist. These
+// cases are the proof that none of those comments had to change.
+// ---------------------------------------------------------------------------
+
+namespace ARPGFluidTestUtils
+{
+	inline UARPGFluidDefinition* MakeLava(UObject* Outer, UARPGMagicElement* Element)
+	{
+		UARPGFluidDefinition* Definition = NewObject<UARPGFluidDefinition>(Outer);
+		Definition->Element = Element;
+		Definition->Depth = 35.f;
+		Definition->MinimumArea = 2500.f;
+		Definition->ReservoirArea = 100000000.f;
+		Definition->EnergyPerArea = 0.005f;
+		Definition->Conductivity = 0.05f;
+		Definition->RainGrowthRate = 0.f;
+		Definition->EvaporationRate = 0.f;   // held still, so a test can assert on area
+		Definition->MergeDistance = 90.f;
+		Definition->Density = 0.0027f;
+		return Definition;
+	}
+
+	inline UARPGSolidDefinition* MakeObsidian(UARPGMagicElement* Element)
+	{
+		UARPGSolidDefinition* Definition = NewObject<UARPGSolidDefinition>();
+		Definition->Element = Element;
+		Definition->Thickness = 25.f;
+		Definition->bStandable = true;
+		Definition->MeltRate = 0.f;        // time does not take it
+		Definition->EnergyPerArea = 0.f;   // and neither does a spell
+		Definition->MeltsInto = nullptr;   // rock that formed on lava is not frozen lava
+		Definition->MinimumArea = 100.f;
+		Definition->CellSize = 25.f;
+		Definition->Density = 0.0024f;     // lighter than the lava, so a crust floats
+		Definition->SettleSpeed = 1000.f;
+		return Definition;
+	}
+
+	/** The shipped rows for lava, transcribed. */
+	inline UARPGMagicCombinationTable* MakeLavaTable(UARPGMagicElement* Lava,
+		UARPGMagicElement* Obsidian, UARPGMagicElement* Steam)
+	{
+		UARPGMagicCombinationTable* Table = NewObject<UARPGMagicCombinationTable>();
+
+		// Fire + earth, in hand AND in the world. Scope 1|2 and not Field: a grass
+		// fire crossing stony ground is a grass fire, not a lava flow.
+		UARPGMagicCombinationEntry* Melt = NewObject<UARPGMagicCombinationEntry>(Table);
+		Melt->RequiredElements.AddTag(TAG_Element_Fire);
+		Melt->RequiredElements.AddTag(TAG_Element_Earth);
+		Melt->Result = Lava;
+		Melt->Scope = static_cast<int32>(EARPGCombinationScope::Hand)
+			| static_cast<int32>(EARPGCombinationScope::Collision);
+		Table->Entries.Add(Melt);
+
+		// Water onto a BODY of lava sets its surface. Surface scope only, which is
+		// the whole of "obsidian cannot be made in hand".
+		UARPGMagicCombinationEntry* Quench = NewObject<UARPGMagicCombinationEntry>(Table);
+		Quench->RequiredElements.AddTag(TAG_Element_Water);
+		Quench->RequiredElements.AddTag(TAG_Element_Lava);
+		Quench->Result = Obsidian;
+		Quench->Mode = EARPGReactionMode::Solidify;
+		Quench->Scope = static_cast<int32>(EARPGCombinationScope::Surface);
+		Table->Entries.Add(Quench);
+
+		// And the same pair meeting in the AIR is steam, which is why scope exists.
+		UARPGMagicCombinationEntry* Air = NewObject<UARPGMagicCombinationEntry>(Table);
+		Air->RequiredElements.AddTag(TAG_Element_Water);
+		Air->RequiredElements.AddTag(TAG_Element_Lava);
+		Air->Result = Steam;
+		Air->Scope = static_cast<int32>(EARPGCombinationScope::Collision);
+		Table->Entries.Add(Air);
+
+		return Table;
+	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGLavaRecipeTest,
+	"ARPG.World.Fluid.Lava.FireAndEarthMakeLavaInHandAndInTheWorld",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGLavaRecipeTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+
+	UARPGMagicElement* Lava = MakeElement(GetTransientPackage(), TAG_Element_Lava);
+	UARPGMagicElement* Obsidian = MakeElement(GetTransientPackage(), TAG_Element_Obsidian);
+	UARPGMagicElement* Steam = MakeElement(GetTransientPackage(), TAG_Element_Steam);
+
+	UARPGMagicCombinationTable* Table = MakeLavaTable(Lava, Obsidian, Steam);
+
+	FGameplayTagContainer FireEarth;
+	FireEarth.AddTag(TAG_Element_Fire);
+	FireEarth.AddTag(TAG_Element_Earth);
+
+	// THE UNUSUAL PART. Most pairs mean different things in a caster's hands and
+	// out in the world, which is the entire reason scope exists -- and this one
+	// does not. Fusing fire and earth is molten rock; throwing fire at rock is
+	// molten rock.
+	const UARPGMagicCombinationEntry* InHand =
+		Table->ResolveEntry(FireEarth, EARPGCombinationScope::Hand);
+	const UARPGMagicCombinationEntry* InWorld =
+		Table->ResolveEntry(FireEarth, EARPGCombinationScope::Collision);
+
+	TestNotNull(TEXT("Fire and earth combine in hand"), InHand);
+	TestNotNull(TEXT("And on collision"), InWorld);
+
+	if (InHand && InWorld)
+	{
+		TestSamePtr(TEXT("Into lava, held"), InHand->Result.Get(), Lava);
+		TestSamePtr(TEXT("And lava, thrown"), InWorld->Result.Get(), Lava);
+		TestSamePtr(TEXT("The same row answering both"), InHand, InWorld);
+	}
+
+	// NOT IN A FIELD, though. Fire spreading across stony ground is a grass fire,
+	// not a lava flow, and the spread solver asks in its own scope.
+	TestNull(TEXT("But fire over stony ground is not a lava flow"),
+		Table->ResolveEntry(FireEarth, EARPGCombinationScope::Field));
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGObsidianNotInHandTest,
+	"ARPG.World.Fluid.Lava.ObsidianCannotBeMadeInHand",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGObsidianNotInHandTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+
+	UARPGMagicElement* Lava = MakeElement(GetTransientPackage(), TAG_Element_Lava);
+	UARPGMagicElement* Obsidian = MakeElement(GetTransientPackage(), TAG_Element_Obsidian);
+	UARPGMagicElement* Steam = MakeElement(GetTransientPackage(), TAG_Element_Steam);
+
+	UARPGMagicCombinationTable* Table = MakeLavaTable(Lava, Obsidian, Steam);
+
+	FGameplayTagContainer WaterLava;
+	WaterLava.AddTag(TAG_Element_Water);
+	WaterLava.AddTag(TAG_Element_Lava);
+
+	// THERE IS NO MECHANISM THAT FORBIDS HOLDING AN ELEMENT, and there does not
+	// need to be. What an element can BE in a caster's hands is exactly what some
+	// row produces in the Hand scope, so scoping the Quench row to Surface is the
+	// whole of the restriction -- no flag, no list, nothing to keep in sync.
+	TestNull(TEXT("Water and lava fuse into nothing in the hand"),
+		Table->ResolveEntry(WaterLava, EARPGCombinationScope::Hand));
+
+	// Nor anywhere else, other than the two places it means something.
+	for (const UARPGMagicCombinationEntry* Entry : Table->Entries)
+	{
+		if (Entry && Entry->Result == Obsidian)
+		{
+			TestFalse(TEXT("No row anywhere produces obsidian in hand"),
+				Entry->AppliesTo(EARPGCombinationScope::Hand));
+			TestTrue(TEXT("Only on the surface of a body of it"),
+				Entry->AppliesTo(EARPGCombinationScope::Surface));
+		}
+	}
+
+	// AND THE PAIR STILL MEANS SOMETHING IN THE AIR. A Surface-only row would
+	// otherwise leave a water jet crossing a lava jet to merely neutralise, which
+	// is the quiet hole scoping one narrowly can leave behind.
+	const UARPGMagicCombinationEntry* Air =
+		Table->ResolveEntry(WaterLava, EARPGCombinationScope::Collision);
+
+	TestNotNull(TEXT("Water meeting lava mid-air still does something"), Air);
+	if (Air)
+	{
+		TestSamePtr(TEXT("Which is steam, not glass"), Air->Result.Get(), Steam);
+	}
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGObsidianCrustTest,
+	"ARPG.World.Fluid.Lava.WaterSetsTheSurfaceOfAFlowToGlass",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGObsidianCrustTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+	UARPGMagicElement* Lava = MakeElement(GetTransientPackage(), TAG_Element_Lava);
+	UARPGMagicElement* Obsidian = MakeElement(GetTransientPackage(), TAG_Element_Obsidian);
+	UARPGMagicElement* Steam = MakeElement(GetTransientPackage(), TAG_Element_Steam);
+
+	UARPGFluidDefinition* LavaDefinition = MakeLava(GetTransientPackage(), Lava);
+	UARPGSolidDefinition* ObsidianDefinition = MakeObsidian(Obsidian);
+
+	Fluids->Definitions = { LavaDefinition };
+	Fluids->Solids = { ObsidianDefinition };
+	Fluids->CombinationTable = MakeLavaTable(Lava, Obsidian, Steam);
+
+	AARPGFluidPool* Flow = Fluids->Deposit(FVector(0, 0, 0), 400.f, TAG_Element_Lava);
+	if (!Flow)
+	{
+		AddError(TEXT("Setup: nothing pooled."));
+		return false;
+	}
+
+	const float Surface = Flow->GetSurfaceHeight();
+
+	UARPGElementalVolumeComponent* Jet = MakeShard(Scope.World, Water, FVector(0, 0, 0), 200.f);
+
+	// NOTHING IN C++ KNOWS THAT WATER QUENCHES LAVA. It is a Solidify row in the
+	// Surface scope -- the same table, the same scoping and the same code path
+	// that turns an ice shard on a puddle into a floe.
+	TestTrue(TEXT("Water on a flow sets it"), Fluids->TrySolidify(Flow->Volume, Jet));
+	TestEqual(TEXT("Producing one crust"), Fluids->GetSolids().Num(), 1);
+
+	if (Fluids->GetSolids().Num() != 1)
+	{
+		return false;
+	}
+
+	AARPGSolidBody* Crust = Fluids->GetSolids()[0];
+
+	// PERMANENT BOTH WAYS, which is the pair of independent questions the solid
+	// definition exists to keep apart. Volcanic glass is the one thing here that,
+	// once made, is simply part of the level.
+	TestTrue(TEXT("Obsidian is permanent"), Crust->IsPermanent());
+	TestEqual(TEXT("And worth no energy to a spell"),
+		Crust->GetSurfaceEnergyDensity(), 0.f);
+
+	// So a fireball does nothing to it. OnElementalReaction bails on a zero
+	// density before it converts anything, which is cheap as well as absolute.
+	const double Before = Crust->GetArea();
+	Crust->NoteContactAt(FVector2D::ZeroVector);
+	Crust->ConsumeSurfaceArea(Before * 0.5);
+
+	TestEqual(TEXT("Nothing takes a bite out of it"), Crust->GetArea(), Before, 1.0);
+
+	// A CRUST, NOT A RAFT. Lighter than the lava, so it floats -- barely. At 89%
+	// of the flow's density a 25cm slab rides 22cm under, scabbing the surface,
+	// nothing like the freeboard ice gets. Same Archimedes, different two numbers.
+	Crust->Tick(1.f);
+
+	TestEqual(TEXT("It rides almost flush with the flow"), Crust->Draft, 22.2f, 1.5f);
+	TestTrue(TEXT("Just proud of it"), Crust->GetSurfaceHeight() > Surface);
+	TestTrue(TEXT("But barely"), Crust->GetSurfaceHeight() < Surface + 6.f);
+
+	// AND IT MELTS INTO NOTHING. Rock that formed on lava is not frozen lava:
+	// break it and you get rubble, not a flow back into the pool.
+	TestNull(TEXT("It gives nothing back"), ObsidianDefinition->MeltsInto.Get());
+
+	return true;
+}
+
+// ---------------------------------------------------------------------------
 // Slabs nothing solidified
 //
 // FREEZING USED TO BE THE ONLY WAY TO MAKE ONE, which quietly meant a slab was
