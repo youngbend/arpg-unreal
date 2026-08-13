@@ -37,6 +37,13 @@ protected:
 	 */
 	void Rise(float DeltaTime);
 
+	/**
+	 * Turns a drifting slab with the shear in the current under it.
+	 *
+	 * @param Centre world XY of the slab. @param Flow the current carrying it.
+	 */
+	void Spin(float DeltaTime, const FVector2D& Centre, const FVector2D& Flow);
+
 public:
 
 	UPROPERTY(ReplicatedUsing = OnRep_Body, BlueprintReadOnly, Category = "ARPG|Fluid")
@@ -167,6 +174,63 @@ public:
 	 * its way past; the hook takes it and clears it.
 	 */
 	void NoteContactAt(const FVector2D& Where) { PendingContact = Where; bHasPendingContact = true; }
+
+	// --- Where the field is, and which way round --------------------------------
+	//
+	// THE FIELD IS NOT IN WORLD SPACE, and until now it accidentally was. Its
+	// cells were addressed by world XY, which worked only because the actor's
+	// rotation was always identity -- a latent coupling rather than a decision,
+	// and the one thing standing between a floe and turning as it drifts.
+	//
+	// A HEIGHTFIELD CAN YAW PERFECTLY WELL. Columns run along world Z, so spinning
+	// about the up axis leaves every one of them vertical; it is pitch and roll
+	// that a heightfield cannot survive. A floe spins on the water, it does not
+	// tumble, so yaw is exactly the rotation this shape can afford -- see
+	// AARPGLaunchSlabProjectile for the case that genuinely needs tumbling.
+	//
+	// The mesh was always built in field space relative to the centroid, so it
+	// needed no change at all: the component's own transform carries the yaw.
+
+	/** World XY of the field's own coordinate origin. */
+	UPROPERTY(ReplicatedUsing = OnRep_Body, BlueprintReadOnly, Category = "ARPG|Fluid")
+	FVector2D FieldOrigin = FVector2D::ZeroVector;
+
+	/** Degrees the field is turned by, about the up axis. */
+	UPROPERTY(ReplicatedUsing = OnRep_Body, BlueprintReadOnly, Category = "ARPG|Fluid")
+	float FieldYaw = 0.f;
+
+	/** World XY of a point in the field's frame. */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
+	FVector2D ToWorld(const FVector2D& Local) const
+	{
+		return FieldOrigin + Local.GetRotated(FieldYaw);
+	}
+
+	/** The field's frame, from a world XY. */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
+	FVector2D ToField(const FVector2D& World) const
+	{
+		return (World - FieldOrigin).GetRotated(-FieldYaw);
+	}
+
+	/** A DIRECTION into the field's frame -- turned, not moved. */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
+	FVector2D DirToField(const FVector2D& World) const { return World.GetRotated(-FieldYaw); }
+
+	/** World XY of whatever is left of the slab. What the actor sits at. */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
+	FVector2D GetWorldCentre() const { return ToWorld(Field.SolidCentroid()); }
+
+	/**
+	 * Gap between a world point and the slab's edge, or 0 inside it.
+	 *
+	 * TO THE SLAB, NOT TO ITS ORIGIN. A wall is long and its origin is its
+	 * centroid, so measuring to the actor would tell a caster standing at one end
+	 * of one that they were nowhere near it. Here rather than in the subsystem so
+	 * the frame conversion has exactly one home.
+	 */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
+	double DistanceToEdge(const FVector2D& World) const;
 
 	/** Thins the whole slab, and reports when there is too little left to be one. */
 	virtual bool ConsumeSurfaceArea(double Area) override;

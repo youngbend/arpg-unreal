@@ -180,6 +180,19 @@ public:
 	float RiseSpeed = 14.f;
 
 	/**
+	 * How readily the current turns it, 0-1. Zero never spins.
+	 *
+	 * A floe that slides down a river without ever turning is the tell that it is
+	 * a grid rather than an object. What turns it is the shear -- a current faster
+	 * on one flank than the other -- and a heightfield can carry that, because
+	 * yawing leaves every column vertical. Pitch and roll are the ones it cannot
+	 * survive, and a floe does not do those.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Floating",
+		meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float SpinResponse = 0.4f;
+
+	/**
 	 * How much of the current it takes, 0-1.
 	 *
 	 * 1 means it travels at exactly the speed of the water. Below that it lags,

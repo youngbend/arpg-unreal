@@ -38,6 +38,14 @@ void AARPGSolidBody::Setup(UARPGSolidDefinition* InDefinition, const TArray<FVec
 	Definition = InDefinition;
 	GroundHeight = InGroundHeight;
 
+	// BUILT IN WORLD COORDINATES AND THEN CALLED LOCAL. The ring handed in is a
+	// world polygon -- it came from clipping one surface against another -- so the
+	// field's frame starts out coincident with the world and the mapping is the
+	// identity. Everything that moves the slab afterwards moves the FRAME, and the
+	// cells never learn that anything happened.
+	FieldOrigin = FVector2D::ZeroVector;
+	FieldYaw = 0.f;
+
 	if (Definition && Definition->Element)
 	{
 		Volume->Element = Definition->Element;
@@ -92,6 +100,12 @@ void AARPGSolidBody::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLi
 	// thing this system puts on the wire, so a floe replicates at a modest rate
 	// and dirty-region updates are the obvious next economy.
 	DOREPLIFETIME(AARPGSolidBody, Field);
+
+	// WHERE THE FIELD IS AND WHICH WAY ROUND. The cells are the same on every
+	// machine; these two say where to put them. A client with the field and not
+	// the frame would draw every floe in the level at the origin, unturned.
+	DOREPLIFETIME(AARPGSolidBody, FieldOrigin);
+	DOREPLIFETIME(AARPGSolidBody, FieldYaw);
 }
 
 void AARPGSolidBody::RebuildFromRing()
@@ -118,7 +132,15 @@ void AARPGSolidBody::RebuildFromRing()
 		Field.SupportDistance(Centre, FVector2D(1, 0)),
 		Field.SupportDistance(Centre, FVector2D(0, 1)));
 
-	SetActorLocation(FVector(Centre.X, Centre.Y, GroundHeight + GetVerticalOffset()));
+	// THROUGH THE FRAME. The mesh is built in field space relative to this same
+	// centroid, so the actor carrying the field's origin and yaw is what puts both
+	// in the right place -- and the box extent stays in field space, because a
+	// component's own bounds are local and turn with it.
+	const FVector2D World = ToWorld(Centre);
+
+	SetActorLocationAndRotation(
+		FVector(World.X, World.Y, GroundHeight + GetVerticalOffset()),
+		FRotator(0.f, FieldYaw, 0.f));
 
 	Bounds->SetBoxExtent(FVector(
 		FMath::Max(1.f, static_cast<float>(Reach.X)),
@@ -181,10 +203,15 @@ int32 AARPGSolidBody::CountOccupants() const
 		return 0;
 	}
 
-	const FVector2D Centre = Field.SolidCentroid();
+	// The reach is measured in the field's own frame, then the box that sweeps for
+	// pawns is placed in the world. Generous either way: it is a broadphase, and
+	// IsStandableAt is what actually decides.
+	const FVector2D Local = Field.SolidCentroid();
 	const FVector2D Extent(
-		Field.SupportDistance(Centre, FVector2D(1, 0)),
-		Field.SupportDistance(Centre, FVector2D(0, 1)));
+		Field.SupportDistance(Local, FVector2D(1, 0)),
+		Field.SupportDistance(Local, FVector2D(0, 1)));
+
+	const FVector2D Centre = ToWorld(Local);
 	const float Top = GetSurfaceHeight();
 
 	// A shallow slice ABOVE the slab, because what is standing on it is not
@@ -278,9 +305,11 @@ bool AARPGSolidBody::HasRoomToward(const FVector2D& Direction) const
 	static constexpr double Clearance = 50.0;
 
 	const FVector2D Centre = Field.SolidCentroid();
-	const double Reach = Field.SupportDistance(Centre, Direction);
+	const double Reach = Field.SupportDistance(Centre, DirToField(Direction));
 
-	return FloatsOn->IsSurfaceAt(Centre + Direction * (Reach + Clearance));
+	// The probe goes back out into the world, because what it asks -- is there
+	// still water over there -- is a question about the world and not the slab.
+	return FloatsOn->IsSurfaceAt(ToWorld(Centre) + Direction * (Reach + Clearance));
 }
 
 void AARPGSolidBody::UpdateAnchoring()
@@ -323,8 +352,53 @@ void AARPGSolidBody::BeginBuried(float Depth)
 	// would leave it standing in full view until the first tick moved it down --
 	// a slab that appears and then sinks before rising, which is worse than not
 	// animating at all.
+	const FVector2D World = GetWorldCentre();
+	SetActorLocation(FVector(World.X, World.Y, GroundHeight - Draft));
+}
+
+double AARPGSolidBody::DistanceToEdge(const FVector2D& World) const
+{
+	const FVector2D Local = ToField(World);
 	const FVector2D Centre = Field.SolidCentroid();
-	SetActorLocation(FVector(Centre.X, Centre.Y, GroundHeight - Draft));
+	const FVector2D Toward = Local - Centre;
+
+	if (Toward.IsNearlyZero())
+	{
+		return 0.0;
+	}
+
+	const double Support = Field.SupportDistance(Centre, Toward.GetSafeNormal());
+	return FMath::Max(0.0, Toward.Size() - Support);
+}
+
+void AARPGSolidBody::Spin(float DeltaTime, const FVector2D& Centre, const FVector2D& Flow)
+{
+	if (!Definition || Definition->SpinResponse <= 0.f || Flow.IsNearlyZero())
+	{
+		return;
+	}
+
+	// THE SHEAR ACROSS THE SLAB IS WHAT TURNS IT. A current that is faster on one
+	// flank than the other puts a couple on anything floating in it, and that is
+	// the whole of why real ice turns as it goes. Two samples, one either side.
+	const FVector2D Along = Flow.GetSafeNormal();
+	const FVector2D Across(-Along.Y, Along.X);
+
+	const double Half = FMath::Max(50.0,
+		Field.SupportDistance(Field.SolidCentroid(), DirToField(Across)));
+
+	const FVector2D Left = FloatsOn->GetSurfaceFlowAt(Centre + Across * Half);
+	const FVector2D Right = FloatsOn->GetSurfaceFlowAt(Centre - Across * Half);
+
+	// Only the component ALONG the current differs in a way that turns you; a
+	// difference across it is the flow converging, which shoves rather than spins.
+	const double Shear = FVector2D::DotProduct(Left - Right, Along) / (2.0 * Half);
+
+	// CRUDE ON PURPOSE: no angular momentum, no moment of inertia, no damping.
+	// A floe that turns at all reads as an object; one that turns correctly reads
+	// exactly the same and costs a solver nobody asked for.
+	FieldYaw = FMath::UnwindDegrees(FieldYaw + static_cast<float>(
+		FMath::RadiansToDegrees(Shear) * Definition->SpinResponse * DeltaTime));
 }
 
 void AARPGSolidBody::Rise(float DeltaTime)
@@ -349,8 +423,8 @@ void AARPGSolidBody::Rise(float DeltaTime)
 		Draft = 0.f;
 	}
 
-	const FVector2D Centre = Field.SolidCentroid();
-	SetActorLocation(FVector(Centre.X, Centre.Y, GroundHeight - Draft));
+	const FVector2D World = GetWorldCentre();
+	SetActorLocation(FVector(World.X, World.Y, GroundHeight - Draft));
 }
 
 void AARPGSolidBody::Tick(float DeltaTime)
@@ -401,7 +475,10 @@ void AARPGSolidBody::Tick(float DeltaTime)
 		}
 	}
 
-	const FVector2D Centre = Field.SolidCentroid();
+	// IN THE WORLD, because everything below asks the surface underneath about a
+	// place -- a waterline, a bed, a current -- and the surface has never heard of
+	// this slab's frame.
+	const FVector2D Centre = GetWorldCentre();
 
 	// The waterline it should be riding, asked of the body it froze out of -- so a
 	// floe on a Water plugin river follows the waves and one on a puddle sits on a
@@ -450,11 +527,19 @@ void AARPGSolidBody::Tick(float DeltaTime)
 	// test did not catch because it only reaches the shore on one side.
 	if (!Step.IsNearlyZero() && HasRoomToward(Step.GetSafeNormal()))
 	{
-		// THE FIELD SLIDES, not its cells. Drifting is one vector add, which is
-		// the cheapest operation in the whole system and the reason a floe can be
-		// carried every frame rather than four times a second.
-		Field.Translate(Step);
+		// THE FRAME SLIDES, not the field and certainly not its cells. Drifting is
+		// one vector add on the origin -- cheaper even than translating the field
+		// was, because the field's cached centroid does not have to move with it.
+		FieldOrigin += Step;
 		SetActorLocation(GetActorLocation() + FVector(Step.X, Step.Y, 0.f));
+
+		// AND IT TURNS. A floe that slides down a river without ever spinning is
+		// the tell that it is a grid rather than an object, and the river already
+		// knows enough to fix it: sample the current at both flanks and the
+		// difference across the slab IS the shear that turns it. Crude -- one
+		// sample pair, no angular momentum -- but it is the difference between ice
+		// that drifts and ice that behaves.
+		Spin(DeltaTime, Centre, Flow);
 
 		// SO IT CARRIES THE PLAYER. A character standing on a kinematic base is
 		// moved by UCharacterMovementComponent's based movement, and the base's
@@ -485,7 +570,8 @@ double AARPGSolidBody::GetArea() const
 
 double AARPGSolidBody::MeltAt(const FVector2D& Where, float Radius, float Depth)
 {
-	const double Removed = Field.MeltBowl(Where, Radius, Depth);
+	// A world contact, asked of the field in its own frame.
+	const double Removed = Field.MeltBowl(ToField(Where), Radius, Depth);
 
 	if (Removed > 0.0)
 	{
@@ -527,7 +613,7 @@ bool AARPGSolidBody::ConsumeSurfaceArea(double Area)
 	// hole through it. Without a contact -- anything that spent this slab without
 	// touching a point on it -- fall back to thinning the whole thing.
 	double Melted = 0.0;
-	FVector2D MeltedAt = Field.SolidCentroid();
+	FVector2D MeltedAt = GetWorldCentre();
 
 	if (bHasPendingContact)
 	{
@@ -604,7 +690,7 @@ void AARPGSolidBody::ReturnMeltedFluid(double MeltedVolume, const FVector2D& At)
 	// carries on to the ground exactly as all of it used to.
 	if (Fluid->FlowRate > 0.f)
 	{
-		FluidVolume = Field.Pour(At, Definition->MeltRadius, FluidVolume);
+		FluidVolume = Field.Pour(ToField(At), Definition->MeltRadius, FluidVolume);
 
 		if (FluidVolume <= 0.0)
 		{
@@ -670,9 +756,11 @@ void AARPGSolidBody::TickRunoff(float DeltaTime)
 		// WEIGHTED BY WHERE IT LEFT, so a tower melted down one side sheds on that
 		// side and the puddle forms there rather than under the middle. Averaged
 		// across the batch below for the same reason.
+		const FVector2D LeftAt = ToWorld(ShedAt);
+
 		RunoffAt = PendingRunoff > 0.0
-			? (RunoffAt * PendingRunoff + ShedAt * Shed) / (PendingRunoff + Shed)
-			: ShedAt;
+			? (RunoffAt * PendingRunoff + LeftAt * Shed) / (PendingRunoff + Shed)
+			: LeftAt;
 
 		PendingRunoff += Shed;
 	}
@@ -722,5 +810,5 @@ bool AARPGSolidBody::IsStandableAt(FVector WorldPoint) const
 	// complexity; here it is simply a cell whose top has met its bottom, so "is
 	// there ice here" is the entire test and a gap you can fall through needs no
 	// special knowledge at all.
-	return Field.IsSolidAt(FVector2D(WorldPoint.X, WorldPoint.Y));
+	return Field.IsSolidAt(ToField(FVector2D(WorldPoint.X, WorldPoint.Y)));
 }

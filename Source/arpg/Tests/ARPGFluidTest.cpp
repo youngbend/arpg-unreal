@@ -1574,6 +1574,89 @@ bool FARPGSlabRaisedTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGSlabFrameTest,
+	"ARPG.World.Fluid.Slabs.ASlabCanTurnWithoutItsCellsMoving",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGSlabFrameTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	UARPGMagicElement* Earth = MakeElement(GetTransientPackage(), TAG_Element_Earth);
+	UARPGSolidDefinition* EarthDefinition = MakeEarth(Earth);
+	Fluids->Solids = { EarthDefinition };
+
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	AARPGSolidBody* Bar = Scope.World->SpawnActor<AARPGSolidBody>(
+		AARPGSolidBody::StaticClass(), FTransform::Identity, Params);
+
+	// A LONG BAR, because a disc would pass a rotation test by symmetry and tell
+	// you nothing. This one runs east-west and is narrow north-south.
+	Bar->Setup(EarthDefinition,
+		ARPGFluidGeometry::MakeStadium(FVector2D(-400, 0), FVector2D(400, 0), 60.0), 0.f);
+
+	TestTrue(TEXT("Standable along its length"), Bar->IsStandableAt(FVector(300, 0, 0)));
+	TestFalse(TEXT("And not across it"), Bar->IsStandableAt(FVector(0, 300, 0)));
+
+	// THE FRAME STARTS AS THE IDENTITY, which is what makes this change safe: a
+	// ring is clipped in world coordinates and simply declared local, so nothing
+	// that never rotates can tell the difference.
+	TestEqual(TEXT("The frame starts unturned"), Bar->FieldYaw, 0.f);
+	TestEqual(TEXT("And unmoved"), Bar->FieldOrigin, FVector2D::ZeroVector);
+
+	// A quarter turn. The cells do not move; the frame does.
+	const int32 CellsBefore = Bar->Field.SolidCellCount();
+	const FVector2D CentroidBefore = Bar->Field.SolidCentroid();
+
+	Bar->FieldYaw = 90.f;
+
+	TestEqual(TEXT("Turning touches no cells"), Bar->Field.SolidCellCount(), CellsBefore);
+	TestEqual(TEXT("Nor the centroid it keeps in its own frame"),
+		Bar->Field.SolidCentroid(), CentroidBefore);
+
+	// AND THE WORLD SEES IT TURNED. This is the whole point: a heightfield can yaw
+	// because columns stay vertical under it, and only pitch and roll are the ones
+	// it cannot survive. A floe spins; it does not tumble.
+	TestFalse(TEXT("No longer standable where it used to run"),
+		Bar->IsStandableAt(FVector(300, 0, 0)));
+	TestTrue(TEXT("And standable across where it did not"),
+		Bar->IsStandableAt(FVector(0, 300, 0)));
+
+	// The mapping is invertible, which everything above quietly depends on.
+	const FVector2D Probe(137.f, -84.f);
+	const FVector2D RoundTrip = Bar->ToField(Bar->ToWorld(Probe));
+
+	TestEqual(TEXT("World and field round-trip"), RoundTrip.X, Probe.X, 0.01f);
+	TestEqual(TEXT("In both axes"), RoundTrip.Y, Probe.Y, 0.01f);
+
+	// AND MOVING IS THE FRAME TOO. Drift used to translate the field; it now moves
+	// the origin, which is cheaper and leaves the cached centroid alone.
+	Bar->FieldYaw = 0.f;
+	Bar->FieldOrigin = FVector2D(1000, 0);
+
+	TestFalse(TEXT("Moved out from under where it was"),
+		Bar->IsStandableAt(FVector(300, 0, 0)));
+	TestTrue(TEXT("And onto where it went"), Bar->IsStandableAt(FVector(1300, 0, 0)));
+	TestEqual(TEXT("Still without touching a cell"),
+		Bar->Field.SolidCellCount(), CellsBefore);
+
+	// What the world thinks the slab's centre is follows the frame.
+	TestEqual(TEXT("Its world centre moved with it"),
+		Bar->GetWorldCentre().X, CentroidBefore.X + 1000.f, 1.f);
+
+	// And the reach query the launch spell uses reads the same frame.
+	TestEqual(TEXT("A point inside it is no distance away"),
+		Bar->DistanceToEdge(FVector2D(1300, 0)), 0.0, 1.0);
+	TestTrue(TEXT("And one well clear of it is"),
+		Bar->DistanceToEdge(FVector2D(1000, 900)) > 500.0);
+
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGSlabRiseTest,
 	"ARPG.World.Fluid.Slabs.ARaisedSlabClimbsOutOfTheGround",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

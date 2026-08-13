@@ -721,15 +721,10 @@ AARPGSolidBody* UARPGFluidSurfaceSubsystem::FindSolidNear(FVector WorldPosition,
 		// TO THE SLAB, not to its origin. A wall is long, and a caster standing at
 		// one end of one is not far from it -- measuring to the actor would say
 		// they were, because a slab's origin is its centroid.
-		const FVector2D Where(WorldPosition.X, WorldPosition.Y);
-		const FVector2D Centre = Solid->Field.SolidCentroid();
-		const FVector2D Toward = Where - Centre;
-
-		const double Support = Toward.IsNearlyZero()
-			? 0.0
-			: Solid->Field.SupportDistance(Centre, Toward.GetSafeNormal());
-
-		const double Gap = FMath::Max(0.0, Toward.Size() - Support);
+		//
+		// Asked of the BODY rather than the field, because the field is in its own
+		// frame now and the body is the one thing that knows where that is.
+		const double Gap = Solid->DistanceToEdge(FVector2D(WorldPosition.X, WorldPosition.Y));
 		const double GapSq = Gap * Gap;
 
 		if (GapSq <= Closest)
