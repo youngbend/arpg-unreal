@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Abilities/GameplayAbility.h"
+#include "ARPGSwingAugment.h"
 #include "ARPGGameplayAbility_Imbue.generated.h"
 
 class AActor;
@@ -19,15 +20,28 @@ class UARPGMagicElement;
  * That is also why it can use an ordinary one-shot cost path while the four
  * chargeable types cannot.
  *
- * THE ELEMENTAL HITBOX IS SEPARATE FROM THE WEAPON'S. The weapon deals its own
+ * THE ELEMENTAL HIT IS SEPARATE FROM THE WEAPON'S. The weapon deals its own
  * physical damage and the imbue deals elemental damage on the same swing, as two
  * independent hits. Folding them into one would force a single damage type
  * through the mitigation pipeline and lose exactly the interaction that makes
  * imbuing worthwhile -- armour resists the steel, resistance resists the fire,
- * and they are not the same number.
+ * and they are not the same number. Separate MITIGATION, one contact: the
+ * payload rides the weapon's own hitbox as an FARPGElementalRider, which is
+ * documented there and is not the same thing as a second hitbox.
+ *
+ * THE SWING DRIVES THIS, NOT THE OTHER WAY AROUND. The ability holds the coating
+ * and waits; UARPGGameplayAbility_MeleeAttack stamps it onto each hitbox window
+ * and tells it when the attack ended, through IARPGSwingAugment. Combat cannot
+ * name anything in ARPGMagic -- see that interface for why it has to be this way
+ * round.
+ *
+ * ONE COATING AT A TIME. InstancedPerActor and not retriggerable, so a second
+ * press while a coating is already held is refused: the readied element stays
+ * readied and its mana is not spent, rather than silently replacing a coating
+ * the player has already paid for.
  */
 UCLASS()
-class ARPGMAGIC_API UARPGGameplayAbility_Imbue : public UGameplayAbility
+class ARPGMAGIC_API UARPGGameplayAbility_Imbue : public UGameplayAbility, public IARPGSwingAugment
 {
 	GENERATED_BODY()
 
@@ -59,15 +73,27 @@ public:
 	bool IsImbued() const { return ImbuedElement != nullptr; }
 
 	/**
-	 * Stamps the imbue's elemental payload onto a hitbox for one swing. Called by
-	 * the melee ability when it arms, with that swing's motion value.
+	 * Stamps the imbue's elemental payload onto a hitbox as a rider, for one
+	 * window, scaled by that window's motion value. Returns false when there is
+	 * nothing to stamp.
+	 *
+	 * A RIDER, NOT A REWRITE. The hitbox's own BaseDamage, DamageType and
+	 * OnHitEffects are the WEAPON's and are left exactly as the attack armed
+	 * them -- writing the element over them would replace the physical hit
+	 * instead of accompanying it, which is the opposite of the point.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "ARPG|Imbue")
-	void ApplyToHitbox(class UARPGHitboxComponent* Hitbox, float MotionValue);
+	bool ApplyToHitbox(class UARPGHitboxComponent* Hitbox, float MotionValue);
 
-	/** Spends the imbue. Called once the swing carrying it has landed. */
+	/** Spends the imbue and ends the ability, dropping the coating and its VFX. */
 	UFUNCTION(BlueprintCallable, Category = "ARPG|Imbue")
 	void ConsumeImbue();
+
+	// --- IARPGSwingAugment ----------------------------------------------------
+
+	virtual void ArmSwingAugment_Implementation(UARPGHitboxComponent* Hitbox,
+		float MotionValue) override;
+	virtual void NotifySwingEnded_Implementation() override;
 
 private:
 	void SpawnImbueEffect();
@@ -77,6 +103,17 @@ private:
 
 	UPROPERTY(Transient)
 	TObjectPtr<AActor> ImbueEffect;
+
+	/**
+	 * Whether the coating actually reached a live hitbox window.
+	 *
+	 * What makes the imbue spendable. A press that got buffered, an attack
+	 * cancelled during its wind-up, or a beat authored with no hit at all all end
+	 * a swing without ever arming -- and the player has already paid the mana, so
+	 * the coating has to survive for the swing that does land. Refusing to
+	 * deliver it AND taking it would charge them twice.
+	 */
+	bool bDelivered = false;
 
 	FTimerHandle ExpiryTimer;
 };

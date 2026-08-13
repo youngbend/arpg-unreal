@@ -244,4 +244,131 @@ bool FARPGHitboxDetectionTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+/**
+ * The elemental rider: an imbued swing's second, independently mitigated half.
+ *
+ * The property under test is the one the whole design turns on -- ONE contact
+ * resolving through the mitigation pipeline TWICE, with a different damage type
+ * each time. Armour answers for the steel and resistance for the fire, and they
+ * are not the same number; a single folded damage value could only ever be right
+ * for one of them.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGHitboxElementalRiderTest,
+	"ARPG.Combat.ElementalRiderIsMitigatedSeparately",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGHitboxElementalRiderTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGHitboxTestUtils;
+
+	FTestWorld TestWorld;
+	UWorld* World = TestWorld.World;
+
+	UARPGDamageTypeAsset* Physical = NewObject<UARPGDamageTypeAsset>();
+	Physical->DamageTypeTag = TAG_Damage_Physical;
+	Physical->Categories.AddTag(TAG_Damage_Category_Physical);
+	Physical->ResistanceAttribute = UARPGResistanceSet::GetPhysicalResistanceAttribute();
+
+	UARPGDamageTypeAsset* Fire = NewObject<UARPGDamageTypeAsset>();
+	Fire->DamageTypeTag = TAG_Damage_Fire;
+	Fire->Categories.AddTag(TAG_Damage_Category_Elemental);
+	Fire->ResistanceAttribute = UARPGResistanceSet::GetFireResistanceAttribute();
+
+	/** Half-resists steel, does not resist fire at all. */
+	auto SpawnArmouredTarget = [&World](const FVector& Location, float IFrames) -> AARPGCombatDummy*
+	{
+		AARPGCombatDummy* Target = SpawnDummy(World, Location, TAG_Faction_Enemy, 500.f, IFrames);
+		UAbilitySystemComponent* ASC = Target->GetAbilitySystemComponent();
+		ASC->SetNumericAttributeBase(UARPGResistanceSet::GetPhysicalResistanceAttribute(), 0.5f);
+		ASC->SetNumericAttributeBase(UARPGResistanceSet::GetFireResistanceAttribute(), 0.f);
+		return Target;
+	};
+
+	auto CoatWithFire = [&Fire](UARPGHitboxComponent* Hitbox, float Damage)
+	{
+		FARPGElementalRider Rider;
+		Rider.BaseDamage = Damage;
+		Rider.DamageType = Fire;
+		Rider.MagicElementTag = TAG_Element_Fire;
+		Hitbox->SetElementalRider(Rider);
+	};
+
+	// --- Two damage types, two resistance lookups, one contact ----------------
+	{
+		const FVector TargetLocation(0.f, 0.f, 0.f);
+		AARPGCombatDummy* Attacker = SpawnDummy(World, FVector(-400.f, 0.f, 0.f), TAG_Faction_Player, 100.f);
+		AARPGCombatDummy* Target = SpawnArmouredTarget(TargetLocation, /*IFrames=*/0.f);
+
+		UARPGHitboxComponent* Hitbox = AttachHitbox(Attacker, Physical, 100.f);
+		Hitbox->SetSourceActor(Attacker);
+		CoatWithFire(Hitbox, 40.f);
+
+		Hitbox->ActivateHitbox();
+		TickAt(Hitbox, FVector(-300.f, 0.f, 0.f));
+		TestEqual(TEXT("approach short of contact deals nothing"), GetHealth(Target), 500.f);
+
+		TickAt(Hitbox, TargetLocation);
+
+		// 100 steel halved by armour to 50, and 40 fire that the armour has no
+		// answer for. Folding them would have produced 140 halved, or 140 whole.
+		TestEqual(TEXT("both halves land, each mitigated by its own resistance"),
+			GetHealth(Target), 500.f - 50.f - 40.f);
+	}
+
+	// --- The rider survives the target's i-frames ------------------------------
+	// This is exactly why the coating rides the weapon's hitbox instead of being
+	// a second hitbox component tracing the same arc: the physical hit opens the
+	// invincibility window on its way through, and a second component arriving
+	// behind it would be dropped by TryConsumeHit on any character authored with
+	// one. Both halves come from a single TryConsumeHit, so both land.
+	{
+		const FVector TargetLocation(0.f, 200.f, 0.f);
+		AARPGCombatDummy* Attacker = SpawnDummy(World, FVector(-400.f, 200.f, 0.f), TAG_Faction_Player, 100.f);
+		AARPGCombatDummy* Target = SpawnArmouredTarget(TargetLocation, /*IFrames=*/5.f);
+
+		UARPGHitboxComponent* Hitbox = AttachHitbox(Attacker, Physical, 100.f);
+		Hitbox->SetSourceActor(Attacker);
+		CoatWithFire(Hitbox, 40.f);
+
+		Hitbox->ActivateHitbox();
+		TickAt(Hitbox, FVector(-300.f, 200.f, 0.f));
+		TickAt(Hitbox, TargetLocation);
+
+		TestEqual(TEXT("i-frames opened by the physical hit do not swallow the elemental one"),
+			GetHealth(Target), 500.f - 50.f - 40.f);
+	}
+
+	// --- A cleared rider leaves nothing behind ---------------------------------
+	// The coating is per-window. One left on the hitbox would elementally charge
+	// every later swing this character throws, for free and forever -- the same
+	// trap the melee ability's damage-type snapshot exists to avoid.
+	{
+		const FVector TargetLocation(0.f, 400.f, 0.f);
+		AARPGCombatDummy* Attacker = SpawnDummy(World, FVector(-400.f, 400.f, 0.f), TAG_Faction_Player, 100.f);
+		AARPGCombatDummy* Target = SpawnArmouredTarget(TargetLocation, /*IFrames=*/0.f);
+
+		UARPGHitboxComponent* Hitbox = AttachHitbox(Attacker, Physical, 100.f);
+		Hitbox->SetSourceActor(Attacker);
+		CoatWithFire(Hitbox, 40.f);
+
+		Hitbox->ActivateHitbox();
+		TickAt(Hitbox, FVector(-300.f, 400.f, 0.f));
+		TickAt(Hitbox, TargetLocation);
+		TestEqual(TEXT("coated swing lands both halves"), GetHealth(Target), 500.f - 50.f - 40.f);
+
+		// The next swing is uncoated.
+		Hitbox->ClearElementalRider();
+		Hitbox->DeactivateHitbox();
+		Hitbox->SetWorldLocation(FVector(-400.f, 400.f, 0.f));
+		Hitbox->ActivateHitbox();
+		TickAt(Hitbox, FVector(-300.f, 400.f, 0.f));
+		TickAt(Hitbox, TargetLocation);
+
+		TestEqual(TEXT("the following swing deals steel only"),
+			GetHealth(Target), 500.f - 50.f - 40.f - 50.f);
+	}
+
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

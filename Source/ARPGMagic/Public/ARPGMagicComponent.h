@@ -6,6 +6,7 @@
 #include "ARPGGameplayComponentBase.h"
 #include "GameplayTagContainer.h"
 #include "ARPGDischargeContext.h"
+#include "ARPGHitboxComponent.h"
 #include "ARPGMagicLoadout.h"
 #include "ARPGMagicTypes.h"
 #include "ARPGMagicComponent.generated.h"
@@ -215,6 +216,21 @@ public:
 	/** Poise counterpart. No charge and no mastery -- see UARPGMagicElement. */
 	UFUNCTION(BlueprintPure, Category = "ARPG|Magic")
 	float GetImbuePoiseDamage(const UARPGMagicElement* Element, float MotionValue) const;
+
+	/**
+	 * Everything one swing's worth of an element contributes to the hitbox it
+	 * coats: damage, poise, damage type, element tag and status.
+	 *
+	 * Pure, and separate from the ability that uses it, for the reason
+	 * BuildDischargeContext is: an ability needs an avatar, an ASC and a granted
+	 * spec before it will run, so a formula living inside one cannot be checked
+	 * without standing all of that up. This is the whole imbue payload as a
+	 * value, and the imbue tests read it directly.
+	 *
+	 * Does NOT spend anything -- see ConsumeForImbue for that.
+	 */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Magic")
+	FARPGElementalRider BuildImbueRider(const UARPGMagicElement* Element, float MotionValue) const;
 
 	// --- Discharge ------------------------------------------------------------
 

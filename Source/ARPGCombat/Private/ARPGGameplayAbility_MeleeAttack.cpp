@@ -8,6 +8,7 @@
 #include "ARPGGameplayTags.h"
 #include "ARPGHitboxComponent.h"
 #include "ARPGLocomotionComponent.h"
+#include "ARPGSwingAugment.h"
 #include "AbilitySystemComponent.h"
 #include "ARPGCombatTypes.h"
 #include "Abilities/Tasks/AbilityTask_PlayMontageAndWait.h"
@@ -366,6 +367,16 @@ void UARPGGameplayAbility_MeleeAttack::ArmHitbox(int32 WindowIndex, bool bLandin
 	// hitbox happens to be parented to.
 	Hitbox->SetSourceActor(GetAvatarActorFromActorInfo());
 
+	// Anything riding this swing -- an imbued coating, in practice -- gets its
+	// payload on before the hitbox goes live, so the very first sweep carries it.
+	// Cleared first: a window that is no longer augmented must not inherit the
+	// previous one's rider, and the augment may decline to stamp this window.
+	Hitbox->ClearElementalRider();
+	if (UObject* Augment = ARPGSwingAugments::FindActive(GetAbilitySystemComponentFromActorInfo()))
+	{
+		IARPGSwingAugment::Execute_ArmSwingAugment(Augment, Hitbox, MotionValue);
+	}
+
 	Hitbox->ActivateHitbox();
 	ArmedHitbox = Hitbox;
 }
@@ -380,6 +391,11 @@ void UARPGGameplayAbility_MeleeAttack::DisarmHitbox()
 		{
 			ArmedHitbox->DamageType = CachedHitboxDamageType;
 		}
+
+		// For the same reason the damage type is restored, and unconditionally:
+		// the rider belongs to the window that armed it, and one left behind
+		// would coat every later swing on this character for free.
+		ArmedHitbox->ClearElementalRider();
 
 		ArmedHitbox = nullptr;
 	}
@@ -618,6 +634,18 @@ void UARPGGameplayAbility_MeleeAttack::EndAbility(
 	DisarmHitbox();
 	RestoreCharacter();
 	CurrentAttack = nullptr;
+
+	// The swing is what spends a coating. Told here rather than at the hitbox
+	// window so a multi-window attack spends one imbue, and told even when
+	// cancelled so an augment that never reached an active window is left intact
+	// for the next swing -- the augment decides which of those happened.
+	if (ActorInfo)
+	{
+		if (UObject* Augment = ARPGSwingAugments::FindActive(ActorInfo->AbilitySystemComponent.Get()))
+		{
+			IARPGSwingAugment::Execute_NotifySwingEnded(Augment);
+		}
+	}
 
 	Super::EndAbility(Handle, ActorInfo, ActivationInfo, bReplicateEndAbility, bWasCancelled);
 }

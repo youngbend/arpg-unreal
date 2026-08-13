@@ -5,7 +5,9 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "ARPGCombatDummy.h"
+#include "ARPGDamageTypeAsset.h"
 #include "ARPGGameplayTags.h"
+#include "ARPGHitboxComponent.h"
 #include "ARPGMagicCaster.h"
 #include "ARPGMagicCombinationTable.h"
 #include "ARPGMagicComponent.h"
@@ -787,6 +789,28 @@ bool FARPGMagicImbueTest::RunTest(const FString& Parameters)
 		Rig.Magic->GetImbueDamage(Rig.Fire, 2.f), 20.f);
 	TestEqual(TEXT("Poise likewise"),
 		Rig.Magic->GetImbuePoiseDamage(Rig.Fire, 2.f), 5.f);
+
+	// The rider is the whole payload the swing receives, and it is what actually
+	// reaches the hitbox -- the two formulas above are only half of it. Checked
+	// here rather than through the ability for the reason the discharge formulas
+	// are: an ability needs an avatar, an ASC and a granted spec before it runs.
+	UARPGDamageTypeAsset* FireDamage = NewObject<UARPGDamageTypeAsset>();
+	Rig.Fire->DamageType = FireDamage;
+	Rig.Fire->StatusDuration = 4.f;
+
+	const FARPGElementalRider Rider = Rig.Magic->BuildImbueRider(Rig.Fire, 2.f);
+
+	TestEqual(TEXT("The rider carries the imbue damage"), Rider.BaseDamage, 20.f);
+	TestEqual(TEXT("And the imbue poise"), Rider.PoiseDamage, 5.f);
+	TestSamePtr(TEXT("And the element's own damage type, which is the whole point"),
+		Rider.DamageType.Get(), FireDamage);
+	TestTrue(TEXT("Stamped with the element that delivered it"),
+		Rider.MagicElementTag == TAG_Element_Fire);
+	TestFalse(TEXT("A rider with damage in it is not empty"), Rider.IsEmpty());
+
+	// Nothing readied means nothing rides along, and an empty rider is what the
+	// hitbox tests for before doing any of the second-hit work.
+	TestTrue(TEXT("No element, no rider"), Rig.Magic->BuildImbueRider(nullptr, 2.f).IsEmpty());
 
 	const float Before = Rig.Mana();
 	UARPGMagicElement* Consumed = Rig.Magic->ConsumeForImbue();

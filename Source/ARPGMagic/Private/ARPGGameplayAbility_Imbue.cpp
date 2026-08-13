@@ -35,6 +35,8 @@ void UARPGGameplayAbility_Imbue::ActivateAbility(const FGameplayAbilitySpecHandl
 {
 	Super::ActivateAbility(Handle, ActorInfo, ActivationInfo, TriggerEventData);
 
+	bDelivered = false;
+
 	AActor* Avatar = GetAvatarActorFromActorInfo();
 	UARPGMagicComponent* Magic = Avatar ? Avatar->FindComponentByClass<UARPGMagicComponent>() : nullptr;
 
@@ -66,9 +68,14 @@ void UARPGGameplayAbility_Imbue::ActivateAbility(const FGameplayAbilitySpecHandl
 	UE_LOG(LogARPGMagic, Log, TEXT("%s imbued with '%s'"),
 		*GetNameSafe(Avatar), *ImbuedElement->ElementTag.ToString());
 
-	// The ability stays alive holding the imbue until it is spent or expires --
-	// which is why it is InstancedPerActor rather than per-execution: the melee
-	// ability has to be able to find it and ask what the weapon is coated in.
+	// The ability stays alive holding the imbue until a swing spends it or it
+	// expires -- which is why it is InstancedPerActor rather than per-execution:
+	// the live instance IS the coating, and ARPGSwingAugments::FindActive has to
+	// be able to find it on the ASC while the next attack is arming.
+	//
+	// With ImbueDuration at its default of 0 there is no timer and the coating
+	// simply waits for the next attack, however long that takes. That is the
+	// authored behaviour, not a leak: NotifySwingEnded is what normally ends it.
 	if (ImbueDuration > 0.f && Avatar->GetWorld())
 	{
 		Avatar->GetWorld()->GetTimerManager().SetTimer(ExpiryTimer, [this]()
@@ -122,33 +129,43 @@ void UARPGGameplayAbility_Imbue::SpawnImbueEffect()
 	ImbueEffect->AttachToActor(Avatar, FAttachmentTransformRules::SnapToTargetIncludingScale);
 }
 
-void UARPGGameplayAbility_Imbue::ApplyToHitbox(UARPGHitboxComponent* Hitbox, float MotionValue)
+bool UARPGGameplayAbility_Imbue::ApplyToHitbox(UARPGHitboxComponent* Hitbox, float MotionValue)
 {
 	if (!Hitbox || !ImbuedElement)
 	{
-		return;
+		return false;
 	}
 
-	AActor* Avatar = GetAvatarActorFromActorInfo();
+	const AActor* Avatar = GetAvatarActorFromActorInfo();
 	const UARPGMagicComponent* Magic =
 		Avatar ? Avatar->FindComponentByClass<UARPGMagicComponent>() : nullptr;
 	if (!Magic)
 	{
-		return;
+		return false;
 	}
 
-	Hitbox->BaseDamage = Magic->GetImbueDamage(ImbuedElement, MotionValue);
-	Hitbox->PoiseDamage = Magic->GetImbuePoiseDamage(ImbuedElement, MotionValue);
-	Hitbox->DamageType = ImbuedElement->DamageType;
-	Hitbox->MagicElementTag = ImbuedElement->ElementTag;
+	// Attribution and the physical payload are the attack's business and are
+	// already set; this adds the elemental half beside them and touches nothing
+	// else on the hitbox.
+	Hitbox->SetElementalRider(Magic->BuildImbueRider(ImbuedElement, MotionValue));
+	return true;
+}
 
-	if (ImbuedElement->OnHitEffect)
+void UARPGGameplayAbility_Imbue::ArmSwingAugment_Implementation(UARPGHitboxComponent* Hitbox,
+	float MotionValue)
+{
+	if (ApplyToHitbox(Hitbox, MotionValue))
 	{
-		Hitbox->OnHitEffects.AddUnique(ImbuedElement->OnHitEffect);
-		Hitbox->OnHitEffectDuration = ImbuedElement->StatusDuration;
+		bDelivered = true;
 	}
+}
 
-	Hitbox->SetSourceActor(Avatar);
+void UARPGGameplayAbility_Imbue::NotifySwingEnded_Implementation()
+{
+	if (bDelivered)
+	{
+		ConsumeImbue();
+	}
 }
 
 void UARPGGameplayAbility_Imbue::ConsumeImbue()
@@ -158,6 +175,9 @@ void UARPGGameplayAbility_Imbue::ConsumeImbue()
 		return;
 	}
 
+	// Ending the ability is what drops the coating: EndAbility clears the element,
+	// destroys the weapon effect and cancels the expiry timer, so there is exactly
+	// one teardown path whether the imbue was spent, timed out or interrupted.
 	ImbuedElement = nullptr;
 	EndAbility(CurrentSpecHandle, CurrentActorInfo, CurrentActivationInfo, true, false);
 }
@@ -175,6 +195,7 @@ void UARPGGameplayAbility_Imbue::EndAbility(const FGameplayAbilitySpecHandle Han
 	}
 
 	ImbuedElement = nullptr;
+	bDelivered = false;
 
 	if (const AActor* Avatar = GetAvatarActorFromActorInfo())
 	{

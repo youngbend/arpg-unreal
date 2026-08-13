@@ -644,6 +644,23 @@ the formulas they consume are tested through `BuildDischargeContext` instead.
 `AARPGMagicCaster` is the placeable equivalent of the combat dummy for trying it
 in-editor, and supplies its own mastery levels.
 
+**The imbue reaches the swing through an interface, against the module DAG.**
+`GA_Imbue` holds the coating and `GA_MeleeAttack` delivers it, but ARPGMagic sits
+*on top of* ARPGCombat — combat cannot name the imbue ability. So ARPGCombat
+declares `IARPGSwingAugment`, the imbue implements it, and the melee ability
+finds it on the ASC by interface at the moment it arms each hitbox window. The
+swing owns the timing throughout: only it knows its motion value, which window is
+arming, and whether it was cancelled before reaching one.
+
+The elemental half is delivered as an `FARPGElementalRider` on the weapon's own
+hitbox — a second damage spec with its own damage type, from the *same* contact.
+Two hitbox components would be the more literal reading of "two independent
+hits" and is the wrong one: the target's invincibility window opens on the first
+hit that lands, so the second would be dropped by `TryConsumeHit` on any
+character authored with one. What has to stay independent is the mitigation, not
+the collision — `ARPG.Combat.ElementalRiderIsMitigatedSeparately` pins both
+halves landing with their own resistances, i-frames and all.
+
 Structural decisions:
 
 - **The magic component decides; the abilities cast.** Same split as the combo

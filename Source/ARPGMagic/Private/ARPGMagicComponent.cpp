@@ -450,6 +450,31 @@ float UARPGMagicComponent::GetImbuePoiseDamage(const UARPGMagicElement* Element,
 	return Element->BasePoiseDamage * ImbueDamageMultiplier * MotionValue;
 }
 
+FARPGElementalRider UARPGMagicComponent::BuildImbueRider(const UARPGMagicElement* Element,
+	float MotionValue) const
+{
+	FARPGElementalRider Rider;
+	if (!Element)
+	{
+		return Rider;
+	}
+
+	Rider.BaseDamage = GetImbueDamage(Element, MotionValue);
+	Rider.PoiseDamage = GetImbuePoiseDamage(Element, MotionValue);
+	Rider.DamageType = Element->DamageType;
+	Rider.MagicElementTag = Element->ElementTag;
+
+	// Read off whichever element is active at the moment of consumption, so a
+	// resolved combination brings its own status rather than either half's.
+	if (Element->OnHitEffect)
+	{
+		Rider.OnHitEffects.Add(Element->OnHitEffect);
+		Rider.OnHitEffectDuration = Element->StatusDuration;
+	}
+
+	return Rider;
+}
+
 // ---------------------------------------------------------------------------
 // Discharge
 // ---------------------------------------------------------------------------
