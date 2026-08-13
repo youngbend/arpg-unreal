@@ -370,9 +370,18 @@ void UARPGGameplayAbility_MeleeAttack::ArmHitbox(int32 WindowIndex, bool bLandin
 	// Anything riding this swing -- an imbued coating, in practice -- comes up
 	// first, so its own sweep starts from the same frame as the weapon's rather
 	// than a tick behind it. The augment reads this hitbox but does not own it.
-	if (UObject* Augment = ARPGSwingAugments::FindActive(GetAbilitySystemComponentFromActorInfo()))
+	//
+	// bCanBeElemental is the attack's veto, and it is checked here because here
+	// is the only place a coating can be refused: a shield bash or a grab has
+	// nothing for an element to coat, and the flag has been sitting on the
+	// definition unread since it was authored. The imbue survives to the next
+	// swing rather than being spent on one that would not carry it.
+	if (CurrentAttack->bCanBeElemental)
 	{
-		IARPGSwingAugment::Execute_ArmSwingAugment(Augment, Hitbox, MotionValue);
+		if (UObject* Augment = ARPGSwingAugments::FindActive(GetAbilitySystemComponentFromActorInfo()))
+		{
+			IARPGSwingAugment::Execute_ArmSwingAugment(Augment, Hitbox, MotionValue);
+		}
 	}
 
 	Hitbox->ActivateHitbox();

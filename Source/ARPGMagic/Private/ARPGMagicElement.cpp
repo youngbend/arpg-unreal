@@ -81,6 +81,22 @@ TSubclassOf<AActor> UARPGMagicElement::ResolveHandEffect() const
 	return Palette ? LoadOrNull(GetDefault<UARPGMagicSettings>()->PlaceholderHand) : nullptr;
 }
 
+UARPGAttackDefinition* UARPGMagicElement::GetImbueAttack(EARPGAttackInput Input) const
+{
+	if (ImbueType != EARPGImbueType::SpecificAttack)
+	{
+		return nullptr;
+	}
+
+	switch (Input)
+	{
+	case EARPGAttackInput::Light:   return ImbueAttackLight;
+	case EARPGAttackInput::Heavy:   return ImbueAttackHeavy;
+	case EARPGAttackInput::Special: return ImbueAttackSpecial;
+	default:                        return nullptr;
+	}
+}
+
 TSubclassOf<AActor> UARPGMagicElement::ResolveImbueEffect() const
 {
 	if (TSubclassOf<AActor> Loaded = LoadOrNull(ImbueEffect))
@@ -110,6 +126,19 @@ EDataValidationResult UARPGMagicElement::IsDataValid(FDataValidationContext& Con
 		Context.AddWarning(FText::FromString(
 			TEXT("No DamageType set. Every discharge, imbue and dodge from this element will "
 			     "resolve with no resistance or category, which is almost never intended.")));
+	}
+
+	// Partial authoring is legal and useful -- one move now, more later -- but
+	// NONE of them means the element is flagged SpecificAttack and behaves in
+	// every way like a Continuation one, which is the sort of thing that gets
+	// discovered from a player report rather than from the asset.
+	if (ImbueType == EARPGImbueType::SpecificAttack
+		&& !ImbueAttackLight && !ImbueAttackHeavy && !ImbueAttackSpecial)
+	{
+		Context.AddWarning(FText::FromString(
+			TEXT("ImbueType is SpecificAttack but no imbue attack is set for any button, so "
+			     "every swing will fall back to coating the weapon's own attack. Set at least "
+			     "one of ImbueAttackLight/Heavy/Special, or use Continuation.")));
 	}
 
 	return Result;

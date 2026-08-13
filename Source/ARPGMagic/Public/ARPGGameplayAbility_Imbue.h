@@ -101,6 +101,8 @@ public:
 
 	// --- IARPGSwingAugment ----------------------------------------------------
 
+	virtual UARPGAttackDefinition* GetSwingAttackOverride_Implementation(
+		EARPGAttackInput Input) override;
 	virtual void ArmSwingAugment_Implementation(UARPGHitboxComponent* SwingHitbox,
 		float MotionValue) override;
 	virtual void DisarmSwingAugment_Implementation() override;

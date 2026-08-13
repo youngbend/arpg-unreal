@@ -8,6 +8,7 @@
 #include "ARPGCombatDummy.h"
 #include "ARPGComboComponent.h"
 #include "ARPGGameplayTags.h"
+#include "ARPGTestSwingAugment.h"
 #include "ARPGVitalSet.h"
 #include "ARPGWeaponAttackTree.h"
 #include "AbilitySystemComponent.h"
@@ -362,6 +363,87 @@ bool FARPGComboTest::RunTest(const FString& Parameters)
 			Rig.Combo->IsCharging());
 		TestTrue(TEXT("and swings"), Rig.Combo->GetAttackSequenceNumber() > 0);
 	}
+
+	return true;
+}
+
+/**
+ * A specific-attack imbue taking over a beat.
+ *
+ * The behaviour under test is the trade the mechanic is built on: the element's
+ * move pre-empts whatever the tree had queued up, and ENDS THE CHAIN by doing
+ * it. Nothing here knows about magic -- the combo component asks an interface,
+ * and a stand-in answers.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGComboAugmentOverrideTest,
+	"ARPG.Combat.ImbuedAttackOverridesTheChain",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGComboAugmentOverrideTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGComboTestUtils;
+
+	FTestWorld TestWorld;
+	UWorld* World = TestWorld.World;
+
+	FRig Rig = BuildRig(World);
+	UAbilitySystemComponent* ASC = Rig.Actor->GetAbilitySystemComponent();
+
+	UARPGAttackDefinition* Pull = MakeAttack(TEXT("MagnetismPull"));
+
+	FGameplayAbilitySpec Spec(UARPGTestSwingAugment::StaticClass(), 1);
+	const FGameplayAbilitySpecHandle Handle = ASC->GiveAbility(Spec);
+
+	// Nothing readied yet: the tree answers for itself.
+	Rig.Combo->ReceiveInput(EARPGAttackInput::Light);
+	TestEqual(TEXT("with no augment the tree resolves normally"),
+		Rig.Combo->GetCurrentNode(), Rig.L1);
+	Rig.Combo->NotifyAttackFinished();
+
+	// Ready the coating. Only light is overridden, which is the partial-authoring
+	// case: an element with one move must not break the other two buttons.
+	TestTrue(TEXT("the stand-in augment activates"), ASC->TryActivateAbility(Handle));
+
+	UARPGTestSwingAugment* Augment = nullptr;
+	if (const FGameplayAbilitySpec* Found = ASC->FindAbilitySpecFromHandle(Handle))
+	{
+		Augment = Cast<UARPGTestSwingAugment>(Found->GetPrimaryInstance());
+	}
+
+	if (!Augment)
+	{
+		AddError(TEXT("no augment instance -- the rest of this case cannot run"));
+		return false;
+	}
+
+	Augment->OverrideLight = Pull;
+
+	// Mid-chain: the tree would have gone L1 -> L2. The element takes the beat.
+	Rig.Combo->ReceiveInput(EARPGAttackInput::Light);
+
+	UARPGComboAttackNode* OverrideNode = Rig.Combo->GetCurrentNode();
+	TestNotEqual(TEXT("the element's move replaces the follow-up"), OverrideNode, Rig.L2);
+	TestEqual(TEXT("and it is the element's own attack"),
+		OverrideNode ? OverrideNode->Attack.Get() : nullptr, Pull);
+
+	// THE COST. A leaf is how this component says the chain stops here, and it is
+	// what makes the next press start over rather than continuing to L3.
+	TestTrue(TEXT("the override beat is a leaf, so the chain ends on it"),
+		OverrideNode && OverrideNode->IsLeaf());
+
+	// An unoverridden button still resolves through the tree while the same
+	// coating is readied.
+	Rig.Combo->NotifyAttackFinished();
+	Rig.Combo->ReceiveInput(EARPGAttackInput::Heavy);
+	TestEqual(TEXT("a button the element has no move for falls back to the tree"),
+		Rig.Combo->GetCurrentNode(), Rig.Tree->GetRoot(EARPGAttackInput::Heavy));
+
+	// And with the override cleared, light returns to the chain from root.
+	Augment->OverrideLight = nullptr;
+	Rig.Combo->NotifyAttackFinished();
+	Rig.Combo->ReceiveInput(EARPGAttackInput::Light);
+	TestEqual(TEXT("once spent, the tree has the beat back"),
+		Rig.Combo->GetCurrentNode(), Rig.L1);
 
 	return true;
 }

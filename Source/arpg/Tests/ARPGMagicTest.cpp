@@ -4,6 +4,7 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
+#include "ARPGAttackDefinition.h"
 #include "ARPGCombatDummy.h"
 #include "ARPGDamageTypeAsset.h"
 #include "ARPGElementalCoating.h"
@@ -824,6 +825,52 @@ bool FARPGMagicImbueTest::RunTest(const FString& Parameters)
 	TestSamePtr(TEXT("Consuming returns the readied element"), Consumed, Rig.Fire);
 	TestEqual(TEXT("At a flat cost"), Rig.Mana(), Before - 15.f);
 	TestEqual(TEXT("And clears the mix"), Rig.Magic->GetActiveCount(), 0);
+
+	return true;
+}
+
+/**
+ * Which of the two imbue verbs an element performs, per button.
+ *
+ * The rule that matters is the FALLBACK: a specific-attack element that only
+ * defines one move must leave the other two buttons alone rather than eating
+ * them, because that is what lets an element ship with one move and grow. The
+ * combo component reads a null here as "the tree keeps this beat".
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGMagicImbueTypeTest,
+	"ARPG.Magic.Consumption.ImbueTypeRoutesPerButton",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGMagicImbueTypeTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGMagicTestUtils;
+	FTestWorld Scope;
+	FRig Rig = BuildRig(Scope.World);
+
+	UARPGAttackDefinition* Pull = NewObject<UARPGAttackDefinition>();
+	UARPGAttackDefinition* Repulse = NewObject<UARPGAttackDefinition>();
+
+	// Most elements are continuation, and a continuation element has no attacks
+	// of its own no matter what is sitting in the fields -- the type is what
+	// decides, so a half-authored asset cannot half-work.
+	Rig.Fire->ImbueAttackLight = Pull;
+	TestNull(TEXT("A continuation element never pre-empts a button"),
+		Rig.Fire->GetImbueAttack(EARPGAttackInput::Light));
+
+	// Magnetism's shape: light and heavy are its own, special is not.
+	Rig.Steam->ImbueType = EARPGImbueType::SpecificAttack;
+	Rig.Steam->ImbueAttackLight = Pull;
+	Rig.Steam->ImbueAttackHeavy = Repulse;
+
+	TestSamePtr(TEXT("Light performs the element's own move"),
+		Rig.Steam->GetImbueAttack(EARPGAttackInput::Light), Pull);
+	TestSamePtr(TEXT("And heavy its other one"),
+		Rig.Steam->GetImbueAttack(EARPGAttackInput::Heavy), Repulse);
+
+	// The whole point of per-button routing: an unauthored button is not broken,
+	// it just coats the ordinary swing like any other element.
+	TestNull(TEXT("An unauthored button falls back to coating the weapon's attack"),
+		Rig.Steam->GetImbueAttack(EARPGAttackInput::Special));
 
 	return true;
 }

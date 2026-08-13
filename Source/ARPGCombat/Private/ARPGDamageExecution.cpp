@@ -2,6 +2,7 @@
 
 #include "ARPGDamageExecution.h"
 #include "ARPGCombat.h"
+#include "ARPGCombatLibrary.h"
 #include "ARPGDamageTypeAsset.h"
 #include "ARPGGameplayEffectContext.h"
 #include "ARPGGameplayTags.h"
@@ -354,6 +355,19 @@ void UARPGDamageExecution::Execute_Implementation(
 	{
 		OutExecutionOutput.AddOutputModifier(FGameplayModifierEvaluatedData(
 			UARPGVitalSet::GetIncomingPoiseDamageAttribute(), EGameplayModOp::Additive, Context->PoiseDamage));
+	}
+
+	// --- Knockback ------------------------------------------------------------
+	// Beside the poise push and for the same reasons: server only, and a direct
+	// component call because displacement is not an attribute.
+	//
+	// An INTERCEPTED hit is not displaced. Standing your ground behind a guard is
+	// most of what a guard is for, and a blocked blow that still threw the
+	// defender across the room would make blocking read as failure.
+	if (bAuthoritative && Context && Intercept == EARPGInterceptResult::None)
+	{
+		UARPGCombatLibrary::ApplyKnockback(TargetActor, Context->KnockbackDirection,
+			Context->KnockbackForce);
 	}
 
 	// --- Per-type proc hook ---------------------------------------------------

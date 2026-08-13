@@ -385,6 +385,23 @@ void UARPGPlayerActionComponent::RouteAttack(EARPGInputFace Slot, bool bSpecial)
 		Weapon->NotifyCombatActivity();
 	}
 
+	// The readied element is spent by the swing, and it goes up BEFORE the combo
+	// input rather than after.
+	//
+	// The order used to be the other way round, on the reasoning that the imbue
+	// should land on the attack just started rather than the one before it. That
+	// reasoning no longer holds and the opposite is now required: a
+	// specific-attack element REPLACES the beat the combo is about to choose (see
+	// EARPGImbueType), so the combo component has to be able to see the coating
+	// while it resolves. Coating a swing was always applied at the hitbox notify,
+	// well after either ordering, so continuation is unaffected.
+	//
+	// The ability no-ops when nothing is readied.
+	if (UAbilitySystemComponent* ASC = GetASC())
+	{
+		ASC->TryActivateAbilitiesByTag(FGameplayTagContainer(TAG_Ability_Imbue));
+	}
+
 	if (UARPGComboComponent* Combo = GetCombo())
 	{
 		EARPGAttackInput Input = EARPGAttackInput::Light;
@@ -398,14 +415,6 @@ void UARPGPlayerActionComponent::RouteAttack(EARPGInputFace Slot, bool bSpecial)
 		}
 
 		Combo->ReceiveInput(Input, bEmpowered);
-	}
-
-	// The readied element is spent by the swing. Fires after the combo input so
-	// the imbue lands on the attack that was just started rather than the one
-	// before it; the ability itself no-ops when nothing is readied.
-	if (UAbilitySystemComponent* ASC = GetASC())
-	{
-		ASC->TryActivateAbilitiesByTag(FGameplayTagContainer(TAG_Ability_Imbue));
 	}
 }
 

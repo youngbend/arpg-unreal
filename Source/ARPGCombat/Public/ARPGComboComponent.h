@@ -228,7 +228,24 @@ private:
 	 *                             lockout gates on.
 	 */
 	UARPGComboAttackNode* ResolveNext(EARPGAttackInput Input, bool bEmpowered,
-		bool& bOutFallsBackToRoot) const;
+		bool& bOutFallsBackToRoot);
+
+	/**
+	 * The node for an augment's own attack, when something readied pre-empts the
+	 * tree for this button -- an imbued element that performs a move of its own
+	 * rather than coating the swing.
+	 *
+	 * Built as a LEAF, reusing one node rather than allocating per press. A leaf
+	 * is already how this component says "the chain stops here": nothing follows,
+	 * so the next press resolves from root, and the attack's FinisherLockout
+	 * applies exactly as it does on an authored finisher. Nothing else in the
+	 * component needed a new concept for it.
+	 *
+	 * Not const, and neither is ResolveNext any more, because of that reuse. The
+	 * alternative was a mutable member, which hides the same write behind a
+	 * keyword.
+	 */
+	UARPGComboAttackNode* ResolveAttackOverride(EARPGAttackInput Input);
 
 	void StartAttack(EARPGAttackInput Input, bool bEmpowered);
 
@@ -248,6 +265,10 @@ private:
 
 	UPROPERTY(Transient)
 	TObjectPtr<UARPGComboAttackNode> CurrentNode;
+
+	/** Reused holder for an augment's attack. See ResolveAttackOverride. */
+	UPROPERTY(Transient)
+	TObjectPtr<UARPGComboAttackNode> OverrideNode;
 
 	bool bAttacking = false;
 	int32 AttackSequenceNumber = 0;

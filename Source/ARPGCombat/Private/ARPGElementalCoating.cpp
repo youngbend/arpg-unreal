@@ -33,13 +33,16 @@ void FARPGElementalCoating::ApplyTo(UARPGHitboxComponent* Coated,
 	Coated->DamageEffectClass = SwingHitbox.DamageEffectClass;
 	Coated->bDrawDebugTrace = SwingHitbox.bDrawDebugTrace;
 
+	// Displacement reaches as far as the coating does -- see the comment on
+	// ApplyTo for why this is inherited rather than zeroed.
+	Coated->KnockbackForce = SwingHitbox.KnockbackForce;
+
 	// Penetration is left at the default so the ELEMENT's damage type decides how
 	// much resistance it ignores. PenetrationOverride is the weapon's answer for
 	// steel and has nothing to say about fire.
 	Coated->PenetrationOverride = -1.f;
 
-	// See the comment on ApplyTo: one blow, one shove, one freeze.
-	Coated->KnockbackForce = 0.f;
+	// Unlike knockback, this one genuinely accumulates. See ApplyTo.
 	Coated->HitStopDuration = 0.f;
 
 	// The attack's own bonus crit chance is the weapon's, not the coating's. The

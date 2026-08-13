@@ -5,6 +5,7 @@
 #include "ARPGAttributeLibrary.h"
 #include "ARPGCombat.h"
 #include "ARPGGameplayTags.h"
+#include "ARPGSwingAugment.h"
 #include "ARPGVitalSet.h"
 #include "AbilitySystemComponent.h"
 
@@ -26,10 +27,48 @@ void UARPGComboComponent::RefreshTickState()
 	SetComponentTickEnabled(bNeedsTick);
 }
 
+UARPGComboAttackNode* UARPGComboComponent::ResolveAttackOverride(EARPGAttackInput Input)
+{
+	UObject* Augment = ARPGSwingAugments::FindActive(GetASC());
+	if (!Augment)
+	{
+		return nullptr;
+	}
+
+	UARPGAttackDefinition* Attack =
+		IARPGSwingAugment::Execute_GetSwingAttackOverride(Augment, Input);
+	if (!Attack)
+	{
+		return nullptr;
+	}
+
+	if (!OverrideNode)
+	{
+		OverrideNode = NewObject<UARPGComboAttackNode>(this);
+	}
+
+	// Follows stay null for the life of the component, which is what makes this a
+	// leaf and therefore what ends the chain.
+	OverrideNode->Attack = Attack;
+	return OverrideNode;
+}
+
 UARPGComboAttackNode* UARPGComboComponent::ResolveNext(EARPGAttackInput Input, bool bEmpowered,
-	bool& bOutFallsBackToRoot) const
+	bool& bOutFallsBackToRoot)
 {
 	bOutFallsBackToRoot = false;
+
+	// FIRST, and ahead of the tree entirely. Something readied that performs its
+	// own attack replaces this beat wherever the chain happens to be -- that is
+	// the whole point of it, and checking the tree first would let a weapon's
+	// follow-up win over the move the player has already paid mana for.
+	//
+	// bOutFallsBackToRoot stays false: an override is not re-entry to root, so a
+	// finisher's lockout does not eat a move that has already been paid for.
+	if (UARPGComboAttackNode* Override = ResolveAttackOverride(Input))
+	{
+		return Override;
+	}
 
 	UARPGWeaponAttackTree* Tree = GetActiveTree();
 	if (!Tree)

@@ -26,6 +26,7 @@ import unreal
 ELEMENT_DIR = "/Game/ARPG/Magic/Elements"
 PALETTE_DIR = "/Game/ARPG/Magic/Palettes"
 MAGIC_DIR = "/Game/ARPG/Magic"
+ATTACK_DIR = "/Game/ARPG/Attacks"
 
 DAMAGE_TYPES = "/Game/ARPG/DamageTypes"
 
@@ -148,6 +149,73 @@ ELEMENTS = [
         "base_damage": 25.0, "poise": 0.0, "cost": 0.0, "usage": 1.5,
         "complexity": 2,
     },
+    {
+        # NOT IN THE GODOT ORIGINAL. The first element authored for Unreal, and
+        # the first SPECIFIC-ATTACK imbue: readying it and swinging performs one
+        # of magnetism's own moves instead of coating the weapon, and ends the
+        # chain. Everything above is a continuation imbue.
+        #
+        # It earns the type by not being expressible as one. Every other element
+        # answers "what is this hit made of"; magnetism answers "where is
+        # everyone standing", and a damage type cannot say that.
+        "id": "Magnetism", "tag": "Element.Magnetism", "display": "Magnetism",
+        "core": colour(0.72, 0.74, 0.82), "glow": colour(0.35, 0.42, 0.72, 0.95),
+        "edge": colour(0.12, 0.14, 0.3, 0.0), "emission": 3.0,
+        # LIGHTNING damage: it is the electromagnetic half doing the hurting, and
+        # reusing the type keeps this off the damage execution's capture list.
+        "damage_type": "DA_Damage_Lightning",
+        "base_damage": 18.0, "poise": 5.0, "cost": 0.0, "usage": 1.3,
+        "complexity": 2,
+        "status": "Shocked", "status_duration": 3.0,
+        # A FIELD, NOT AN EDGE. Three times the blade's reach is the mechanical
+        # expression of the fantasy: the pull catches people the sword cannot,
+        # which is the entire reason it is worth ending a combo for.
+        "imbue_reach": 3.0,
+        "imbue_type": unreal.ARPGImbueType.SPECIFIC_ATTACK,
+        "imbue_attacks": {
+            "light": "MagnetismPull",
+            "heavy": "MagnetismRepulse",
+            "special": "MagnetismRail",
+        },
+    },
+]
+
+# The three moves magnetism performs instead of a swing.
+#
+# MONTAGES ARE LEFT UNSET, exactly as the VFX slots are: animation is authoring
+# work this script cannot do, and the melee ability already logs and releases the
+# combo cleanly for an attack with no montage. Everything else -- the timings
+# that make them read as commitments, and the displacement that is the point --
+# is here.
+#
+# NEGATIVE KnockbackPower PULLS. See UARPGCombatLibrary::ApplyKnockback.
+MAGNETISM_ATTACKS = [
+    {
+        # Light: the quick one. Low damage, and the damage is not why you press
+        # it -- you press it to drag a caster out of the back line, or to stop
+        # something walking away from you.
+        "id": "MagnetismPull", "display": "Lodestone Pull",
+        "motion_value": 0.5, "poise": 2.0, "knockback": -1200.0,
+        "stamina": 8.0, "speed_factor": 0.3, "lockout": 0.15, "hit_stop": 0.05,
+    },
+    {
+        # Heavy: the panic button. Rooted and hyperarmoured, because a move whose
+        # job is escaping a surround has to survive being surrounded while it
+        # comes out. Poise damage is where its value is, not the 0.8 motion.
+        "id": "MagnetismRepulse", "display": "Repulsion Field",
+        "motion_value": 0.8, "poise": 12.0, "knockback": 1400.0,
+        "stamina": 18.0, "speed_factor": 0.0, "lockout": 0.5, "hit_stop": 0.12,
+        "hyperarmor": True,
+    },
+    {
+        # Special: the payoff. Rails the weapon out and back -- unblockable,
+        # heavily committed, and the long lockout is what stops it opening every
+        # fight instead of finishing one.
+        "id": "MagnetismRail", "display": "Rail",
+        "motion_value": 2.2, "poise": 8.0, "knockback": 600.0,
+        "stamina": 22.0, "speed_factor": 0.2, "lockout": 0.8, "hit_stop": 0.15,
+        "unblockable": True,
+    },
 ]
 
 # Scope bits: Hand 1, Collision 2, Field 4, Surface 8. Mode: Auto 0, Conduct 1,
@@ -185,6 +253,12 @@ COMBINATIONS = [
     # the water is a carrier and is not consumed.
     {"name": "ConductWater", "elements": ["Element.Lightning", "Element.Water"],
      "result": "Lightning", "scope": 2, "mode": 1},
+
+    # Only in HAND, on the same reasoning as the ice recipe: earth and lightning
+    # meeting out in the world is a scorched rock, not a magnetic field. Holding
+    # both and MEANING it is what makes the difference.
+    {"name": "MagnetismRecipe", "elements": ["Element.Earth", "Element.Lightning"],
+     "result": "Magnetism", "scope": 1},
 ]
 
 # Page 0 is the four a new character starts with; lightning sits on page 1 so
@@ -223,8 +297,51 @@ def load_status_class(name):
     return loaded
 
 
+def make_imbue_attacks():
+    """The attack definitions a specific-attack element performs.
+
+    Created here rather than in build_sword_attack_tree.py because they belong
+    to the ELEMENT, not to any weapon's moveset -- they are never reached
+    through a combo tree, so nothing would ever link them up there.
+    """
+    made = {}
+
+    for spec in MAGNETISM_ATTACKS:
+        name = "DA_Attack_{}".format(spec["id"])
+        asset = ensure(ATTACK_DIR, name, unreal.ARPGAttackDefinition)
+
+        asset.set_editor_property("attack_id", spec["id"])
+        asset.set_editor_property("display_name", unreal.Text(spec["display"]))
+        asset.set_editor_property("motion_value", spec["motion_value"])
+        asset.set_editor_property("poise_damage", spec["poise"])
+
+        # Absolute, not a coefficient: these are utility moves whose stagger is
+        # the point, and scaling it by a deliberately low motion value would
+        # quietly undo the thing they are for.
+        asset.set_editor_property("poise_scales_with_motion", False)
+
+        asset.set_editor_property("knockback_power", spec["knockback"])
+        asset.set_editor_property("stamina_cost", spec["stamina"])
+        asset.set_editor_property("movement_speed_factor", spec["speed_factor"])
+        asset.set_editor_property("finisher_lockout", spec["lockout"])
+        asset.set_editor_property("hit_stop_duration", spec["hit_stop"])
+        asset.set_editor_property("hyperarmor", spec.get("hyperarmor", False))
+        asset.set_editor_property("unblockable", spec.get("unblockable", False))
+
+        # These ARE the element's attacks, so the coating applies to them: the
+        # weapon hitbox swings the steel, and magnetism's own wider hitbox
+        # carries the lightning and the displacement out to field range.
+        asset.set_editor_property("can_be_elemental", True)
+
+        save(asset, "{}/{}".format(ATTACK_DIR, name))
+        made[spec["id"]] = asset
+
+    return made
+
+
 def main():
     elements = {}
+    imbue_attacks = make_imbue_attacks()
 
     for spec in ELEMENTS:
         palette = ensure(PALETTE_DIR, "DA_Palette_{}".format(spec["id"]),
@@ -267,6 +384,21 @@ def main():
             element.set_editor_property("cloak_self_effect", cloak_self)
         element.set_editor_property("cloak_base_duration", spec.get("cloak_duration", 0.0))
         element.set_editor_property("cloak_charge_bonus", spec.get("cloak_bonus", 0.0))
+
+        # --- Imbue --------------------------------------------------------
+        # Left at the defaults for every continuation element, which is all of
+        # them but one: reach 1 keeps the coating on the blade's edge, and the
+        # default type coats rather than replaces.
+        element.set_editor_property("imbue_reach_scale", spec.get("imbue_reach", 1.0))
+        element.set_editor_property(
+            "imbue_type", spec.get("imbue_type", unreal.ARPGImbueType.CONTINUATION))
+
+        for button, attack_id in spec.get("imbue_attacks", {}).items():
+            attack = imbue_attacks.get(attack_id)
+            if attack:
+                element.set_editor_property("imbue_attack_{}".format(button), attack)
+            else:
+                log("missing imbue attack {} for {}".format(attack_id, spec["id"]))
 
         save(element, "{}/DA_Element_{}".format(ELEMENT_DIR, spec["id"]))
         elements[spec["id"]] = element

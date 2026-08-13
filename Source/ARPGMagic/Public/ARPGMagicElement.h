@@ -5,10 +5,12 @@
 #include "CoreMinimal.h"
 #include "Engine/DataAsset.h"
 #include "GameplayTagContainer.h"
+#include "ARPGCombatTypes.h"
 #include "ARPGMagicTypes.h"
 #include "ARPGMagicElement.generated.h"
 
 class AActor;
+class UARPGAttackDefinition;
 class UARPGDamageTypeAsset;
 class UARPGElementalDodgeData;
 class UARPGElementPalette;
@@ -111,6 +113,38 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Damage",
 		meta = (ClampMin = "0.01"))
 	float ImbueReachScale = 1.f;
+
+	// --- Imbue ----------------------------------------------------------------
+
+	/** Coat the next swing, or replace it. See EARPGImbueType. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Imbue")
+	EARPGImbueType ImbueType = EARPGImbueType::Continuation;
+
+	/**
+	 * The attacks this element performs in place of the weapon's, one per button.
+	 * Ignored unless ImbueType is SpecificAttack; any left null fall back to
+	 * coating that button's ordinary swing.
+	 *
+	 * ON THE ELEMENT RATHER THAN IN EACH WEAPON'S TREE, which is the whole reason
+	 * this is affordable. A move that belongs to the magic needs one authoring
+	 * pass, not one per weapon -- and it is the right reading besides: magnetism
+	 * yanking someone off their feet is not a property of the sword.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Imbue")
+	TObjectPtr<UARPGAttackDefinition> ImbueAttackLight;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Imbue")
+	TObjectPtr<UARPGAttackDefinition> ImbueAttackHeavy;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Imbue")
+	TObjectPtr<UARPGAttackDefinition> ImbueAttackSpecial;
+
+	/**
+	 * The attack this element performs for a button, or null when it does not
+	 * pre-empt that button and the ordinary swing should be coated instead.
+	 */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Magic")
+	UARPGAttackDefinition* GetImbueAttack(EARPGAttackInput Input) const;
 
 	/**
 	 * Damage per second to anything standing inside a reservoir volume made of

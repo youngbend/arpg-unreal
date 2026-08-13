@@ -679,6 +679,41 @@ the separate mitigation, the pairing in both tick orders, the coating catching a
 target the blade cannot reach, and ordinary i-frames returning once the pairing
 is broken.
 
+**Two imbue verbs, not one.** `EARPGImbueType` splits elements into those that
+*coat* the next attack (continuation — almost all of them) and those that
+*replace* it with a move of their own and end the combo chain (specific attack).
+The second answers a question a damage type cannot: an element whose fantasy is
+where people are standing rather than what the hit is made of.
+
+It reuses the combo component's existing vocabulary rather than adding a mode.
+`IARPGSwingAugment::GetSwingAttackOverride` is asked per button before the tree
+is consulted, and the answer runs as a **leaf** — already how this component says
+"the chain stops here", so `FinisherLockout`, reset timing and root re-entry all
+behave as they do on any authored finisher. A null answer for a button leaves
+that beat to the tree, so an element can define one move and fall back to coating
+on the other two.
+
+The attacks live on the ELEMENT, not in each weapon's tree: a move that belongs
+to the magic needs one authoring pass rather than one per weapon. That also
+forced `RouteAttack` to activate the imbue *before* handing the press to the
+combo component, since the coating has to exist while the beat is being chosen.
+
+**Magnetism** (earth + lightning, hand scope only) is the first one, and the
+first element authored for Unreal rather than transcribed from Godot. Light
+pulls, heavy repulses, special rails the weapon out and back; its coating runs at
+3x the blade's reach, so the pull catches what the sword cannot — which is the
+whole reason it is worth ending a chain for.
+
+Two things it needed that did not exist. `bCanBeElemental` had been sitting
+unread on every attack definition since phase 4 and is now the attack's veto over
+coatings. And `KnockbackForce`/`KnockbackDirection` had been riding the effect
+context since phase 1 with no receiver at all — every hit in the game was
+computing a shove that never happened. `UARPGCombatLibrary::ApplyKnockback` is
+that receiver, deliberately minimal: server-side `LaunchCharacter`, no curve, no
+knockback-resistance attribute, no prediction, characters only. A **negative**
+`KnockbackPower` pulls, which is what makes a magnetic yank authorable at all,
+and is why that field's `ClampMin` is gone.
+
 Structural decisions:
 
 - **The magic component decides; the abilities cast.** Same split as the combo

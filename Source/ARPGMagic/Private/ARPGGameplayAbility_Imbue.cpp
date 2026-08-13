@@ -245,6 +245,15 @@ void UARPGGameplayAbility_Imbue::ReleaseElementalHitbox()
 	bOwnsElementalHitbox = false;
 }
 
+UARPGAttackDefinition* UARPGGameplayAbility_Imbue::GetSwingAttackOverride_Implementation(
+	EARPGAttackInput Input)
+{
+	// Null for a continuation element, and for a specific-attack element on a
+	// button it has no move for -- both mean "coat the ordinary swing", which is
+	// what the rest of this ability already does.
+	return ImbuedElement ? ImbuedElement->GetImbueAttack(Input) : nullptr;
+}
+
 void UARPGGameplayAbility_Imbue::ArmSwingAugment_Implementation(UARPGHitboxComponent* SwingHitbox,
 	float MotionValue)
 {

@@ -89,9 +89,17 @@ struct ARPGCOMBAT_API FARPGElementalCoating
 	 * than the element: a coating on an unblockable swing is unblockable, and a
 	 * coating on a drill re-hits on the drill's cadence.
 	 *
-	 * Knockback and hit-stop are deliberately zeroed instead. One blow is one
-	 * shove and one freeze however many payloads it lands, and the physical hit
-	 * already owns both.
+	 * KNOCKBACK IS INHERITED TOO, which is not the obvious answer. "One blow, one
+	 * shove" argues for zeroing it, and that is what this did first -- but
+	 * displacement is an override rather than an accumulation (LaunchCharacter
+	 * sets velocity), so a target caught by both halves is shoved once anyway,
+	 * along two near-identical vectors from the same origin. Meanwhile a target
+	 * caught only by the WIDER coating gets no shove at all if this is zeroed,
+	 * and an element whose whole point is moving people around -- a magnetic
+	 * yank -- then fails on exactly the targets it was reaching for.
+	 *
+	 * Hit-stop stays zeroed, because that one really does accumulate: it is a
+	 * duration, and two contacts would freeze the pair for twice as long.
 	 */
 	void ApplyTo(UARPGHitboxComponent* Coated, const UARPGHitboxComponent& SwingHitbox) const;
 };

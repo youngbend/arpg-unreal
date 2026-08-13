@@ -36,6 +36,23 @@ enum class EARPGHitboxSource : uint8
 };
 
 /**
+ * Which button drove the input.
+ *
+ * Here rather than on the attack tree for the same reason EARPGHitboxSource is:
+ * the tree names it, the combo component names it, and now IARPGSwingAugment
+ * names it too -- an interface that has no business including a weapon's whole
+ * moveset just to ask which button was pressed.
+ */
+UENUM(BlueprintType)
+enum class EARPGAttackInput : uint8
+{
+	Light,
+	Heavy,
+	Special,
+	MAX UMETA(Hidden)
+};
+
+/**
  * The section names an attack montage is expected to use.
  *
  * These are the six clip slots Godot's AttackDefinition carried as separate

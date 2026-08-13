@@ -3,10 +3,12 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "ARPGCombatTypes.h"
 #include "UObject/Interface.h"
 #include "ARPGSwingAugment.generated.h"
 
 class UAbilitySystemComponent;
+class UARPGAttackDefinition;
 class UARPGHitboxComponent;
 
 UINTERFACE(MinimalAPI, Blueprintable)
@@ -35,6 +37,27 @@ class ARPGCOMBAT_API IARPGSwingAugment
 	GENERATED_BODY()
 
 public:
+	/**
+	 * The attack this augment performs INSTEAD of the one the combo tree would
+	 * have chosen for this button, or null to leave the tree's choice alone.
+	 *
+	 * Asked before the tree is consulted at all, and answered per button, so one
+	 * augment can pre-empt heavy while leaving light to the weapon. Returning
+	 * null for a button is not a failure -- it is how an augment that only
+	 * defines one move stays usable on the other two.
+	 *
+	 * WHAT THE COMBO COMPONENT DOES WITH IT: runs it as a leaf, which is the
+	 * existing vocabulary for "this beat terminates the chain". Nothing follows
+	 * it, so the next press starts a fresh chain from root, and the attack's own
+	 * FinisherLockout applies as it would on any other leaf.
+	 *
+	 * The augment is NOT told whether the attack it named actually ran; stamina,
+	 * a flinch lock or a missing montage can still refuse it. Anything that must
+	 * know goes through ArmSwingAugment and NotifySwingEnded like everything else.
+	 */
+	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "ARPG|Combat")
+	UARPGAttackDefinition* GetSwingAttackOverride(EARPGAttackInput Input);
+
 	/**
 	 * Bring up whatever this augment contributes to one hitbox window, scaled by
 	 * that window's motion value.

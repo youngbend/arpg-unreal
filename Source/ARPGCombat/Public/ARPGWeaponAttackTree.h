@@ -4,21 +4,12 @@
 
 #include "CoreMinimal.h"
 #include "Engine/DataAsset.h"
+#include "ARPGCombatTypes.h"
 #include "ARPGWeaponAttackTree.generated.h"
 
 class UARPGAttackDefinition;
 class UARPGBlockDefinition;
 class UARPGFlinchDefinition;
-
-/** Which button drove the input. */
-UENUM(BlueprintType)
-enum class EARPGAttackInput : uint8
-{
-	Light,
-	Heavy,
-	Special,
-	MAX UMETA(Hidden)
-};
 
 /**
  * One node in a weapon's branching combo tree.

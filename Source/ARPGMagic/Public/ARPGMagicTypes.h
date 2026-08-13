@@ -6,6 +6,41 @@
 #include "ARPGMagicTypes.generated.h"
 
 /**
+ * What readying an element and then swinging actually does.
+ *
+ * TWO VERBS, NOT TWO TIERS. A continuation imbue changes what your attack IS
+ * made of; a specific-attack imbue changes what your attack IS. Neither is the
+ * upgrade -- an element that performs its own move gives up the whole combo
+ * chain to do it, and one that coats the swing keeps everything the chain was
+ * already building toward.
+ *
+ * MOST ELEMENTS ARE CONTINUATION, and that is a content decision as much as a
+ * design one: a specific-attack element needs up to three authored moves before
+ * it is finished, while a continuation element needs none. Reserve the type for
+ * elements whose fantasy cannot be expressed as damage and status -- the ones
+ * that move bodies around rather than hurting them.
+ */
+UENUM(BlueprintType)
+enum class EARPGImbueType : uint8
+{
+	/**
+	 * Coats the next attack and lets the chain continue. The swing is whatever
+	 * the combo tree says it is; the element rides along.
+	 */
+	Continuation = 0,
+
+	/**
+	 * Performs one of the element's own attacks instead, chosen by which button
+	 * was pressed, and ends the chain.
+	 *
+	 * PER BUTTON, AND PARTIAL AUTHORING IS FINE. An element that only defines a
+	 * heavy falls back to continuation on light and special rather than refusing
+	 * them, so a new element can ship with one move and grow.
+	 */
+	SpecificAttack = 1
+};
+
+/**
  * The ways an element can leave the caster's hands.
  *
  * Port of Godot's DischargeContext::DischargeType, and the values matter: they

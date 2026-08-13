@@ -4,6 +4,7 @@
 #include "ARPGGameplayTags.h"
 #include "AbilitySystemComponent.h"
 #include "AbilitySystemGlobals.h"
+#include "GameFramework/Character.h"
 
 bool UARPGCombatLibrary::TryResolveFaction(const AActor* Actor, FGameplayTag& OutFaction)
 {
@@ -66,4 +67,32 @@ bool UARPGCombatLibrary::CanDamage(const AActor* SourceActor, const AActor* Targ
 	if (!TryResolveFaction(TargetActor, TargetFaction)) { return true; }
 
 	return AreFactionsHostile(SourceFaction, TargetFaction);
+}
+
+void UARPGCombatLibrary::ApplyKnockback(AActor* Target, const FVector& Direction, float Force,
+	bool bOverrideVertical)
+{
+	if (!Target || FMath::IsNearlyZero(Force) || Direction.IsNearlyZero())
+	{
+		return;
+	}
+
+	ACharacter* Character = Cast<ACharacter>(Target);
+	if (!Character)
+	{
+		return; // see the header: not our problem to guess at
+	}
+
+	// Server only. LaunchCharacter writes velocity, which the movement component
+	// already replicates; applying it on a client as well would fight that
+	// correction rather than smooth it.
+	if (!Character->HasAuthority())
+	{
+		return;
+	}
+
+	// A negative force reverses the line rather than needing its own direction:
+	// out along the blow is a shove, back along it is a pull.
+	Character->LaunchCharacter(Direction.GetSafeNormal() * Force,
+		/*bXYOverride=*/true, /*bZOverride=*/bOverrideVertical);
 }

@@ -143,8 +143,15 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Damage")
 	TObjectPtr<UARPGDamageTypeAsset> DamageTypeOverride;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Damage",
-		meta = (ClampMin = "0.0"))
+	/**
+	 * How hard this pushes what it hits. NEGATIVE PULLS: the knockback line runs
+	 * from the hitbox out to the contact point, so a negative power drags the
+	 * target back along it instead -- which is how a magnetic yank is authored.
+	 *
+	 * The clamp used to floor this at zero, back when nothing read the value at
+	 * all. See UARPGCombatLibrary::ApplyKnockback.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Damage")
 	float KnockbackPower = 100.f;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Damage",
