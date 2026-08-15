@@ -1691,6 +1691,60 @@ bake into something a level designer knows. And the surface type should be
 already return: the engine answers "what kind of thing is this" everywhere, for
 free, and the codebase uses it in exactly one place, disabled.
 
+**THE GROUND GREW A KIND, A GRAIN, AND A FACE.** Three findings from the spread
+review, and the third was that the visual half never existed at all.
+
+- **A cell names a SURFACE now, not an amount.** One byte per cell as before, but
+  it says what kind of ground this is rather than how much fuel it holds, and each
+  spread definition brings a surface-to-fuel table. A single amount was
+  element-agnostic: a cell that carried fire well necessarily carried every medium
+  well, differing only by FuelSeconds, so a marsh could not refuse fire and carry
+  a frost. The ground says WHAT it is and the medium says what that is WORTH,
+  which is the same split as everywhere else here.
+- **And the surface is `EPhysicalSurface`**, which the engine already answers
+  everywhere: landscape layers carry a physical material, so do meshes, and a
+  trace returns one. The bake becomes "rasterise the dominant surface per cell",
+  cheaper than sampling foliage density and already authored for footstep sounds.
+  The fallback is generous on purpose -- a missing bake, an unlisted surface and a
+  test world all read as ordinary, because "burns when it should not" is far
+  easier to notice than "silently fireproof".
+- **A UNIFORM GRID BURNS IN DIAMONDS**, and that was the Godot version's real
+  complaint. Every cell in a ring reaches ignition on the same tick, so the front
+  is a shape the grid chose rather than one the fire did -- and the regularity
+  made the same fire look different depending on where the viewer stood relative
+  to a cell boundary, which reads as the simulation being unreliable rather than
+  as aliasing. Baked jitter breaks the tie: cells reach ignition at slightly
+  different times and the front is ragged. Hashed from the cell's coordinate, so a
+  patch of ground always burns the same way and two bakes of one level agree --
+  ragged, not random.
+- **PARTIAL BURNING WAS ALWAYS IN THE SIMULATION and never came out of it.** Fuel
+  is spent only while a cell is alight and never regrows, so a patch quenched
+  halfway keeps half its fuel forever and relighting consumes the remainder --
+  the same rule a burning crate lives by, at a different granularity, which is
+  why grass belongs in the map and a crate does not. What was missing was any way
+  to ASK, so `GetScorchAt` measures against what the cell STARTED with: a marsh
+  that only ever held a tenth of a grassland's fuel still reads fully scorched
+  once it has given that tenth up.
+
+**And the mask, which the plan promised and nobody built.** `UMaterialParameterCollection`
+was a dangling forward declaration in the header, used nowhere -- because a field
+cannot live in a parameter collection. An MPC holds a handful of scalars and this
+is a value per cell over a moving window of the world.
+
+So: a transient texture covering a window that follows the viewer, R alight and G
+spent, written on the spread tick, plus an MPC holding that window's world bounds
+so a material can turn a position into a UV. The collection does what it is
+actually good at -- four numbers every material can see -- and the field goes in
+the texture where it belongs.
+
+**Sampling it bilinearly is the point, not a nicety.** Read per cell, a fire's
+edge steps along cell boundaries and the viewer's position relative to one changes
+what they see. A filtered texture has no cells to stand on, which fixes the half
+of the Godot complaint that jitter does not.
+
+4 new cases under `ARPG.World.Spread.Fuel`, and the existing fuel map case
+migrated from amounts to surfaces.
+
 **Phase 11 -- code complete. Not in the original ten: this is the layer that
 makes the other ten reachable from a controller.** The modal control scheme, the
 speed tiers, the buffering, and auto-sheathe. 13 new cases; 99 pass in total.

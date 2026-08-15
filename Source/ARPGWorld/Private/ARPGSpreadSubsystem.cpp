@@ -13,6 +13,10 @@
 #include "ARPGSpreadFuelMap.h"
 #include "ARPGWorld.h"
 #include "ARPGWorldSettings.h"
+#include "Engine/Texture2D.h"
+#include "GameFramework/PlayerController.h"
+#include "Kismet/KismetMaterialLibrary.h"
+#include "Materials/MaterialParameterCollection.h"
 #include "AbilitySystemComponent.h"
 #include "AbilitySystemGlobals.h"
 #include "Engine/World.h"
@@ -294,11 +298,29 @@ void UARPGSpreadSubsystem::EnsureSlot(FFieldChunk& Chunk, int32 Slot, FIntPoint 
 	{
 		for (int32 X = 0; X < FieldResolution; ++X)
 		{
-			const float Fraction = FuelMap
-				? FuelMap->GetFuelAt(Coord, (X + 0.5f) / FieldResolution, (Y + 0.5f) / FieldResolution)
-				: 1.f;
+			const float NormalX = (X + 0.5f) / FieldResolution;
+			const float NormalY = (Y + 0.5f) / FieldResolution;
 
-			Chunk.Fuel[Slot][Y * FieldResolution + X] = Fraction * FuelSeconds;
+			// THE GROUND SAYS WHAT IT IS AND THE MEDIUM SAYS WHAT THAT IS WORTH.
+			// One byte per cell as before, but it now names a surface rather than
+			// an amount -- so a marsh can refuse fire and carry a frost, which one
+			// element-agnostic number could never express.
+			float Fraction = 1.f;
+
+			if (FuelMap && Definition)
+			{
+				const uint8 Surface = FuelMap->GetSurfaceAt(Coord, NormalX, NormalY);
+
+				// And jittered, because a uniform grid burns in diamonds: every
+				// cell in a ring reaches ignition on the same tick, so the front is
+				// a shape the grid chose. Baked, so a patch of ground always burns
+				// the same way -- ragged, not random.
+				Fraction = Definition->GetSurfaceFuel(Surface)
+					* FuelMap->GetJitterAt(Coord, NormalX, NormalY);
+			}
+
+			Chunk.Fuel[Slot][Y * FieldResolution + X] =
+				FMath::Max(0.f, Fraction) * FuelSeconds;
 		}
 	}
 
@@ -536,6 +558,70 @@ float UARPGSpreadSubsystem::GetFieldIntensity(FVector WorldPosition, FGameplayTa
 	return (Chunk && Chunk->bSlotUsed[Slot]) ? Chunk->Intensity[Slot][Index] : 0.f;
 }
 
+float UARPGSpreadSubsystem::GetScorchAt(FVector WorldPosition, FGameplayTag ElementTag) const
+{
+	const int32 MediumIndex = FindMedium(ElementTag);
+	if (MediumIndex == INDEX_NONE || Media[MediumIndex].FieldSlot == INDEX_NONE)
+	{
+		return 0.f;
+	}
+
+	const UARPGSpreadDefinition* Definition = Media[MediumIndex].Definition;
+
+	// Nothing that ignores fuel can be scorched by spending it.
+	if (!Definition || Definition->bPermanent || Definition->FuelSeconds <= 0.f)
+	{
+		return 0.f;
+	}
+
+	FIntPoint Coord;
+	int32 Index = 0;
+	if (!ResolveCell(WorldPosition, Coord, Index))
+	{
+		return 0.f;
+	}
+
+	const FFieldChunk* Chunk = FindChunk(Coord);
+	const int32 Slot = Media[MediumIndex].FieldSlot;
+
+	// A chunk that has never been allocated has never burned.
+	if (!Chunk || !Chunk->bSlotUsed[Slot])
+	{
+		return 0.f;
+	}
+
+	// AGAINST WHAT THE CELL STARTED WITH, not against a global maximum. A marsh
+	// that only ever held a tenth of a grassland's fuel still reads fully scorched
+	// once it has given that tenth up -- scorch is "how spent is this", and a
+	// marsh burned out is as burned out as anything gets.
+	//
+	// Recomputed from the map rather than stored. The bake is static, so the
+	// starting amount is a pure function of surface and jitter, and keeping a
+	// second float per cell per medium to hold a number that cannot change would
+	// be paying memory for arithmetic.
+	float Started = Definition->FuelSeconds;
+
+	if (FuelMap && FieldResolution > 0)
+	{
+		const int32 X = Index % FieldResolution;
+		const int32 Y = Index / FieldResolution;
+
+		const float NormalX = (X + 0.5f) / FieldResolution;
+		const float NormalY = (Y + 0.5f) / FieldResolution;
+
+		Started *= Definition->GetSurfaceFuel(FuelMap->GetSurfaceAt(Coord, NormalX, NormalY))
+			* FuelMap->GetJitterAt(Coord, NormalX, NormalY);
+	}
+
+	// Ground that never had any fuel is not scorched, it is stone.
+	if (Started <= KINDA_SMALL_NUMBER)
+	{
+		return 0.f;
+	}
+
+	return FMath::Clamp(1.f - Chunk->Fuel[Slot][Index] / Started, 0.f, 1.f);
+}
+
 float UARPGSpreadSubsystem::GetFieldResidue(FVector WorldPosition, FGameplayTag ElementTag) const
 {
 	const int32 MediumIndex = FindMedium(ElementTag);
@@ -679,6 +765,9 @@ void UARPGSpreadSubsystem::StepSimulation(float DeltaTime)
 	TickField(DeltaTime);
 	TickFuelSources(DeltaTime);
 	TickContactDamage(DeltaTime);
+
+	// LAST, so it draws the field as it now is rather than as it was.
+	TickMask();
 }
 
 void UARPGSpreadSubsystem::Tick(float DeltaTime)
@@ -1169,6 +1258,118 @@ void UARPGSpreadSubsystem::TickAttrition(FIntPoint Coord, FFieldChunk& Chunk, fl
 // ---------------------------------------------------------------------------
 // Targets and contact damage
 // ---------------------------------------------------------------------------
+
+void UARPGSpreadSubsystem::TickMask()
+{
+	UWorld* World = GetWorld();
+
+	if (!World || !MaskMedium.IsValid() || MaskResolution < 16)
+	{
+		return;
+	}
+
+	// WHERE THE PLAYER IS, because a mask covering the whole world would be a
+	// texture nobody can afford and mostly black. A window that follows the
+	// viewer is the same trick the significance pass uses, for the same reason.
+	FVector Centre = FVector::ZeroVector;
+	bool bFound = false;
+
+	for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
+	{
+		if (const APlayerController* Controller = It->Get())
+		{
+			if (const AActor* View = Controller->GetPawn()
+				? Cast<AActor>(Controller->GetPawn())
+				: Controller->GetViewTarget())
+			{
+				Centre = View->GetActorLocation();
+				bFound = true;
+				break;
+			}
+		}
+	}
+
+	// A dedicated server has nobody to draw for, and neither does a test.
+	if (!bFound)
+	{
+		return;
+	}
+
+	const float Cell = GetCellSize();
+	const float Extent = Cell * MaskResolution;
+	const FVector2D Origin(Centre.X - Extent * 0.5f, Centre.Y - Extent * 0.5f);
+
+	const int32 Pixels = MaskResolution * MaskResolution;
+
+	if (!FieldMask || FieldMask->GetSizeX() != MaskResolution)
+	{
+		FieldMask = UTexture2D::CreateTransient(MaskResolution, MaskResolution, PF_B8G8R8A8);
+
+		if (!FieldMask)
+		{
+			return;
+		}
+
+		// BILINEAR IS THE WHOLE POINT, not a nicety. Read per cell, a fire's edge
+		// steps along cell boundaries and the same fire looks different depending
+		// on where the viewer is standing relative to one -- which reads as the
+		// simulation being unreliable rather than as aliasing. A filtered texture
+		// has no cells to stand on. Clamped, because the window ends and wrapping
+		// would put the far side of the fire under your feet.
+		FieldMask->Filter = TF_Bilinear;
+		FieldMask->AddressX = TA_Clamp;
+		FieldMask->AddressY = TA_Clamp;
+		FieldMask->SRGB = false;
+		FieldMask->NeverStream = true;
+		FieldMask->AddToRoot();
+		FieldMask->UpdateResource();
+	}
+
+	MaskPixels.SetNumUninitialized(Pixels);
+
+	for (int32 Y = 0; Y < MaskResolution; ++Y)
+	{
+		for (int32 X = 0; X < MaskResolution; ++X)
+		{
+			const FVector At(
+				Origin.X + (X + 0.5f) * Cell,
+				Origin.Y + (Y + 0.5f) * Cell,
+				Centre.Z);
+
+			const float Intensity = FMath::Clamp(GetFieldIntensity(At, MaskMedium), 0.f, 1.f);
+			const float Scorch = GetScorchAt(At, MaskMedium);
+
+			// R alight, G spent. Scorch is the one that persists: a fire passes
+			// and the ground stays black, which is the entire reason the fuel map
+			// is the right home for grass rather than a component per tuft.
+			MaskPixels[Y * MaskResolution + X] = FColor(
+				static_cast<uint8>(Intensity * 255.f),
+				static_cast<uint8>(Scorch * 255.f),
+				0, 255);
+		}
+	}
+
+	if (FTexture2DMipMap* Mip = &FieldMask->GetPlatformData()->Mips[0])
+	{
+		void* Data = Mip->BulkData.Lock(LOCK_READ_WRITE);
+		FMemory::Memcpy(Data, MaskPixels.GetData(), Pixels * sizeof(FColor));
+		Mip->BulkData.Unlock();
+		FieldMask->UpdateResource();
+	}
+
+	// AND WHERE IT GOES. Four numbers is exactly what a parameter collection is
+	// for, and exactly what it can hold -- the field itself was never going to fit
+	// in one, which is why the plan's "MPC mask" stayed a forward declaration.
+	if (MaskParameters)
+	{
+		UKismetMaterialLibrary::SetScalarParameterValue(
+			World, MaskParameters, TEXT("MaskOriginX"), Origin.X);
+		UKismetMaterialLibrary::SetScalarParameterValue(
+			World, MaskParameters, TEXT("MaskOriginY"), Origin.Y);
+		UKismetMaterialLibrary::SetScalarParameterValue(
+			World, MaskParameters, TEXT("MaskExtent"), Extent);
+	}
+}
 
 void UARPGSpreadSubsystem::RegisterFuel(UARPGFuelComponent* Fuel)
 {

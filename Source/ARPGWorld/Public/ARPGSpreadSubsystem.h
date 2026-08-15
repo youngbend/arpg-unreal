@@ -14,6 +14,7 @@ class UARPGMagicCombinationTable;
 class UARPGSpreadDefinition;
 class UARPGSpreadFuelMap;
 class UMaterialParameterCollection;
+class UTexture2D;
 
 /**
  * Simulates every DIFFUSIVE spreadable medium -- fire, corruption, pestilence --
@@ -134,6 +135,72 @@ public:
 	/** Current intensity at a point, 0 when nothing is there. */
 	UFUNCTION(BlueprintPure, Category = "ARPG|Spread")
 	float GetFieldIntensity(FVector WorldPosition, FGameplayTag ElementTag) const;
+
+	/**
+	 * How much of a cell has been burned away, 0-1.
+	 *
+	 * PARTIAL BURNING WAS ALWAYS IN THE SIMULATION and never came out of it. Fuel
+	 * is spent only while a cell is alight and never regrows, so a patch quenched
+	 * halfway keeps half its fuel forever and relighting consumes the remainder --
+	 * the same rule a burning crate lives by, at a different granularity. What was
+	 * missing is any way to ASK, which is what a scorch mask needs.
+	 *
+	 * Measured against what the cell started with, so a marsh that only ever held
+	 * a tenth of a grassland's fuel still reads fully scorched once it has given
+	 * that tenth up. Scorch is "how spent is this", not "how much burned here".
+	 */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Spread")
+	float GetScorchAt(FVector WorldPosition, FGameplayTag ElementTag) const;
+
+	// --- What it looks like ------------------------------------------------------
+	//
+	// A FIELD CANNOT LIVE IN A PARAMETER COLLECTION, which is what the plan said
+	// and why nothing was ever built: an MPC holds a handful of scalars, and this
+	// is a value per cell over a moving window of the world. It needs a texture.
+	//
+	// So: one texture covering a window that follows the viewer, written on the
+	// spread tick, plus an MPC holding that window's world bounds so a material
+	// can turn a world position into a UV. The collection does what it is good at
+	// -- four numbers every material can see -- and the field goes in the texture.
+	//
+	// AND SAMPLING IT BILINEARLY IS THE POINT, not an optimisation. The Godot
+	// version read the field per cell, so a fire's edge stepped along cell
+	// boundaries and the same fire looked different depending on where the viewer
+	// stood relative to one. A filtered texture has no cells to stand on.
+
+	/**
+	 * R is intensity -- how alight. G is scorch -- how spent. B is unused.
+	 *
+	 * Null until the first tick that has anything to draw, so a level with no
+	 * fire in it pays nothing.
+	 */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Spread")
+	UTexture2D* GetFieldMask() const { return FieldMask; }
+
+	/**
+	 * The medium the mask is drawn for. One texture, one medium.
+	 *
+	 * Fire is what anyone wants to see scorched, and a channel per medium would
+	 * be four textures for three media nobody renders.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Spread",
+		meta = (Categories = "Element"))
+	FGameplayTag MaskMedium;
+
+	/** Cells across the mask window. The window is this times the cell size. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Spread",
+		meta = (ClampMin = "16", ClampMax = "512"))
+	int32 MaskResolution = 128;
+
+	/**
+	 * Where a material reads the window's bounds from.
+	 *
+	 * Wants two scalars named MaskOrigin (X, Y) and one named MaskExtent. Without
+	 * one the texture is still produced and readable from Blueprint -- it simply
+	 * has nothing telling the ground material where it goes.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Spread")
+	TObjectPtr<UMaterialParameterCollection> MaskParameters;
 
 	/** How burnt the ground is, 0-1. Monotonic; what the char shader reads. */
 	UFUNCTION(BlueprintPure, Category = "ARPG|Spread")
@@ -315,6 +382,15 @@ private:
 	 * same tick.
 	 */
 	void TickFuelSources(float DeltaTime);
+
+	/** Redraws the mask window around the viewer. */
+	void TickMask();
+
+	UPROPERTY(Transient)
+	TObjectPtr<UTexture2D> FieldMask;
+
+	/** Scratch for the upload, so a redraw does not allocate. */
+	TArray<FColor> MaskPixels;
 
 	void RebuildMedia() const;
 	void RebuildAttritionRates() const;
