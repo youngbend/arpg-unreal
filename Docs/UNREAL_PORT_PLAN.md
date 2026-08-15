@@ -1641,6 +1641,56 @@ trip rather than just the totals -- a codec that agreed on the sums while
 scrambling the grid would pass a laxer test and produce a floe with the right
 volume in the wrong shape.
 
+**OBJECTS BECAME FUEL, and it is not a negative resistance.** The spread field
+carried fuel per cell, baked from the world, so a wooden crate standing on bare
+stone was scenery the fire went round.
+
+- **The Godot answer was to reuse resistance with the sign flipped**, and it is
+  the wrong axis twice over. Resistance is what a body suffers; fuel is what a
+  medium is carried by, and a wet crate takes normal fire damage while
+  propagating nothing, a powder keg takes almost none while propagating
+  enormously. And resistance is keyed by DAMAGE TYPE while spread is keyed by
+  MEDIUM -- steam does fire damage and is not a fire medium, so keying fuel off
+  the damage type would make steam flammable. One field doing two jobs is the bug
+  class this branch has spent its length finding.
+- **So it is a component, which is the pattern everything else here already
+  uses.** An element pools because a fluid definition names it; it is a slab
+  because a solid definition names it; a thing is fuel because a fuel component
+  says which medium and how much.
+- **FUEL IS NOT HEALTH.** Health is what the fire takes from the object, and the
+  hurtbox already does it. Fuel is what the object gives to the fire. Keeping the
+  two apart is what lets a powder keg, a stone brazier and an oak beam be three
+  different things rather than one number at three values.
+- **IT KEEPS ITS OWN FUEL rather than pushing it into the field.** The cells under
+  a crate already hold the ground's fuel, and once the two are mixed there is no
+  telling whose is whose: quenching would refund the crate and burning the grass
+  would consume it. The field says only whether the cell is alight; the object
+  answers with what it is prepared to give.
+- **AND THE HALF-BURNT CRATE FALLS OUT.** Fuel is spent only while the cells are
+  alight, so water quenching the fire stops the burn where it stopped -- nothing
+  restores it, resets a timer or decays it. Relight the crate and it consumes the
+  remainder. Neither behaviour is implemented; both are what "spend only while
+  alight" means.
+- **Spent is not destroyed.** A log becomes charcoal, a rope parts, a barricade
+  collapses, a crate spills what was inside -- the object decides, on a delegate,
+  and spent sources stay registered so a repaired barricade burns again without
+  anyone re-registering it.
+- **Char rides on custom primitive data**, not a dynamic material instance. One
+  float per object, and a level of crates each with its own MID is an allocation
+  and a broken batch apiece for a number the shader could read off the instance.
+
+3 new cases under `ARPG.World.Spread.Fuel`.
+
+**Still owed on this: the AREA half.** The fuel map is one scalar per cell and is
+element-agnostic, so a cell that carries fire well necessarily carries every
+medium well, differing only by a per-medium constant. The right shape is to bake
+a SURFACE TYPE instead of an amount and let each spread definition carry a
+surface-to-fuel table -- same memory, strictly more expressive, and it turns the
+bake into something a level designer knows. And the surface type should be
+`EPhysicalSurface`, which landscape layers and meshes already carry and traces
+already return: the engine answers "what kind of thing is this" everywhere, for
+free, and the codebase uses it in exactly one place, disabled.
+
 **Phase 11 -- code complete. Not in the original ten: this is the layer that
 makes the other ten reachable from a controller.** The modal control scheme, the
 speed tiers, the buffering, and auto-sheathe. 13 new cases; 99 pass in total.

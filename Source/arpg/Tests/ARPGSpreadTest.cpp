@@ -9,6 +9,7 @@
 #include "ARPGMagicElement.h"
 #include "ARPGSpreadDefinition.h"
 #include "ARPGSpreadFuelMap.h"
+#include "ARPGFuelComponent.h"
 #include "ARPGSpreadSubsystem.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
@@ -398,6 +399,165 @@ bool FARPGSpreadRainTest::RunTest(const FString& Parameters)
 	// re-ignite at the reach it had before.
 	TestEqual(TEXT("Leaving no banked energy to restart from"),
 		Spread->GetFieldEnergy(Origin, TAG_Element_Fire), 0.f);
+
+	return true;
+}
+
+
+// ---------------------------------------------------------------------------
+// Objects that are fuel
+//
+// The ground burns and objects did not: fuel is baked per cell, so a wooden
+// crate on bare stone was scenery the fire went round. A fuel component is the
+// other half -- something that feeds the fire where it stands, has a finite
+// amount of itself to give, and can be caught halfway through giving it.
+// ---------------------------------------------------------------------------
+
+namespace ARPGSpreadTestUtils
+{
+	/** A crate: an actor with a footprint and something to burn. */
+	inline UARPGFuelComponent* MakeCrate(UWorld* World, const FVector& At, float Seconds)
+	{
+		FActorSpawnParameters Params;
+		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		AActor* Actor = World->SpawnActor<AActor>(AActor::StaticClass(), FTransform(At), Params);
+
+		UARPGFuelComponent* Fuel = NewObject<UARPGFuelComponent>(Actor);
+		Fuel->MediumTag = TAG_Element_Fire;
+		Fuel->FuelSeconds = Seconds;
+		Fuel->Radius = 120.f;
+		Fuel->Output = 2.f;
+		Fuel->CatchThreshold = 0.15f;
+		Fuel->CharParameterIndex = -1;   // no primitives to publish onto
+		Fuel->RegisterComponent();
+
+		return Fuel;
+	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFuelBurnsTest,
+	"ARPG.World.Spread.Fuel.AnObjectInAFireIsConsumedByIt",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGFuelBurnsTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGSpreadTestUtils;
+	FTestWorld Scope;
+
+	UARPGMagicElement* Fire = MakeElement(GetTransientPackage(), TAG_Element_Fire);
+	UARPGSpreadSubsystem* Spread = Setup(Scope.World, MakeFire(GetTransientPackage(), Fire));
+
+	const FVector Origin(0, 0, 0);
+	UARPGFuelComponent* Crate = MakeCrate(Scope.World, Origin, /*Seconds=*/2.f);
+
+	TestEqual(TEXT("A fresh crate is whole"), Crate->FuelRemaining, 2.f);
+	TestEqual(TEXT("And uncharred"), Crate->GetCharred(), 0.f);
+	TestFalse(TEXT("And not alight"), Crate->IsAlight());
+
+	// NOT BURNING UNTIL THERE IS A FIRE. A crate is not slowly rotting.
+	Run(Spread, 5);
+	TestEqual(TEXT("Nothing burns it on its own"), Crate->FuelRemaining, 2.f);
+
+	Spread->AddExposure(Origin, 150.f, 4.f, TAG_Element_Fire);
+	TestTrue(TEXT("Setup: the ground is alight"), Spread->IsBurning(Origin, TAG_Element_Fire));
+
+	Run(Spread, 5);
+
+	TestTrue(TEXT("Standing in fire, it catches"), Crate->IsAlight());
+	TestTrue(TEXT("And is being consumed"), Crate->FuelRemaining < 2.f);
+	TestTrue(TEXT("Which shows as char"), Crate->GetCharred() > 0.f);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFuelHalfBurntTest,
+	"ARPG.World.Spread.Fuel.QuenchedHalfwayLeavesAHalfBurntCrate",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGFuelHalfBurntTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGSpreadTestUtils;
+	FTestWorld Scope;
+
+	UARPGMagicElement* Fire = MakeElement(GetTransientPackage(), TAG_Element_Fire);
+	UARPGSpreadSubsystem* Spread = Setup(Scope.World, MakeFire(GetTransientPackage(), Fire));
+
+	const FVector Origin(0, 0, 0);
+	UARPGFuelComponent* Crate = MakeCrate(Scope.World, Origin, /*Seconds=*/10.f);
+
+	Spread->AddExposure(Origin, 150.f, 6.f, TAG_Element_Fire);
+	Run(Spread, 10);
+
+	const float PartWay = Crate->FuelRemaining;
+
+	TestTrue(TEXT("It has burned some"), PartWay < 10.f);
+	TestTrue(TEXT("But not all"), PartWay > 0.f);
+
+	// PUT IT OUT. Water on the field, which is the ordinary extinguish path --
+	// nothing here knows the fire went out for a reason rather than by running
+	// down.
+	Spread->Extinguish(Origin, 400.f, TAG_Element_Fire);
+	Run(Spread, 20);
+
+	TestFalse(TEXT("The fire is out"), Spread->IsBurning(Origin, TAG_Element_Fire));
+	TestFalse(TEXT("So the crate stops burning"), Crate->IsAlight());
+
+	// AND STOPS WHERE IT STOPPED. Nothing restores fuel, resets a timer or decays
+	// anything: the burn is spent only while the cells are alight, and a half
+	// burnt crate is what that means rather than something implemented.
+	TestEqual(TEXT("Half burnt, and staying that way"),
+		Crate->FuelRemaining, PartWay, 0.001f);
+
+	const float Charred = Crate->GetCharred();
+	TestTrue(TEXT("Visibly so"), Charred > 0.f && Charred < 1.f);
+
+	// AND IT IS STILL FUEL. Relight it and it burns the remainder -- which also
+	// falls out rather than being written.
+	Spread->AddExposure(Origin, 150.f, 6.f, TAG_Element_Fire);
+	Run(Spread, 10);
+
+	TestTrue(TEXT("Relit, it carries on from where it was"),
+		Crate->FuelRemaining < PartWay);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFuelSpentTest,
+	"ARPG.World.Spread.Fuel.BurningOutSaysSoWithoutDecidingWhatItMeans",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGFuelSpentTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGSpreadTestUtils;
+	FTestWorld Scope;
+
+	UARPGMagicElement* Fire = MakeElement(GetTransientPackage(), TAG_Element_Fire);
+	UARPGSpreadSubsystem* Spread = Setup(Scope.World, MakeFire(GetTransientPackage(), Fire));
+
+	const FVector Origin(0, 0, 0);
+	UARPGFuelComponent* Crate = MakeCrate(Scope.World, Origin, /*Seconds=*/0.3f);
+
+	Spread->AddExposure(Origin, 150.f, 8.f, TAG_Element_Fire);
+	Run(Spread, 20);
+
+	TestEqual(TEXT("It burned out"), Crate->FuelRemaining, 0.f);
+	TestTrue(TEXT("Which is spent"), Crate->IsSpent());
+	TestEqual(TEXT("And fully charred"), Crate->GetCharred(), 1.f);
+	TestFalse(TEXT("And no longer alight"), Crate->IsAlight());
+
+	// SPENT IS NOT DESTROYED. A log becomes charcoal, a rope parts, a barricade
+	// collapses -- the object decides, and nothing here decided for it.
+	TestNotNull(TEXT("The actor is still there"), Crate->GetOwner());
+
+	// AND IT CAN BE PUT BACK. A repaired barricade burns again without anyone
+	// re-registering it, which is why spent sources stay on the register.
+	Crate->Replenish(0.3f);
+	TestEqual(TEXT("Repaired, it is whole again"), Crate->GetCharred(), 0.f);
+
+	Spread->AddExposure(Origin, 150.f, 8.f, TAG_Element_Fire);
+	Run(Spread, 5);
+
+	TestTrue(TEXT("And burns again"), Crate->FuelRemaining < 0.3f);
 
 	return true;
 }

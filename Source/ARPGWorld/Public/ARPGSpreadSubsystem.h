@@ -8,6 +8,8 @@
 #include "Subsystems/WorldSubsystem.h"
 #include "ARPGSpreadSubsystem.generated.h"
 
+class UARPGFuelComponent;
+
 class UARPGMagicCombinationTable;
 class UARPGSpreadDefinition;
 class UARPGSpreadFuelMap;
@@ -166,6 +168,24 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "ARPG|Spread")
 	void UnregisterTarget(AActor* Actor);
 
+	// --- Objects that are fuel ---------------------------------------------------
+	//
+	// THE GROUND BURNS AND OBJECTS DID NOT. Fuel is baked per cell from the world,
+	// so a wooden crate on bare stone was scenery the fire went round. A registered
+	// fuel component is the other half: something that adds to the fire where it
+	// stands and has a finite amount of itself to add.
+	//
+	// IT KEEPS ITS OWN FUEL. Mixing an object's fuel into the field's cells would
+	// lose track of whose is whose -- quenching would refund the crate, and burning
+	// the grass would consume it. So the field says only whether a cell is alight,
+	// and the object answers with what it is prepared to give.
+
+	UFUNCTION(BlueprintCallable, Category = "ARPG|Spread")
+	void RegisterFuel(UARPGFuelComponent* Fuel);
+
+	UFUNCTION(BlueprintCallable, Category = "ARPG|Spread")
+	void UnregisterFuel(UARPGFuelComponent* Fuel);
+
 private:
 	/** One medium, resolved once from its definition. */
 	struct FMedium
@@ -286,6 +306,16 @@ private:
 	/** Deposits a cross-chunk transfer once the pass is done. */
 	void ApplyCrossDeposits();
 
+	/**
+	 * Burns whatever objects are standing in fire, and lets them feed it back.
+	 *
+	 * AFTER the field step and before contact damage. After, because whether an
+	 * object is alight is a question about the field as it now is; before, because
+	 * an object that just caught should be hurting whoever is leaning on it in the
+	 * same tick.
+	 */
+	void TickFuelSources(float DeltaTime);
+
 	void RebuildMedia() const;
 	void RebuildAttritionRates() const;
 
@@ -343,6 +373,10 @@ private:
 
 	UPROPERTY(Transient)
 	TArray<TWeakObjectPtr<AActor>> Targets;
+
+	/** Objects that feed a medium and are consumed doing it. */
+	UPROPERTY(Transient)
+	TArray<TWeakObjectPtr<UARPGFuelComponent>> FuelSources;
 
 	mutable bool bMediaDirty = true;
 };

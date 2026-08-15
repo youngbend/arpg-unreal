@@ -9,6 +9,7 @@
 #include "ARPGMagicCombinationTable.h"
 #include "ARPGMagicElement.h"
 #include "ARPGSpreadDefinition.h"
+#include "ARPGFuelComponent.h"
 #include "ARPGSpreadFuelMap.h"
 #include "ARPGWorld.h"
 #include "ARPGWorldSettings.h"
@@ -676,6 +677,7 @@ void UARPGSpreadSubsystem::StepSimulation(float DeltaTime)
 	EnsureMedia();
 
 	TickField(DeltaTime);
+	TickFuelSources(DeltaTime);
 	TickContactDamage(DeltaTime);
 }
 
@@ -1167,6 +1169,56 @@ void UARPGSpreadSubsystem::TickAttrition(FIntPoint Coord, FFieldChunk& Chunk, fl
 // ---------------------------------------------------------------------------
 // Targets and contact damage
 // ---------------------------------------------------------------------------
+
+void UARPGSpreadSubsystem::RegisterFuel(UARPGFuelComponent* Fuel)
+{
+	if (Fuel)
+	{
+		FuelSources.AddUnique(Fuel);
+	}
+}
+
+void UARPGSpreadSubsystem::UnregisterFuel(UARPGFuelComponent* Fuel)
+{
+	FuelSources.Remove(Fuel);
+}
+
+void UARPGSpreadSubsystem::TickFuelSources(float DeltaTime)
+{
+	for (int32 Index = FuelSources.Num() - 1; Index >= 0; --Index)
+	{
+		UARPGFuelComponent* Fuel = FuelSources[Index].Get();
+
+		if (!Fuel || !Fuel->GetOwner())
+		{
+			FuelSources.RemoveAt(Index);
+			continue;
+		}
+
+		// SPENT ONES STAY REGISTERED. An object with nothing left to give is still
+		// a thing the world contains, and it can be repaired -- a barricade rebuilt
+		// mid-fight goes straight back to burning without anyone re-registering it.
+		// Burn answers zero for them, which costs one comparison.
+		const FVector Where = Fuel->GetOwner()->GetActorLocation();
+		const float Intensity = GetFieldIntensity(Where, Fuel->MediumTag);
+
+		const float Output = Fuel->Burn(DeltaTime, Intensity);
+
+		if (Output <= 0.f)
+		{
+			continue;
+		}
+
+		// AND IT FEEDS THE FIRE BACK. This is what makes a woodpile worth setting
+		// alight rather than merely flammable: the object sustains a fire the
+		// ground around it could not, so where the burnable things are is a fact
+		// about the map rather than a detail.
+		//
+		// Through AddExposure like anything else, so an object's contribution is
+		// bounded by the same fuel the ground has and cannot light bare stone.
+		AddExposure(Where, Fuel->Radius, Output * DeltaTime, Fuel->MediumTag);
+	}
+}
 
 void UARPGSpreadSubsystem::RegisterTarget(AActor* Actor)
 {
