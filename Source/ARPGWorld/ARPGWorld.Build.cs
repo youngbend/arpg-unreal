@@ -56,6 +56,7 @@ public class ARPGWorld : ModuleRules
 			"GeometryCore",
 			"GeometryAlgorithms",
 			"GeometryFramework",
+			"SignificanceManager",
 			"Water"
 		});
 	}

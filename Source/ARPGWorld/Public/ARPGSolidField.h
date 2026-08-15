@@ -78,6 +78,36 @@ struct ARPGWORLD_API FARPGSolidField
 
 	bool IsValidField() const { return CountX > 0 && CountY > 0 && Top.Num() == CountX * CountY; }
 
+	// --- Getting it across the wire ---------------------------------------------
+	//
+	// THE HEAVIEST THING THIS PROJECT REPLICATES, by an order of magnitude. A
+	// ten-metre floe at 20cm cells is 2500 cells, and the default struct
+	// serialiser sends every one of them -- 10KB -- whenever any part of the
+	// struct changes. A melting floe changes four times a second.
+	//
+	// A DELTA WAS THE OBVIOUS ANSWER AND IT CANNOT BE MADE CORRECT HERE.
+	// NetSerialize runs once per connection and is told nothing about which
+	// connection it is serving, so it cannot know whether this client has prior
+	// state to patch. A dirty span would be right for whoever was already
+	// watching and would quietly corrupt anyone who joined, or relevanced in,
+	// since the last change. Per-connection baselines are what NetDeltaSerialize
+	// exists for, and that wants an array of identified items rather than a dense
+	// grid.
+	//
+	// SO: COMPRESS INSTEAD OF DIFFING, which needs no baseline and is therefore
+	// correct for every client by construction. Run-length encoding suits this
+	// data almost perfectly, because the thing that makes a heightfield cheap to
+	// melt is the same thing that makes it compressible -- most of a slab is at
+	// exactly one height. A fresh slab is one run. A slab with a bowl in it is the
+	// bowl plus a run either side of each affected row. Bottom is a single run for
+	// anything that has never been melted from underneath, which is nearly
+	// everything.
+	//
+	// Whole every time, so there is no ordering hazard, no baseline to lose, and
+	// nothing that behaves differently for a late joiner.
+
+	bool NetSerialize(FArchive& Ar, class UPackageMap* Map, bool& bOutSuccess);
+
 	/**
 	 * Recomputes the cached totals. Call after writing cells directly.
 	 *
@@ -290,4 +320,14 @@ private:
 	/** Total film volume, so HasWet is a read rather than a sweep. */
 	UPROPERTY(NotReplicated, Transient)
 	double CachedWet = 0.0;
+
+};
+
+template<>
+struct TStructOpsTypeTraits<FARPGSolidField> : public TStructOpsTypeTraitsBase2<FARPGSolidField>
+{
+	enum
+	{
+		WithNetSerializer = true
+	};
 };

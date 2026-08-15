@@ -139,6 +139,135 @@ void FARPGSolidField::RefreshWet()
 // The film running over it
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Getting it across the wire
+// ---------------------------------------------------------------------------
+
+namespace
+{
+	/**
+	 * Run-length codec for one plane of the grid.
+	 *
+	 * A COUNT AND A VALUE, with the count as a byte and a 0 escape for anything
+	 * longer -- so a uniform 2500-cell plane is ten runs of 255 rather than one
+	 * run needing a wider count on every run in every message. Runs are almost
+	 * always either very long (untouched slab) or very short (the rim of a bowl),
+	 * and a byte serves both without a variable-width integer.
+	 */
+	void WriteRuns(FArchive& Ar, const TArray<int16>& Values)
+	{
+		int32 At = 0;
+
+		while (At < Values.Num())
+		{
+			const int16 Value = Values[At];
+			int32 Run = 1;
+
+			while (At + Run < Values.Num() && Values[At + Run] == Value && Run < 255)
+			{
+				++Run;
+			}
+
+			uint8 Count = static_cast<uint8>(Run);
+			int16 Written = Value;
+
+			Ar << Count;
+			Ar << Written;
+
+			At += Run;
+		}
+	}
+
+	void ReadRuns(FArchive& Ar, TArray<int16>& Values, int32 Cells)
+	{
+		Values.SetNumUninitialized(Cells);
+
+		int32 At = 0;
+
+		while (At < Cells)
+		{
+			uint8 Count = 0;
+			int16 Value = 0;
+
+			Ar << Count;
+			Ar << Value;
+
+			// A ZERO COUNT WOULD NOT ADVANCE, and a stream that says so is either
+			// corrupt or from a different build. Filling the rest and leaving is
+			// better than spinning here forever.
+			if (Count == 0)
+			{
+				for (; At < Cells; ++At)
+				{
+					Values[At] = Value;
+				}
+				return;
+			}
+
+			const int32 Run = FMath::Min(static_cast<int32>(Count), Cells - At);
+
+			for (int32 Step = 0; Step < Run; ++Step)
+			{
+				Values[At + Step] = Value;
+			}
+
+			At += Run;
+		}
+	}
+}
+
+bool FARPGSolidField::NetSerialize(FArchive& Ar, UPackageMap* Map, bool& bOutSuccess)
+{
+	bOutSuccess = true;
+
+	Ar << Origin;
+	Ar << CellSize;
+	Ar << CountX;
+	Ar << CountY;
+
+	const int32 Cells = CountX * CountY;
+
+	if (Cells <= 0)
+	{
+		if (Ar.IsLoading())
+		{
+			Top.Reset();
+			Bottom.Reset();
+		}
+		return true;
+	}
+
+	if (Ar.IsSaving())
+	{
+		// A grid whose planes do not match its own dimensions is a bug elsewhere,
+		// but sending a short one would desynchronise the reader's run count and
+		// corrupt everything after it in the bunch.
+		if (Top.Num() != Cells)
+		{
+			Top.SetNumZeroed(Cells);
+		}
+		if (Bottom.Num() != Cells)
+		{
+			Bottom.SetNumZeroed(Cells);
+		}
+
+		WriteRuns(Ar, Top);
+		WriteRuns(Ar, Bottom);
+
+		return true;
+	}
+
+	ReadRuns(Ar, Top, Cells);
+	ReadRuns(Ar, Bottom, Cells);
+
+	// The totals are not sent -- they are pure functions of the cells -- so a
+	// receiver puts them back itself. Cheaper than the bytes it saves, and it
+	// cannot disagree with what arrived.
+	Refresh();
+
+	return true;
+}
+
 float FARPGSolidField::WetAt(const FVector2D& World) const
 {
 	if (Wet.Num() != Top.Num())

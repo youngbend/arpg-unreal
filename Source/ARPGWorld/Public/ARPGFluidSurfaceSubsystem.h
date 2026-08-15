@@ -351,7 +351,20 @@ private:
 	/** Destroys everything floating on a pool that is about to stop existing. */
 	void DropRiders(AARPGFluidPool* Pool);
 
-	/** Refreshes ViewerLocations. Once per weather tick, not once per body. */
+	/**
+	 * Refreshes ViewerLocations from the engine's significance manager, or from
+	 * the player list when there is none.
+	 *
+	 * THE ENGINE SHIPS THIS AND I WROTE IT AGAIN, worse: a linear distance scan
+	 * per body per frame against a viewer list refreshed at 4Hz. USignificanceManager
+	 * keeps the viewpoints, is updated by the engine at the right time, and is
+	 * shared with every other system that wants to know what matters -- which is
+	 * the actual argument, since spread and status VFX both want the same signal
+	 * and would otherwise each grow their own copy of this.
+	 *
+	 * The fallback is not dead code: the manager is only present when a game mode
+	 * has spawned one, and every automation fixture runs without it.
+	 */
 	void GatherViewers();
 
 	/** Drops the smallest bodies until the register is back inside its cap. */

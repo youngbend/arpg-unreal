@@ -218,6 +218,32 @@ private:
 	};
 
 	/**
+	 * Per-chunk working state, so the sweep can run in parallel.
+	 *
+	 * ONE SLOT PER CHUNK, kept between ticks. The two things a chunk step used to
+	 * share were a scratch list of active cells and the cross-boundary deposit
+	 * queue -- both write-heavy, and both races the moment more than one chunk
+	 * runs at once. Held here rather than allocated per chunk per tick, which is
+	 * what the shared scratch existed to avoid in the first place.
+	 */
+	struct FChunkWork
+	{
+		TArray<int32> Active;
+		TArray<FCrossDeposit> Deposits;
+
+		/**
+		 * The medium pass's accumulators, one cell each.
+		 *
+		 * PER SLOT LIKE THE REST. These were shared too, and they are the write
+		 * that actually matters: a chunk step accumulates every neighbour's
+		 * contribution into them before applying, so two chunks sharing a pair
+		 * would not merely race, they would spread each other's fire.
+		 */
+		TArray<float> DeltaIntensity;
+		TArray<float> DeltaEnergy;
+	};
+
+	/**
 	 * Builds the media list if the definitions have changed since last time.
 	 *
 	 * Called by EVERY entry point, including the const queries -- which is why
@@ -246,7 +272,14 @@ private:
 	void MarkNextActive(FFieldChunk& Chunk, int32 Index);
 
 	void TickField(float DeltaTime);
-	void TickFieldChunk(FIntPoint Coord, FFieldChunk& Chunk, float DeltaTime);
+	/**
+	 * One chunk's step. TOUCHES NOTHING OUTSIDE ITS OWN CHUNK AND ITS OWN SCRATCH,
+	 * which is what makes the sweep over chunks parallel: it reads shared
+	 * configuration, writes its own cells, and posts anything crossing a boundary
+	 * to the work slot for the caller to apply afterwards.
+	 */
+	void TickFieldChunk(FIntPoint Coord, FFieldChunk& Chunk, float DeltaTime,
+		FChunkWork& Work);
 	void TickAttrition(FIntPoint Coord, FFieldChunk& Chunk, float DeltaTime);
 	void TickContactDamage(float DeltaTime);
 
@@ -276,6 +309,12 @@ private:
 
 	TArray<FCrossDeposit> CrossDeposits;
 
+
+	TArray<FChunkWork> ChunkWork;
+
+	/** The chunks with anything alight, flattened so the sweep can index them. */
+	TArray<TPair<FIntPoint, FFieldChunk*>> Burning;
+
 	/**
 	 * Scratch reused by every chunk, every medium, every tick.
 	 *
@@ -285,12 +324,8 @@ private:
 	 * walking only the cells actually touched -- which is why the touch lists
 	 * exist rather than a Memset over the whole grid.
 	 */
-	TArray<float> ScratchDeltaIntensity;
-	TArray<float> ScratchDeltaEnergy;
 	TArray<int32> ScratchTouchedIntensity;
 	TArray<int32> ScratchTouchedEnergy;
-	TArray<int32> ScratchActive;
-
 	/** Sizes the scratch buffers to the current grid, once. */
 	void EnsureScratch();
 

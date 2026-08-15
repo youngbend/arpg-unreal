@@ -17,6 +17,7 @@
 #include "Engine/World.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
+#include "SignificanceManager.h"
 
 namespace
 {
@@ -784,6 +785,30 @@ void UARPGFluidSurfaceSubsystem::GatherViewers()
 		return;
 	}
 
+	// THE ENGINE'S LIST FIRST. USignificanceManager already holds the viewpoints
+	// and is updated where the engine knows they have moved, which is both more
+	// correct than sampling them on a 4Hz weather tick and shared with anything
+	// else that asks the same question.
+	if (const USignificanceManager* Significance = USignificanceManager::Get(World))
+	{
+		TArray<FTransform> Viewpoints;
+		Significance->GetViewpoints(Viewpoints);
+
+		for (const FTransform& Viewpoint : Viewpoints)
+		{
+			ViewerLocations.Add(Viewpoint.GetLocation());
+		}
+
+		if (ViewerLocations.Num() > 0)
+		{
+			return;
+		}
+	}
+
+	// AND THE PLAYER LIST WHEN THERE IS NO MANAGER, which is not a dead branch:
+	// one exists only where a game mode has spawned it, and no automation fixture
+	// does. A dedicated server with no local viewpoint lands here too and finds
+	// nothing, which IsSignificantAt reads as "everything matters".
 	for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
 	{
 		const APlayerController* Controller = It->Get();

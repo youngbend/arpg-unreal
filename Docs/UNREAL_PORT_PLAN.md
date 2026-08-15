@@ -1583,6 +1583,64 @@ stops the two of them both depositing.
 run twice differing only in the two viscosity numbers, and a rotation test on a
 long bar because a disc would pass by symmetry and tell you nothing.
 
+**A REVIEW PASS: six findings, and one of them changed shape under inspection.**
+
+- **`Transient` does not mean "not replicated", and I had assumed it did.** It
+  governs saving to DISK; a `UPROPERTY` inside a replicated struct is in the
+  network layout regardless. So the film and the five cached totals -- all
+  documented as never sent -- were being sent, the film being a float per cell,
+  which DOUBLED the heaviest payload in the project to transmit something the
+  comment above it denied existed. `NotReplicated` is the specifier that does it,
+  and it appeared nowhere in the codebase, which is how this survived.
+- **`CountOccupants` was the last per-frame scan.** A physics overlap feeding a
+  draft that settles over a third of a second; now polled at 4Hz, which puts the
+  load inside lag the settle already has.
+- **StateTree and GameplayStateTree were enabled and used by nothing.** The AI
+  runs on AIModule behaviour trees, which are fully supported in 5.8. Dropped
+  rather than adopted: rewriting working AI for no stated benefit is not a
+  cleanup.
+- **Niagara enabled, and made load-bearing rather than a checkbox** -- the exact
+  sin the previous point punishes. A status can now name a `UNiagaraSystem`
+  directly instead of every status needing an actor whose only job is to hold one
+  component; the actor path stays for visuals with logic or their own fade-out.
+  That forced a good split: fitting is a MEASUREMENT of the target and was
+  tangled up with attaching an actor, so `SolveVfxFit` does the sum and two
+  callers apply it.
+- **`USignificanceManager` replaces a worse copy of itself.** The hand-rolled
+  viewer scan sampled positions on a 4Hz weather tick; the engine's is updated
+  where the engine knows they moved and is shared with anything else that asks.
+  The player-list fallback stays, because a manager exists only where a game mode
+  spawned one and no automation fixture does.
+- **The spread sweep runs in parallel**, which it was already written for without
+  anyone intending it: a chunk reads shared configuration, writes its own cells,
+  and queues anything crossing a boundary. Three things were shared -- the active
+  scratch, the deposit queue, and the two delta accumulators -- and the last pair
+  was the dangerous one, since chunks sharing them would not merely race but
+  spread each other's fire. All now per-slot, gathered in chunk order rather than
+  completion order so a listen server and its client agree.
+
+**AND THE DELTA I SET OUT TO WRITE CANNOT BE MADE CORRECT.** The plan was a dirty
+span on the field: mark what changed, send only that. `NetSerialize` runs once
+per connection and is told nothing about which connection it is serving, so it
+cannot know whether this client has prior state to patch -- a span would be right
+for whoever was already watching and would quietly corrupt anyone who joined, or
+relevanced in, since the last change. Per-connection baselines are what
+`NetDeltaSerialize` exists for, and that wants an array of identified items
+rather than a dense grid.
+
+So: **compress instead of diffing**, which needs no baseline and is therefore
+correct for every client by construction. Run-length encoding suits this data
+almost exactly, because the property that makes a heightfield cheap to melt is
+the property that makes it compressible -- most of a slab is at one height. A
+fresh slab is a handful of runs; a melted one is the bowl plus a run either side
+of each affected row; `Bottom` is one run for anything never melted from
+underneath, which is nearly everything.
+
+1 new case under `ARPG.World.Fluid.Ice`, asserting every cell survives the round
+trip rather than just the totals -- a codec that agreed on the sums while
+scrambling the grid would pass a laxer test and produce a floe with the right
+volume in the wrong shape.
+
 **Phase 11 -- code complete. Not in the original ten: this is the layer that
 makes the other ten reachable from a controller.** The modal control scheme, the
 speed tiers, the buffering, and auto-sheathe. 13 new cases; 99 pass in total.

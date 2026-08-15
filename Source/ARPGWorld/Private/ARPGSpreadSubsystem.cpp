@@ -708,25 +708,70 @@ void UARPGSpreadSubsystem::Tick(float DeltaTime)
 
 void UARPGSpreadSubsystem::EnsureScratch()
 {
+	// SIZED FOR EVERY SLOT, once. Growing one inside the parallel sweep would be
+	// an allocation on a worker and, worse, a resize of a member array while
+	// another worker holds a reference into it.
 	const int32 CellCount = FieldResolution * FieldResolution;
-	if (ScratchDeltaIntensity.Num() != CellCount)
+
+	for (FChunkWork& Work : ChunkWork)
 	{
-		ScratchDeltaIntensity.SetNumZeroed(CellCount);
-		ScratchDeltaEnergy.SetNumZeroed(CellCount);
+		if (Work.DeltaIntensity.Num() != CellCount)
+		{
+			Work.DeltaIntensity.SetNumZeroed(CellCount);
+			Work.DeltaEnergy.SetNumZeroed(CellCount);
+		}
 	}
 }
 
 void UARPGSpreadSubsystem::TickField(float DeltaTime)
 {
 	CrossDeposits.Reset();
-	EnsureScratch();
+
+	// FLATTENED FIRST, because a TMap cannot be indexed and the sweep needs to be.
+	// Only the chunks with something alight: an inert chunk's step is a no-op, and
+	// handing one to a worker costs more than skipping it here.
+	Burning.Reset();
 
 	for (TPair<FIntPoint, FFieldChunk>& Pair : Chunks)
 	{
 		if (Pair.Value.Active.Num() > 0)
 		{
-			TickFieldChunk(Pair.Key, Pair.Value, DeltaTime);
+			Burning.Emplace(Pair.Key, &Pair.Value);
 		}
+	}
+
+	if (Burning.Num() > ChunkWork.Num())
+	{
+		ChunkWork.SetNum(Burning.Num());
+	}
+
+	// After the slots exist, and never from inside the sweep.
+	EnsureScratch();
+
+	// EMBARRASSINGLY PARALLEL, and it was already written that way without anyone
+	// intending it: a chunk step reads shared configuration, writes its own cells,
+	// and posts anything crossing a boundary to a queue for afterwards. The only
+	// two things it shared were the scratch list and that queue, and both are now
+	// per-slot.
+	//
+	// ForceSingleThread below a handful of chunks, because the dispatch costs more
+	// than the work when a single campfire is burning -- which is most of the time.
+	ParallelFor(Burning.Num(),
+		[this, DeltaTime](int32 Index)
+		{
+			ChunkWork[Index].Deposits.Reset();
+			TickFieldChunk(Burning[Index].Key, *Burning[Index].Value, DeltaTime,
+				ChunkWork[Index]);
+		},
+		/*bForceSingleThread=*/Burning.Num() < 4);
+
+	// GATHERED IN ORDER, not as they finished. Two chunks depositing into the same
+	// cell must land in the same sequence on every machine, or a listen server and
+	// its client disagree about where a fire spread -- and thread completion order
+	// is the least reproducible thing available.
+	for (int32 Index = 0; Index < Burning.Num(); ++Index)
+	{
+		CrossDeposits.Append(ChunkWork[Index].Deposits);
 	}
 
 	ApplyCrossDeposits();
@@ -768,7 +813,8 @@ void UARPGSpreadSubsystem::TickField(float DeltaTime)
 	}
 }
 
-void UARPGSpreadSubsystem::TickFieldChunk(FIntPoint Coord, FFieldChunk& Chunk, float DeltaTime)
+void UARPGSpreadSubsystem::TickFieldChunk(FIntPoint Coord, FFieldChunk& Chunk, float DeltaTime,
+	FChunkWork& Work)
 {
 	const int32 Resolution = FieldResolution;
 
@@ -780,9 +826,9 @@ void UARPGSpreadSubsystem::TickFieldChunk(FIntPoint Coord, FFieldChunk& Chunk, f
 	// appended to would visit this tick's newly lit cells as though they had
 	// been burning all along. Into a reused member buffer rather than a fresh
 	// TArray per chunk per tick.
-	ScratchActive.Reset(Chunk.Active.Num());
-	ScratchActive.Append(Chunk.Active);
-	const TArray<int32>& Active = ScratchActive;
+	Work.Active.Reset(Chunk.Active.Num());
+	Work.Active.Append(Chunk.Active);
+	const TArray<int32>& Active = Work.Active;
 
 	for (int32 MediumIndex = 0; MediumIndex < Media.Num(); ++MediumIndex)
 	{
@@ -815,8 +861,8 @@ void UARPGSpreadSubsystem::TickFieldChunk(FIntPoint Coord, FFieldChunk& Chunk, f
 		// touched cells rather than the size of the grid. This was two TMaps
 		// constructed and destroyed inside this loop -- so per chunk, per medium,
 		// per simulation tick.
-		TArray<float>& DeltaIntensity = ScratchDeltaIntensity;
-		TArray<float>& DeltaEnergy = ScratchDeltaEnergy;
+		TArray<float>& DeltaIntensity = Work.DeltaIntensity;
+		TArray<float>& DeltaEnergy = Work.DeltaEnergy;
 		ScratchTouchedIntensity.Reset();
 		ScratchTouchedEnergy.Reset();
 
@@ -982,7 +1028,7 @@ void UARPGSpreadSubsystem::TickFieldChunk(FIntPoint Coord, FFieldChunk& Chunk, f
 							Deposit.Medium = MediumIndex;
 							Deposit.Amount = Amount;
 							Deposit.Energy = Amount * Definition->TransferKeep;
-							CrossDeposits.Add(Deposit);
+							Work.Deposits.Add(Deposit);
 						}
 					}
 

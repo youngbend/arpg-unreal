@@ -28,6 +28,8 @@
 #include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
+#include "Serialization/MemoryReader.h"
+#include "Serialization/MemoryWriter.h"
 #include "Materials/Material.h"
 
 /**
@@ -846,6 +848,87 @@ bool FARPGFluidReservoirMeltTest::RunTest(const FString& Parameters)
 
 	TestEqual(TEXT("Melting it into the lake makes no puddle on the lake"),
 		Fluids->GetPools().Num(), 0);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFieldWireTest,
+	"ARPG.World.Fluid.Ice.AFieldSurvivesTheRoundTripAndShrinksOnTheWay",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGFieldWireTest::RunTest(const FString& Parameters)
+{
+	FARPGSolidField Sent;
+	Sent.BuildFrom(ARPGFluidGeometry::MakeCircle(FVector2D(400, -250), 500.0), 20.f, 80.f);
+	Sent.MeltBowl(FVector2D(500, -250), 120.f, 40.f);
+
+	const int32 Cells = Sent.CountX * Sent.CountY;
+	TestTrue(TEXT("Setup: a grid worth compressing"), Cells > 1000);
+
+	TArray<uint8> Bytes;
+	bool bOk = false;
+
+	{
+		FMemoryWriter Writer(Bytes);
+		Sent.NetSerialize(Writer, nullptr, bOk);
+	}
+
+	TestTrue(TEXT("It serialises"), bOk);
+
+	// RUN-LENGTH ENCODED, and the thing that makes a heightfield cheap to melt is
+	// the same thing that makes it compressible: most of a slab is at exactly one
+	// height. The uncompressed pair of planes is four bytes a cell.
+	const int32 Raw = Cells * 4;
+	TestTrue(TEXT("And is far smaller than the cells it describes"), Bytes.Num() < Raw / 4);
+
+	FARPGSolidField Received;
+	{
+		FMemoryReader Reader(Bytes);
+		Received.NetSerialize(Reader, nullptr, bOk);
+	}
+
+	TestTrue(TEXT("It deserialises"), bOk);
+
+	// EVERY CELL, not just the totals -- a codec that agreed on the sums while
+	// scrambling the grid would pass a laxer test and produce a floe with the
+	// right volume in the wrong shape.
+	TestEqual(TEXT("The grid comes back the same size"), Received.CountX, Sent.CountX);
+	TestEqual(TEXT("In both axes"), Received.CountY, Sent.CountY);
+
+	int32 Mismatches = 0;
+	for (int32 At = 0; At < Cells; ++At)
+	{
+		Mismatches += (Received.Top[At] != Sent.Top[At]) ? 1 : 0;
+		Mismatches += (Received.Bottom[At] != Sent.Bottom[At]) ? 1 : 0;
+	}
+
+	TestEqual(TEXT("And every cell in it survived"), Mismatches, 0);
+
+	// The totals are not sent -- they are pure functions of the cells -- so the
+	// receiver rebuilds them and cannot disagree with what arrived.
+	TestEqual(TEXT("The totals were rebuilt, not shipped"),
+		Received.SolidVolume(), Sent.SolidVolume(), 1.0);
+	TestEqual(TEXT("Including the cell count"),
+		Received.SolidCellCount(), Sent.SolidCellCount());
+
+	// AND THE FILM DID NOT GO. NotReplicated is what keeps it off the wire;
+	// Transient alone governs saving to disk and would have sent every cell of it.
+	Sent.Pour(FVector2D(400, -250), 200.f, 100000.0);
+	TestTrue(TEXT("Setup: the sender is wet"), Sent.HasWet());
+
+	Bytes.Reset();
+	{
+		FMemoryWriter Writer(Bytes);
+		Sent.NetSerialize(Writer, nullptr, bOk);
+	}
+
+	FARPGSolidField Dry;
+	{
+		FMemoryReader Reader(Bytes);
+		Dry.NetSerialize(Reader, nullptr, bOk);
+	}
+
+	TestFalse(TEXT("The film is presentation and stays home"), Dry.HasWet());
 
 	return true;
 }
