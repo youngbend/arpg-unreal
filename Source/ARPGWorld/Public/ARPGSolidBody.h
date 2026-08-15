@@ -299,6 +299,12 @@ protected:
 	FVector2D PendingContact = FVector2D::ZeroVector;
 	bool bHasPendingContact = false;
 
+	/** Seconds between occupant polls, and the countdown to the next. */
+	static constexpr float OccupantPollInterval = 0.25f;
+
+	UPROPERTY(Transient)
+	float OccupantPoll = 0.f;
+
 	/** Runoff waiting to be worth a deposit, and where it ran off. */
 	UPROPERTY(Transient)
 	double PendingRunoff = 0.0;

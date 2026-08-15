@@ -66,4 +66,24 @@ namespace ARPGGeometryProbe
 	 */
 	ARPGCOMBAT_API void FitVfxToTarget(AActor* Instance, AActor* Target,
 		EARPGStatusVfxFit FitMode, float ExtraScale, int32 Stacks);
+
+	/**
+	 * Where and how big a visual on this target should be, without touching
+	 * anything.
+	 *
+	 * FITTING IS A MEASUREMENT, and it was tangled up with attaching an actor.
+	 * A Niagara system attached straight to the target wants the same answer and
+	 * has no actor to give it to -- so the sum lives here and the two callers
+	 * differ only in what they apply it to.
+	 *
+	 * @return false when the target could not be measured; the outputs are then
+	 *         the authored size unadjusted, which is what an unmeasurable target
+	 *         should keep.
+	 */
+	ARPGCOMBAT_API bool SolveVfxFit(AActor* Target, EARPGStatusVfxFit FitMode,
+		float ExtraScale, FVector& OutRelativeLocation, double& OutScale, FBox& OutBounds);
+
+	/** The same fit, applied to a component already attached to the target. */
+	ARPGCOMBAT_API void FitVfxComponent(USceneComponent* Instance, AActor* Target,
+		EARPGStatusVfxFit FitMode, float ExtraScale);
 }

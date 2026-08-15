@@ -154,14 +154,15 @@ struct ARPGWORLD_API FARPGSolidField
 	 * Depth of fluid lying on each cell, in CENTIMETRES above that cell's top.
 	 *
 	 * FLOATS AND NOT REPLICATED, unlike Top and Bottom, and both halves of that
-	 * are deliberate. Not replicated because a film is presentation -- what the
+	 * are deliberate. Not replicated -- by NotReplicated, which is the specifier
+	 * that actually does it -- because a film is presentation -- what the
 	 * film DOES that matters is arrive at the bottom, and what arrives is a pool,
 	 * which replicates already. Floats because the integer millimetres that make
 	 * Top affordable on the wire would quantise a two-millimetre film into
 	 * nothing: every flow step would round its way to zero and the water would
 	 * evaporate on the way down.
 	 */
-	UPROPERTY(Transient)
+	UPROPERTY(NotReplicated, Transient)
 	TArray<float> Wet;
 
 	/** Fluid lying at a world XY, in cm. Zero everywhere dry. */
@@ -263,23 +264,30 @@ private:
 	/**
 	 * Totals, kept with the data rather than swept for on every read.
 	 *
-	 * Transient and rebuilt by Refresh: they are pure functions of the cells, so
-	 * sending them would be sending the same information twice and inviting the
-	 * two copies to disagree. A client rebuilds them when the field arrives.
+	 * NotReplicated AND Transient, and the first of those is the one that does the
+	 * work. Transient governs saving to DISK; a UPROPERTY inside a replicated
+	 * struct is in the network layout regardless, so marking these Transient alone
+	 * sent every one of them -- including the film, which is a float per cell and
+	 * doubled the heaviest payload in the system to say something the comment
+	 * above it claimed was never sent.
+	 *
+	 * They are pure functions of the cells, so sending them would be sending the
+	 * same information twice and inviting the two copies to disagree. A client
+	 * rebuilds them when the field arrives.
 	 */
-	UPROPERTY(Transient)
+	UPROPERTY(NotReplicated, Transient)
 	double CachedArea = 0.0;
 
-	UPROPERTY(Transient)
+	UPROPERTY(NotReplicated, Transient)
 	double CachedVolume = 0.0;
 
-	UPROPERTY(Transient)
+	UPROPERTY(NotReplicated, Transient)
 	FVector2D CachedCentroid = FVector2D::ZeroVector;
 
-	UPROPERTY(Transient)
+	UPROPERTY(NotReplicated, Transient)
 	int32 CachedCells = 0;
 
 	/** Total film volume, so HasWet is a read rather than a sweep. */
-	UPROPERTY(Transient)
+	UPROPERTY(NotReplicated, Transient)
 	double CachedWet = 0.0;
 };

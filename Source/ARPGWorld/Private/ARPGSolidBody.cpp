@@ -515,7 +515,17 @@ void AARPGSolidBody::Tick(float DeltaTime)
 	// flat number, without this knowing which it is on.
 	GroundHeight = FloatsOn->GetSurfaceLevelAt(Centre);
 
-	OccupantCount = CountOccupants();
+	// FOUR TIMES A SECOND, not sixty. This is a physics overlap, and it is the last
+	// per-frame scan left in the system after the culling pass -- while what it
+	// feeds is a draft that settles over about a third of a second, so a load
+	// arriving up to 250ms late is inside the lag the settle already has.
+	OccupantPoll -= DeltaTime;
+
+	if (OccupantPoll <= 0.f)
+	{
+		OccupantPoll = OccupantPollInterval;
+		OccupantCount = CountOccupants();
+	}
 
 	// TOO HEAVY TO FLOAT IS NOT A FAILURE. A slab denser than the fluid it formed
 	// out of sinks and comes to rest on the bed, which is one comparison on the
