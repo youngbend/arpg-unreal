@@ -8,15 +8,21 @@
 #include "ARPGPerceptionComponent.generated.h"
 
 class AActor;
-class UBlackboardComponent;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FARPGOnTargetAcquired, AActor*, Target);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FARPGOnTargetLost);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FARPGOnInvestigate, FVector, Location);
 
 /**
- * Finds what an NPC should be fighting and writes it to the blackboard. Port of
- * Godot's PerceptionComponent.
+ * Finds what an NPC should be fighting. Port of Godot's PerceptionComponent.
+ *
+ * IT PUBLISHES NOTHING AND IS READ INSTEAD. Under behaviour trees this wrote its
+ * findings into a UBlackboardComponent every scan, which meant perception knew
+ * the names of the keys a tree expected -- a contract enforced by nothing, where
+ * a typo on either side produced a node that silently did nothing. StateTree has
+ * no blackboard: FARPGStateTreeEvaluator_Perception reads these getters and
+ * exposes them as bound properties, so the compiler now checks what a string
+ * used to.
  *
  * WHY NOT UAIPerceptionComponent. The design's retention rule is that the sight
  * CONE gates acquisition but not retention -- an NPC mid-fight does not lose its
@@ -96,6 +102,20 @@ public:
 	UFUNCTION(BlueprintPure, Category = "ARPG|Perception")
 	FVector GetLastKnownLocation() const { return LastKnownLocation; }
 
+	/**
+	 * Where the last unattributed blow came from, for the investigate reaction.
+	 *
+	 * Deliberately NOT cleared when a target is acquired: an NPC that investigates,
+	 * finds someone, fights and loses them should go back to the place that
+	 * started it rather than to nowhere.
+	 */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Perception")
+	FVector GetInvestigateLocation() const { return InvestigateLocation; }
+
+	/** True once anything has been written to the investigate location. */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Perception")
+	bool HasInvestigateLocation() const { return bHasInvestigateLocation; }
+
 	/** Runs one scan immediately. Called by the tick, and directly by tests. */
 	UFUNCTION(BlueprintCallable, Category = "ARPG|Perception")
 	void Scan(float DeltaTime);
@@ -131,11 +151,6 @@ public:
 	bool CanHear(AActor* Candidate) const;
 
 private:
-	UBlackboardComponent* GetBlackboard() const;
-
-	/** Pushes the current target, alert flag and last-known position out. */
-	void WriteBlackboard();
-
 	bool HasLineOfSight(const AActor* Candidate) const;
 
 	/** Everything hostile and alive within the detection radius. */
@@ -156,7 +171,10 @@ private:
 	TObjectPtr<AActor> Target;
 
 	FVector LastKnownLocation = FVector::ZeroVector;
+	FVector InvestigateLocation = FVector::ZeroVector;
+
 	bool bAlerted = false;
+	bool bHasInvestigateLocation = false;
 
 	/** Counts down once the target stops being perceived. */
 	float MemoryTimer = 0.f;
