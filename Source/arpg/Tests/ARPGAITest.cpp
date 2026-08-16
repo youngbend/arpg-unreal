@@ -223,6 +223,46 @@ bool FARPGPerceptionHearingTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGNoiseAttackFloorTest,
+	"ARPG.AI.Noise.AttackingIsAFloorNotAReplacement",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGNoiseAttackFloorTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGAITestUtils;
+	FTestWorld Scope;
+
+	AARPGCombatDummy* Swinger = SpawnCharacter(Scope.World, TAG_Faction_Player, FVector::ZeroVector);
+
+	UARPGNoiseComponent* Noise = NewObject<UARPGNoiseComponent>(Swinger);
+	Noise->IdleRadius = 100.f;
+	Noise->AttackRadius = 900.f;
+	Noise->RegisterComponent();
+
+	// Standing still and not swinging.
+	TestEqual(TEXT("An idle character is only idle-loud"),
+		Noise->GetCurrentNoiseRadius(), 100.f);
+
+	// THE BUG THIS PINS. The attack floor used to be gated on the ACTOR tag
+	// "Attacking", which nothing in the project has ever set -- so a swinging
+	// character was exactly as loud as a standing one and the whole AttackRadius
+	// knob did nothing. State.Attacking is what the melee ability actually owns.
+	UAbilitySystemComponent* ASC = Swinger->GetAbilitySystemComponent();
+	ASC->AddLooseGameplayTag(TAG_State_Attacking, 1, EGameplayTagReplicationState::TagOnly);
+
+	TestEqual(TEXT("Swinging raises it to the attack radius"),
+		Noise->GetCurrentNoiseRadius(), 900.f);
+
+	// A FLOOR, not a replacement. Idle louder than the attack radius stays put --
+	// someone already making more noise than a swing does not get quieter by
+	// swinging.
+	Noise->IdleRadius = 2000.f;
+	TestEqual(TEXT("A louder source is not lowered to the attack radius"),
+		Noise->GetCurrentNoiseRadius(), 2000.f);
+
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGPerceptionMemoryTest,
 	"ARPG.AI.Perception.MemoryHoldsALostTarget",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

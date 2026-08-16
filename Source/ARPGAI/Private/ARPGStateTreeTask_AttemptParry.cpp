@@ -18,27 +18,6 @@ namespace
 	/** Below this, the hitbox is drifting rather than swinging. */
 	constexpr float MinClosingSpeed = 50.f;
 
-	/** The weapon hitbox of whatever this actor is swinging, if any. */
-	UARPGHitboxComponent* FindWeaponHitbox(const AActor* Actor)
-	{
-		if (!Actor)
-		{
-			return nullptr;
-		}
-
-		TArray<UARPGHitboxComponent*> Hitboxes;
-		Actor->GetComponents<UARPGHitboxComponent>(Hitboxes);
-
-		for (UARPGHitboxComponent* Hitbox : Hitboxes)
-		{
-			if (Hitbox->HitboxSource == EARPGHitboxSource::Weapon)
-			{
-				return Hitbox;
-			}
-		}
-		return nullptr;
-	}
-
 	/**
 	 * Seconds until the target's current montage reaches its Active section.
 	 *
@@ -194,7 +173,11 @@ EStateTreeRunStatus FARPGStateTreeTask_AttemptParry::Tick(FStateTreeExecutionCon
 	// --- Predicting ---------------------------------------------------------
 	bool bShouldTrigger = false;
 
-	const UARPGHitboxComponent* TargetHitbox = FindWeaponHitbox(Data.Target);
+	// bAllowFallback FALSE: this is asking about one specific hitbox, the weapon
+	// whose approach it is timing against. Falling back to a body hitbox would
+	// have the parry solve for the arrival of a foot.
+	const UARPGHitboxComponent* TargetHitbox = UARPGHitboxComponent::FindOnActor(
+		Data.Target, EARPGHitboxSource::Weapon, /*bAllowFallback=*/false);
 	if (TargetHitbox)
 	{
 		const float Distance =

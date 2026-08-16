@@ -1,10 +1,13 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ARPGAIController.h"
+#include "ARPGGameplayTags.h"
 #include "ARPGNPCComponent.h"
 #include "ARPGNPCDefinition.h"
 #include "ARPGNoiseComponent.h"
 #include "ARPGPerceptionComponent.h"
+#include "AbilitySystemComponent.h"
+#include "AbilitySystemGlobals.h"
 #include "Components/StateTreeAIComponent.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
@@ -41,7 +44,16 @@ float UARPGNoiseComponent::GetCurrentNoiseRadius() const
 
 	// A FLOOR, not a replacement: someone sprinting and swinging is at least as
 	// loud as sprinting. Taking the max is what keeps the two independent.
-	if (Owner->ActorHasTag(TEXT("Attacking")))
+	//
+	// THE GAMEPLAY TAG, not an actor tag. This read ActorHasTag("Attacking"),
+	// which nothing in the project has ever set -- so the attack floor was dead
+	// code and a swinging character was exactly as loud as a standing one. The
+	// melee ability owns State.Attacking for as long as it is active, which is
+	// the fact the port meant to consult all along.
+	const UAbilitySystemComponent* ASC =
+		UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(Owner);
+
+	if (ASC && ASC->HasMatchingGameplayTag(TAG_State_Attacking))
 	{
 		Radius = FMath::Max(Radius, AttackRadius);
 	}

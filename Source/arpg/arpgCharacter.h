@@ -17,6 +17,7 @@ class UARPGDamageTypeAsset;
 class UARPGComboComponent;
 class UARPGInventoryComponent;
 class UARPGLocomotionComponent;
+class UARPGNoiseComponent;
 class UARPGVitalRegenComponent;
 class UARPGHandVisualComponent;
 class UARPGMagicComponent;
@@ -266,6 +267,19 @@ protected:
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<UARPGInventoryComponent> InventoryComponent;
+
+	/**
+	 * How loud the player is, which is the ONLY thing that makes NPC hearing
+	 * work on them.
+	 *
+	 * UARPGPerceptionComponent::CanHear treats a candidate with no noise
+	 * component as silent by construction and falls back to sight alone -- so
+	 * without this the player could sprint through a dark room behind a guard and
+	 * be, correctly but uselessly, inaudible. A third of perception was inert on
+	 * the one actor it matters most for.
+	 */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UARPGNoiseComponent> NoiseComponent;
 
 	/** Toggles the sprint. */
 	void ToggleSprint();
