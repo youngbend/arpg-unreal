@@ -785,7 +785,7 @@ Two small extensions this phase required:
   `discharge_executed` signal and the magic tracker's XP source.
 
 **Phase 8 — code complete.** Perception, StateTree nodes and the reactive parry.
-9 new cases; 72 pass in total.
+10 new cases; 73 pass in total.
 
 **The tree MACHINERY was deleted, not ported.** Godot hand-rolled BTNode,
 BTComposite, BTDecorator and their per-node blackboard state because Godot has no
@@ -848,6 +848,37 @@ buys nothing else. Noise likewise stays a polled radius; `UAISense_Hearing` is
 event-based, which is right for a thrown rock and wrong for "sprinting is loud
 for as long as you sprint". Adding the event sense later for discrete sounds
 would not conflict with it.
+
+**The test NPC.** `AARPGNPCCharacter` is the body every enemy uses — one class,
+no subclass per type, because what a goblin IS lives in its definition asset.
+`Tools/generate_test_npc.py` emits the sword weapon definition (which never
+existed: the player reaches the attack tree through a hard-coded soft path, and
+an NPC cannot, because the AI's range condition reads `Reach` off a definition),
+the archetype, and a Manny Blueprint. Setup and the hand-authoring recipe for the
+tree are in `Docs/TEST_NPC_SETUP.md`.
+
+**Two dead code paths the fixture exposed**, both the same kind of mistake — a
+port that transcribed Godot's shape onto a UE fact that was never established:
+
+1. **The noise component's attack floor was gated on `ActorHasTag("Attacking")`,
+   which nothing in the project has ever set.** A swinging character was exactly
+   as loud as a standing one and `AttackRadius` did nothing at all. The melee
+   ability owns `State.Attacking` for as long as it is active, which is the fact
+   this meant to consult; `Noise.AttackingIsAFloorNotAReplacement` pins it.
+2. **The player had no noise component**, so `CanHear` treated them as silent by
+   construction and fell back to sight alone — a third of perception inert on the
+   one actor it matters most for. Its thresholds are anchored to the locomotion
+   tiers rather than left at the component defaults, whose 500 happens to equal
+   the player's *run* speed: merely running would have counted as sprinting, and
+   the loudest tier would have been the normal one.
+
+**The StateTree asset itself is not generated.** Its states hold
+`FStateTreeEditorNode`/`FInstancedStruct` and its data flow is property-path
+bindings, none of which the other `Tools/` scripts have to touch — whether the
+Python bridge reaches them is a property of the engine build.
+`Tools/generate_npc_statetree.py` probes and reports rather than guessing, and
+refuses to write a partial asset: one that opens to an empty editor looks like it
+worked, which is the outcome worth avoiding.
 
 **The reactive parry is where phase 4 pays off.** Its fallback timing reads the
 target's ACTIVE MONTAGE -- time left in Windup, at the montage's own play rate.
