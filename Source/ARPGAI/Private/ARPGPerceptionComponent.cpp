@@ -2,18 +2,14 @@
 
 #include "ARPGPerceptionComponent.h"
 #include "ARPGAI.h"
-#include "ARPGBlackboardKeys.h"
 #include "ARPGCombatLibrary.h"
 #include "ARPGGameplayTags.h"
 #include "ARPGNoiseComponent.h"
 #include "ARPGThreatRegistry.h"
-#include "AIController.h"
 #include "AbilitySystemComponent.h"
 #include "AbilitySystemGlobals.h"
-#include "BehaviorTree/BlackboardComponent.h"
 #include "Engine/OverlapResult.h"
 #include "Engine/World.h"
-#include "GameFramework/Pawn.h"
 
 UARPGPerceptionComponent::UARPGPerceptionComponent()
 {
@@ -70,45 +66,6 @@ bool UARPGPerceptionComponent::IsAlive(const AActor* Candidate)
 	// No ability system means nothing that can die -- a destructible, a scripted
 	// prop. Those are legitimate targets, so absence is not death.
 	return !ASC || !ASC->HasMatchingGameplayTag(TAG_State_Dead);
-}
-
-UBlackboardComponent* UARPGPerceptionComponent::GetBlackboard() const
-{
-	// The component may live on the controller or the pawn; both need to reach
-	// the same blackboard, and only the controller has one.
-	if (AAIController* Controller = Cast<AAIController>(GetOwner()))
-	{
-		return Controller->GetBlackboardComponent();
-	}
-
-	if (const APawn* Pawn = Cast<APawn>(GetOwner()))
-	{
-		if (AAIController* Controller = Cast<AAIController>(Pawn->GetController()))
-		{
-			return Controller->GetBlackboardComponent();
-		}
-	}
-
-	return nullptr;
-}
-
-void UARPGPerceptionComponent::WriteBlackboard()
-{
-	UBlackboardComponent* Blackboard = GetBlackboard();
-	if (!Blackboard)
-	{
-		return;
-	}
-
-	Blackboard->SetValueAsObject(ARPGBlackboard::TargetActor, Target);
-	Blackboard->SetValueAsBool(ARPGBlackboard::IsAlerted, bAlerted);
-
-	// Only written when there IS one. Clearing it on target loss would erase the
-	// one piece of information the NPC still needs -- where to go and look.
-	if (!LastKnownLocation.IsNearlyZero())
-	{
-		Blackboard->SetValueAsVector(ARPGBlackboard::LastKnownLocation, LastKnownLocation);
-	}
 }
 
 bool UARPGPerceptionComponent::HasLineOfSight(const AActor* Candidate) const
@@ -251,7 +208,6 @@ void UARPGPerceptionComponent::Scan(float DeltaTime)
 			bAlerted = false;
 			MemoryTimer = 0.f;
 			OnTargetLost.Broadcast();
-			WriteBlackboard();
 			return;
 		}
 
@@ -262,16 +218,14 @@ void UARPGPerceptionComponent::Scan(float DeltaTime)
 		{
 			MemoryTimer = MemoryDuration;
 			LastKnownLocation = Target->GetActorLocation();
-			WriteBlackboard();
 			return;
 		}
 
 		MemoryTimer -= DeltaTime;
 		if (MemoryTimer > 0.f)
 		{
-			// Held, but not re-snapshotted: the NPC remembers where it last
-			// actually saw them, which is the whole point of a memory window.
-			WriteBlackboard();
+			// Held, and deliberately NOT re-snapshotted: the NPC remembers where it
+			// last actually saw them, which is the whole point of a memory window.
 			return;
 		}
 
@@ -279,12 +233,11 @@ void UARPGPerceptionComponent::Scan(float DeltaTime)
 		Target = nullptr;
 
 		// Cleared with the target. This was set true on the first acquisition and
-		// never reset, so IsAlerted was a one-way latch and any behaviour-tree
-		// branch on it stayed taken for the rest of the NPC's life.
+		// never reset, so IsAlerted was a one-way latch and any tree branch on it
+		// stayed taken for the rest of the NPC's life.
 		bAlerted = false;
 
 		OnTargetLost.Broadcast();
-		WriteBlackboard();
 		return;
 	}
 
@@ -338,8 +291,6 @@ void UARPGPerceptionComponent::SetTarget(AActor* NewTarget)
 	{
 		OnTargetLost.Broadcast();
 	}
-
-	WriteBlackboard();
 }
 
 void UARPGPerceptionComponent::NotifyDamagedBy(AActor* Attacker, FVector FromLocation)
@@ -375,11 +326,8 @@ void UARPGPerceptionComponent::NotifyDamagedBy(AActor* Attacker, FVector FromLoc
 	// genuinely engages if its own senses then find something -- which is what
 	// makes a stealth approach survivable after a first hit.
 	LastKnownLocation = FromLocation;
-
-	if (UBlackboardComponent* Blackboard = GetBlackboard())
-	{
-		Blackboard->SetValueAsVector(ARPGBlackboard::InvestigateLocation, FromLocation);
-	}
+	InvestigateLocation = FromLocation;
+	bHasInvestigateLocation = true;
 
 	OnInvestigate.Broadcast(FromLocation);
 

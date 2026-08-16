@@ -58,7 +58,7 @@ conceptually with the port. Keep `Content/Characters/Mannequins` and `Content/In
 | Fire spread | 2,700 | Direct port, new fuel-map + mask backing |
 | Persistent fluids (pools, solids, geometry, surface) | 3,500 | Largest rewrite — geometry backend changes |
 | Progression / weapon / armor / inventory | 2,500 | Direct port |
-| NPC AI (behavior trees, perception) | 2,000 | Retarget onto UE Behavior Trees |
+| NPC AI (behavior trees, perception) | 2,000 | Retarget onto UE StateTree |
 | `animation.gd` | 3,900 (GDScript) | Rewritten; most of it disappears |
 
 ---
@@ -78,7 +78,7 @@ ARPGWorld    reaction / conduction / spread / fluid-surface subsystems
    ↑
 arpg         game mode, player state, player controller, character, HUD   (also depends on ARPGAI)
 
-ARPGAI       perception, BT tasks, NPC definitions          (depends on ARPGCore + ARPGCombat)
+ARPGAI       perception, StateTree nodes, NPC definitions    (depends on ARPGCore + ARPGCombat)
 ```
 
 **One deliberate departure from the Godot layout.** In Godot, `ElementalReactionSystem` and
@@ -396,7 +396,7 @@ GA_HitStop            GA_Death
 | `swing_pitch.gd` spine chain | Control Rig post-process node |
 | `impact_twitch.gd` spring bones | `AnimDynamics` node or Physical Animation blend |
 | BT `Resource` tree | `UBehaviorTree` + `UBTTask_*` / `UBTDecorator_*` |
-| `Blackboard` | `UBlackboardComponent` |
+| `Blackboard` | StateTree property bindings — see §9 phase 8 |
 | Godot global shader uniform (`env_spread_mask`) | `UMaterialParameterCollection` + render target |
 | `res://` load | `TSoftObjectPtr` + `UAssetManager` |
 
@@ -528,7 +528,7 @@ manifests being dropped).
 | Damage types | 7 | Converter or hand-author |
 | Progression curves | 7 | Hand-author |
 | Magic elements + combinations | ~10 | Hand-author |
-| Behavior trees | 5 | Hand-author as UE BT assets |
+| Behavior trees | 5 | Hand-author as UE StateTree assets |
 | Status effects | 4 | Hand-author as GE assets — the GAS mapping isn't mechanical |
 
 Everything except the moveset and consumables is small enough that hand-authoring beats writing a
@@ -784,16 +784,70 @@ Two small extensions this phase required:
 - `UARPGMagicComponent` raises `OnDischargeExecuted`, the port of Godot's
   `discharge_executed` signal and the magic tracker's XP source.
 
-**Phase 8 — code complete.** Perception, behaviour-tree nodes and the reactive
-parry. 8 new cases; 71 pass in total.
+**Phase 8 — code complete.** Perception, StateTree nodes and the reactive parry.
+9 new cases; 72 pass in total.
 
 **The tree MACHINERY was deleted, not ported.** Godot hand-rolled BTNode,
 BTComposite, BTDecorator and their per-node blackboard state because Godot has no
-behaviour trees; UE has all of it, with an editor and a gameplay debugger. What
-ported is only the domain: five decorators and tasks that read this game's combat
-components, plus the parry. UE's node memory replaces the blackboard-keyed
+behaviour trees; UE has all of it, with an editor and a debugger. What ported is
+only the domain: five conditions and tasks that read this game's combat
+components, plus the parry. StateTree instance data replaces the blackboard-keyed
 per-node state trick exactly -- one tree asset shared by every goblin, with each
 instance keeping its own timers.
+
+**Corrected 2026-08-16: StateTree, not Behavior Trees.** Phase 8 originally
+landed on `UBTTaskNode`/`UBTDecorator`. UE 5.8 makes StateTree the default logic
+framework and the AI docs are written around it; Behavior Trees still ship and
+still work, but Epic has stopped iterating on them. The swap was made while there
+were **zero authored tree assets**, which is the only cheap moment it will ever
+have — the cost was six node classes, not six node classes plus five trees.
+
+Three things came out of it beyond conformance:
+
+1. **A real bug, fixed by the framework rather than by hand.** None of the four
+   BT decorators set `FlowAbortMode` or asked to be ticked, so they gated branch
+   ENTRY and never re-evaluated — "health below 30%" could not interrupt an
+   attack already swinging, despite the header claiming exactly that. A StateTree
+   transition re-tests its conditions while its state is active, so interruption
+   is the default rather than something each node opts into and can forget. The
+   bug was invisible because no tree asset existed to exhibit it.
+2. **The blackboard is gone, and with it a whole class of typo.** Perception used
+   to write five `FName` keys that every node looked up by name;
+   `ARPGBlackboardKeys.h` centralised the strings, which is not the same as
+   checking them. `FARPGStateTreeEvaluator_Perception` exposes the same five as
+   bound properties instead, resolved by the editor at author time and by the
+   compiler in C++.
+3. **`PredictTimeToContact` moved to `UARPGAILibrary`.** A StateTree node is a
+   USTRUCT and cannot carry a `UFUNCTION`, so the parry arithmetic moved off the
+   node — where it always belonged, given the test only ever wanted the maths.
+
+**Two hand-rolled behaviours were handed back to the engine at the same time.**
+
+- **Facing** was interpolating a yaw and calling `SetActorRotation` every tick,
+  writing straight past the movement component: it fought
+  `bOrientRotationToMovement`, bypassed rotation replication, and stomped root
+  motion out of attack montages. It now sets `AAIController` focus and lets
+  `RotationRate` do the turning, which is the path the engine's own
+  `UBTTask_RotateToFaceBBEntry` takes. Turn speed moved onto the definition as
+  `TurnRateDegrees`, by the same argument that puts `LeashRange` there.
+- **Backing off** was `AddMovementInput` along the away-vector with **no
+  navigation query at all** — it drove NPCs into walls and off ledges, and hit
+  the very corner case its own comment claimed a direction rather than a
+  destination avoided. It now samples reachable navmesh points and moves to the
+  one furthest from the target via `MoveToLocation`, so a cornered NPC finds the
+  sideways escape. An `EQS` hook is present but deliberately not wired: the query
+  asset can only be authored in the editor, and shipping an unreachable code path
+  would be worse than an honest gap.
+
+**Perception stayed hand-rolled, and that rejection was re-checked against 5.8.**
+`UAISenseConfig_Sight` offers `LoseSightRadius` — hysteresis on RADIUS only.
+`PeripheralVisionAngleDegrees` is applied on every update with no lose-angle
+counterpart, so "the cone gates acquisition but not retention" is still not
+expressible on top of it. `MaxAge` is a fair analogue of `MemoryDuration` and
+buys nothing else. Noise likewise stays a polled radius; `UAISense_Hearing` is
+event-based, which is right for a thrown rock and wrong for "sprinting is loud
+for as long as you sprint". Adding the event sense later for discrete sounds
+would not conflict with it.
 
 **The reactive parry is where phase 4 pays off.** Its fallback timing reads the
 target's ACTIVE MONTAGE -- time left in Windup, at the montage's own play rate.
@@ -1947,7 +2001,7 @@ that introduces them is far cheaper than auditing later.
 | 5 ✅ | Magic: elements, loadout pages, combination table, complexity gating, all discharge types, imbue, elemental dodge, cloak | fire+water→steam; cast, imbue, dodge all work; charge drain is server-clamped |
 | 6 ✅ | `ElementalVolume`, reaction subsystem, conduction subsystem | Fireball into water jet produces steam at the right contact point; lightning floods a puddle chain and hurts a *second player* standing in it |
 | 7 ✅ | Progression trackers, inventory, quick slots, consumables | Mastery multiplies discharge damage; quick-slot potions work |
-| 8 ✅ | NPC AI — perception, behavior trees, reactive parry | NPC engages, parries a telegraphed swing, flees and heals |
+| 8 ✅ | NPC AI — perception, StateTree, reactive parry | NPC engages, parries a telegraphed swing, flees and heals |
 | 9 ✅ | Fire spread subsystem (+ landscape fuel bake, MPC mask, replicated mask) | Grass fire crosses a clearing, burns a second player, rain quenches it |
 | 10 ✅ | Fluid surface subsystem (+ Clipper2 backend, dynamic meshing, replicated outlines) | Water pools; ice shard freezes a floe both players can stand on |
 | 11 ✅ | Modal input scheme, speed tiers and sprint stamina, input buffering, element-consumption routing, auto-sheathe | Controller in hand: LT+face readies, RT+face discharges, a swing imbues, steel sheathes itself |
@@ -1973,7 +2027,7 @@ can slip without blocking anything else.
    changes visibly lag.
 5. **Meta attributes** must be consumed *and reset to zero* in `PostGameplayEffectExecute`.
    Reading them anywhere else gives stale values.
-6. **Instanced UObject trees** (`ComboAttackNode`, BT nodes) need `UCLASS(EditInlineNew,
+6. **Instanced UObject trees** (`ComboAttackNode`) need `UCLASS(EditInlineNew,
    DefaultToInstanced)` **and** `UPROPERTY(Instanced)`. Miss either and the editor gives you an
    unassignable null.
 7. **Decide early whether GEs are C++ classes or Blueprint assets.** Recommendation: C++ base

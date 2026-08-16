@@ -4,7 +4,7 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
-#include "ARPGBTTask_AttemptParry.h"
+#include "ARPGAILibrary.h"
 #include "ARPGCombatDummy.h"
 #include "ARPGGameplayTags.h"
 #include "ARPGNoiseComponent.h"
@@ -22,11 +22,11 @@
  * the parry's contact prediction. Both are pure enough to pin exactly, and both
  * are where the interesting decisions live.
  *
- * WHAT IS NOT. Tree TOPOLOGY -- which branch runs when -- is authored in a
- * behaviour tree asset and belongs to content rather than code; and the tasks
- * and decorators need a running behaviour tree component with an AI controller
- * and a blackboard asset, which is a level's worth of fixture for logic that is
- * a handful of lines over components already tested elsewhere.
+ * WHAT IS NOT. Tree TOPOLOGY -- which state runs when -- is authored in a
+ * StateTree asset and belongs to content rather than code; and the tasks and
+ * conditions need a running UStateTreeAIComponent with an AI controller and a
+ * compiled tree, which is a level's worth of fixture for logic that is a handful
+ * of lines over components already tested elsewhere.
  */
 namespace ARPGAITestUtils
 {
@@ -288,6 +288,48 @@ bool FARPGPerceptionInvestigateTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("But records where the blow came from"),
 		Perception->GetLastKnownLocation(), Sniper->GetActorLocation());
 
+	// The investigate location is its own channel, read by the StateTree
+	// evaluator and bound from there. It used to be written straight into a
+	// blackboard key, which meant nothing could assert on it without staging a
+	// whole AI controller -- so this rule went untested until the migration.
+	TestTrue(TEXT("An investigation is flagged as having somewhere to go"),
+		Perception->HasInvestigateLocation());
+	TestEqual(TEXT("And that somewhere is where the blow came from"),
+		Perception->GetInvestigateLocation(), Sniper->GetActorLocation());
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGPerceptionInvestigateOutlivesTargetTest,
+	"ARPG.AI.Perception.InvestigationOutlivesTheTargetItFound",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGPerceptionInvestigateOutlivesTargetTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGAITestUtils;
+	FTestWorld Scope;
+
+	AARPGCombatDummy* Guard = SpawnCharacter(Scope.World, TAG_Faction_Enemy, FVector::ZeroVector);
+	AARPGCombatDummy* Sniper = SpawnCharacter(Scope.World, TAG_Faction_Player, FVector(5000, 0, 0));
+
+	UARPGPerceptionComponent* Perception = AddPerception(Guard);
+	Perception->DetectionRange = 500.f;
+	Perception->DamageReaction = EARPGDamageReaction::Investigate;
+
+	const FVector Origin = Sniper->GetActorLocation();
+	Perception->NotifyDamagedBy(Sniper, Origin);
+
+	// Acquiring and then losing a target must not erase the place that started
+	// it: an NPC that investigates, finds someone, fights and loses them should
+	// go back to where the first blow came from rather than to nowhere.
+	Perception->SetTarget(Sniper);
+	Perception->SetTarget(nullptr);
+
+	TestTrue(TEXT("The investigation survives a target coming and going"),
+		Perception->HasInvestigateLocation());
+	TestEqual(TEXT("Still pointing at the original blow"),
+		Perception->GetInvestigateLocation(), Origin);
+
 	return true;
 }
 
@@ -338,28 +380,28 @@ bool FARPGParryPredictionTest::RunTest(const FString& Parameters)
 
 	// Constant speed: 260cm of gap at 200cm/s is one second.
 	TestEqual(TEXT("Constant closing speed is a linear solve"),
-		UARPGBTTask_AttemptParry::PredictTimeToContact(320.f, 200.f, 0.f, ContactRadius),
+		UARPGAILibrary::PredictTimeToContact(320.f, 200.f, 0.f, ContactRadius),
 		1.3f, 0.01f);
 
 	// Already inside contact radius: now, not a negative time.
 	TestEqual(TEXT("Already touching predicts immediate contact"),
-		UARPGBTTask_AttemptParry::PredictTimeToContact(40.f, 200.f, 0.f, ContactRadius), 0.f);
+		UARPGAILibrary::PredictTimeToContact(40.f, 200.f, 0.f, ContactRadius), 0.f);
 
 	// Not closing at all: no prediction rather than an infinite or negative one.
 	TestTrue(TEXT("A stationary hitbox yields no prediction"),
-		UARPGBTTask_AttemptParry::PredictTimeToContact(320.f, 0.f, 0.f, ContactRadius) < 0.f);
+		UARPGAILibrary::PredictTimeToContact(320.f, 0.f, 0.f, ContactRadius) < 0.f);
 
 	// Accelerating: 260cm at 100cm/s plus 200cm/s^2 solves to ~1.06s, sooner
 	// than the 2.6s a constant-speed read would give. This is the whole reason
 	// the acceleration term exists -- a real swing ramps hard in its last frames.
 	const float Accelerating =
-		UARPGBTTask_AttemptParry::PredictTimeToContact(320.f, 100.f, 200.f, ContactRadius);
+		UARPGAILibrary::PredictTimeToContact(320.f, 100.f, 200.f, ContactRadius);
 	TestTrue(TEXT("Acceleration brings contact forward"), Accelerating > 0.f && Accelerating < 1.3f);
 
 	// Decelerating hard enough never to arrive: no prediction, so the NPC does
 	// not raise its guard at a swing that is petering out.
 	TestTrue(TEXT("An approach that never arrives yields no prediction"),
-		UARPGBTTask_AttemptParry::PredictTimeToContact(320.f, 50.f, -100.f, ContactRadius) < 0.f);
+		UARPGAILibrary::PredictTimeToContact(320.f, 50.f, -100.f, ContactRadius) < 0.f);
 
 	return true;
 }
