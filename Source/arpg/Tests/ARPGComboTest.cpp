@@ -389,6 +389,12 @@ bool FARPGComboAugmentOverrideTest::RunTest(const FString& Parameters)
 	FRig Rig = BuildRig(World);
 	UAbilitySystemComponent* ASC = Rig.Actor->GetAbilitySystemComponent();
 
+	// The rig's only heavy content hangs off the light opener, and this test needs
+	// a heavy OPENER as well: an override beat is a leaf, so the press after it
+	// resolves from root rather than from a follow-up.
+	UARPGComboAttackNode* H1 = MakeNode(Rig.Tree, MakeAttack(TEXT("H1")));
+	Rig.Tree->RootHeavy = H1;
+
 	UARPGAttackDefinition* Slash = MakeAttack(TEXT("MagnetismFloatingSlash"));
 
 	FGameplayAbilitySpec Spec(UARPGTestSwingAugment::StaticClass(), 1);
