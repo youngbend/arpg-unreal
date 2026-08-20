@@ -8,6 +8,7 @@
 #include "ARPGCombatDummy.h"
 #include "ARPGComboComponent.h"
 #include "ARPGGameplayTags.h"
+#include "ARPGSwingAugment.h"
 #include "ARPGTestSwingAugment.h"
 #include "ARPGVitalSet.h"
 #include "ARPGWeaponAttackTree.h"
@@ -444,8 +445,30 @@ bool FARPGComboAugmentOverrideTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("a button the element has no move for falls back to the tree"),
 		Rig.Combo->GetCurrentNode(), Rig.Tree->GetRoot(EARPGAttackInput::Heavy));
 
-	// And with the override cleared, light returns to the chain from root.
+	// CONTINUATION OR NOT, which is the only thing bCanBeElemental has an opinion
+	// about. The melee ability asks this before consulting the flag at all: a beat
+	// the element SUPPLIED is the element manifesting, not something applied to a
+	// weapon's move, so the weapon has no say in it. Refusing it there would swing
+	// a magnetic slash with no lightning on it and nothing delivered, leaving the
+	// imbue readied and the move free to repeat.
+	TestFalse(TEXT("the move the element supplied is not a continuation"),
+		ARPGSwingAugments::IsContinuationSwing(Augment, Slash));
+
+	// Everything else is, INCLUDING the buttons this element has no move for --
+	// which is why partial authoring cannot be used to smuggle a coating onto an
+	// attack that refuses them.
+	TestTrue(TEXT("the weapon's own attacks are continuations"),
+		ARPGSwingAugments::IsContinuationSwing(Augment, Rig.L2->Attack.Get()));
+	TestTrue(TEXT("and an unauthored button's attack is one too"),
+		ARPGSwingAugments::IsContinuationSwing(Augment, H1->Attack.Get()));
+
+	// Derived from GetSwingAttackOverride rather than recorded separately, so
+	// dropping the override makes the same attack a continuation again.
 	Augment->OverrideLight = nullptr;
+	TestTrue(TEXT("a move no longer offered is back to being a continuation"),
+		ARPGSwingAugments::IsContinuationSwing(Augment, Slash));
+
+	// And with the override cleared, light returns to the chain from root.
 	Rig.Combo->NotifyAttackFinished();
 	Rig.Combo->ReceiveInput(EARPGAttackInput::Light);
 	TestEqual(TEXT("once spent, the tree has the beat back"),

@@ -725,7 +725,16 @@ the coating measures itself against the already-widened swing.
 
 Two things it needed that did not exist. `bCanBeElemental` had been sitting
 unread on every attack definition since phase 4 and is now the attack's veto over
-coatings. And `KnockbackForce`/`KnockbackDirection` had been riding the effect
+coatings -- **asked only of a continuation**, which is the only thing it has an
+opinion about. A shield bash has nothing for an element to coat, whichever
+element is readied. But a specific attack was never applied to the weapon's
+move, it replaced it, so there is no weapon choice left for the flag to speak
+for; refusing it there would swing a magnetic slash with no lightning on it and,
+since nothing was delivered, leave the imbue readied and the move free to
+repeat. `ARPGSwingAugments::IsContinuationSwing` draws the line, read back out
+of `GetSwingAttackOverride` rather than recorded a second time -- so an element
+authored with only a light still continues on heavy, and a heavy that refuses
+coatings still refuses it. And `KnockbackForce`/`KnockbackDirection` had been riding the effect
 context since phase 1 with no receiver at all — every hit in the game was
 computing a shove that never happened. `UARPGCombatLibrary::ApplyKnockback` is
 that receiver, deliberately minimal: server-side `LaunchCharacter`, no curve, no

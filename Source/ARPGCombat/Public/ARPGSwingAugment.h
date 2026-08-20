@@ -109,4 +109,34 @@ namespace ARPGSwingAugments
 	 * castable to the native interface pointer and would be silently skipped.
 	 */
 	ARPGCOMBAT_API UObject* FindActive(UAbilitySystemComponent* ASC);
+
+	/**
+	 * Whether this augment would be CONTINUING the attack rather than being it --
+	 * riding a beat the weapon's own moveset chose, instead of having supplied
+	 * that beat through GetSwingAttackOverride.
+	 *
+	 * WHAT IT DECIDES IS WHETHER bCanBeElemental IS ASKED AT ALL. That flag is the
+	 * WEAPON'S refusal of a coating -- a shield bash or a grab has nothing for an
+	 * element to coat, whichever element happens to be readied -- so it is a
+	 * question about continuations and only about continuations. A specific
+	 * attack is not applied TO the weapon's move; it replaces it. There is no
+	 * weapon choice left for the flag to speak for, and honouring it anyway would
+	 * run the element's own attack with none of the element in it: no elemental
+	 * hitbox, no second damage type, and nothing delivered -- which would also
+	 * leave the imbue unspent, and the move free to throw again.
+	 *
+	 * TRUE IS THE ORDINARY ANSWER, and the fallback one. An augment with no move
+	 * for this button is continuing, and so is an augment with no moves at all --
+	 * which is every element but the specific-attack ones. Partial authoring lands
+	 * here too: an element that defines only a light still continues on heavy, and
+	 * a heavy that refuses coatings still refuses it.
+	 *
+	 * DERIVED RATHER THAN ASKED OF THE AUGMENT, and free rather than part of the
+	 * interface, because it is not a new fact -- it is GetSwingAttackOverride read
+	 * backwards. An implementer made to restate it could restate it wrongly, and a
+	 * Blueprint one would have to remember to at all. The cost is three virtual
+	 * calls on the frame a hitbox arms.
+	 */
+	ARPGCOMBAT_API bool IsContinuationSwing(UObject* Augment,
+		const UARPGAttackDefinition* Attack);
 }

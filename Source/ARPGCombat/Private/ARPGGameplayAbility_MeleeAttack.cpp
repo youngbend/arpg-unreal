@@ -395,15 +395,27 @@ void UARPGGameplayAbility_MeleeAttack::ArmHitbox(int32 WindowIndex, bool bLandin
 	// Anything riding this swing -- an imbued coating, in practice -- comes up
 	// first, so its own sweep starts from the same frame as the weapon's rather
 	// than a tick behind it. The augment reads this hitbox but does not own it.
-	//
-	// bCanBeElemental is the attack's veto, and it is checked here because here
-	// is the only place a coating can be refused: a shield bash or a grab has
-	// nothing for an element to coat, and the flag has been sitting on the
-	// definition unread since it was authored. The imbue survives to the next
-	// swing rather than being spent on one that would not carry it.
-	if (CurrentAttack->bCanBeElemental)
+	if (UObject* Augment = ARPGSwingAugments::FindActive(GetAbilitySystemComponentFromActorInfo()))
 	{
-		if (UObject* Augment = ARPGSwingAugments::FindActive(GetAbilitySystemComponentFromActorInfo()))
+		// bCanBeElemental is the WEAPON'S refusal of a coating -- a shield bash or
+		// a grab has nothing for an element to coat -- and it is checked here
+		// because here is the only place a coating can be refused. The flag had
+		// been sitting on the definition unread since it was authored.
+		//
+		// IT IS ONLY EVER ASKED OF A CONTINUATION, because that is the only thing
+		// it has an opinion about: an element riding a beat this weapon chose. A
+		// specific attack was not applied to the weapon's move, it REPLACED it, so
+		// there is no weapon choice left for the flag to speak for -- and refusing
+		// it anyway would swing a magnetic slash with no lightning, no reach and no
+		// second damage type, then leave the imbue readied because nothing was ever
+		// delivered, making the move free to throw again.
+		//
+		// A refused continuation is not a refused imbue: it survives to the next
+		// swing rather than being spent on a beat that would not carry it.
+		const bool bRefused = ARPGSwingAugments::IsContinuationSwing(Augment, CurrentAttack)
+			&& !CurrentAttack->bCanBeElemental;
+
+		if (!bRefused)
 		{
 			IARPGSwingAugment::Execute_ArmSwingAugment(Augment, Hitbox, MotionValue);
 		}
