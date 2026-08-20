@@ -78,7 +78,24 @@ def load_or_warn(path, what):
 
 
 def faction_tag(name):
-    return unreal.GameplayTagLibrary.request_gameplay_tag(unreal.Name(name))
+    """FGameplayTag has no Python constructor; its text form is the way in.
+
+    The same idiom as generate_element_assets.py, and for the same reason:
+    GameplayTagLibrary exposes no request_gameplay_tag. Its Blueprint-facing
+    surface is containers and queries, and building one tag from a name is not
+    part of it -- so the struct is default-constructed and imported into.
+    """
+    result = unreal.GameplayTag()
+    result.import_text(name)
+
+    # A tag missing from the registry imports as a well-formed struct that
+    # matches NOTHING, which would leave this NPC hostile to nobody and hostile
+    # in no way that any faction check could see. Reported here, where the name
+    # is still in hand to put in the message.
+    if not unreal.GameplayTagLibrary.is_gameplay_tag_valid(result):
+        log("'{}' is not a registered gameplay tag".format(name))
+
+    return result
 
 
 def make_weapon():
@@ -117,9 +134,12 @@ def make_definition(weapon):
     if weapon:
         definition.set_editor_property("weapon", weapon)
 
+    # THE LOADED OBJECT, not a SoftObjectPath. Mesh is a TSoftObjectPtr, and the
+    # bridge builds the soft pointer from a UObject -- handed the FSoftObjectPath
+    # that seems like the closer match it refuses the conversion outright.
     mesh = load_or_warn(MANNY_MESH, "Manny mesh")
     if mesh:
-        definition.set_editor_property("mesh", unreal.SoftObjectPath(MANNY_MESH))
+        definition.set_editor_property("mesh", mesh)
 
     definition.set_editor_property("max_health", 200.0)
     definition.set_editor_property("max_poise", 60.0)
