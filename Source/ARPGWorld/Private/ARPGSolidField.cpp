@@ -718,7 +718,16 @@ double FARPGSolidField::MeltUniform(float FromTop, float FromBottom)
 
 		if (NewTop <= NewBottom)
 		{
-			Top[Cell] = NewBottom;
+			// THE TWO FACES MET, so the cell is GONE -- both parked at the height
+			// they met at, which is what a hole is. Moving only the top left the
+			// cell a sliver exactly as thick as this step's melt from below, so a
+			// slab thinning uniformly never actually melted through: it shed the
+			// same sliver every tick forever, reported having removed it every
+			// time, and no floe left in the sun ever went away.
+			const int16 Met = FMath::Clamp(NewBottom, Bottom[Cell], Top[Cell]);
+
+			Top[Cell] = Met;
+			Bottom[Cell] = Met;
 			Removed += Before * CellArea;
 			continue;
 		}

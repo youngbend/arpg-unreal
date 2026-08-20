@@ -5,6 +5,7 @@
 #include "ARPGElementalVolumeComponent.h"
 #include "ARPGFluidGeometry.h"
 #include "ARPGFluidSurfaceSubsystem.h"
+#include "ARPGHitboxComponent.h"
 #include "ARPGMagicElement.h"
 #include "ARPGSolidBody.h"
 #include "ARPGSolidDefinition.h"
@@ -211,8 +212,8 @@ void AARPGLaunchSlabProjectile::InitializeFromContext(const FARPGDischargeContex
 	// SIZED FROM THE ROCK THAT WENT. A thrown wall is a bigger boulder, not a
 	// different spell -- so the volume decides the radius and the cap decides how
 	// much bigger a spell is allowed to get for free.
-	const double Volume = Slab->Field.SolidVolume();
-	const double AsSphere = FMath::Pow(FMath::Max(1.0, Volume) * 3.0 / (4.0 * PI), 1.0 / 3.0);
+	const double SolidVolume = Slab->Field.SolidVolume();
+	const double AsSphere = FMath::Pow(FMath::Max(1.0, SolidVolume) * 3.0 / (4.0 * PI), 1.0 / 3.0);
 
 	const float Conjured = FMath::Max(1.f, Radius);
 	const float Grown = FMath::Clamp(static_cast<float>(AsSphere),
@@ -269,7 +270,7 @@ void AARPGLaunchSlabProjectile::InitializeFromContext(const FARPGDischargeContex
 
 	UE_LOG(LogARPGWorld, Verbose,
 		TEXT("Threw a slab of '%s' (%.0f cubic cm) instead of conjuring a boulder."),
-		*InContext.PrimaryElement->ElementTag.ToString(), Volume);
+		*InContext.PrimaryElement->ElementTag.ToString(), SolidVolume);
 }
 
 void AARPGLaunchSlabProjectile::Tick(float DeltaTime)
@@ -291,7 +292,11 @@ AARPGSolidBody* AARPGLaunchSlabProjectile::PutDown(const FVector& Where)
 {
 	UWorld* World = GetWorld();
 
-	if (bPutDown || !bLaunchedFromSlab || !bLandsAsSlab || !CarriedDefinition
+	// WHAT IT IS CARRYING is the whole precondition -- a definition and cells to
+	// put back. A conjured boulder has neither and still puts nothing down, which
+	// is what the launch flag was standing in for; asking the carried slab itself
+	// says the same thing without a second copy of the fact that can disagree.
+	if (bPutDown || !bLandsAsSlab || !CarriedDefinition || Carried.SolidCellCount() == 0
 		|| !World || World->GetNetMode() == NM_Client)
 	{
 		return nullptr;
@@ -300,7 +305,7 @@ AARPGSolidBody* AARPGLaunchSlabProjectile::PutDown(const FVector& Where)
 	bPutDown = true;
 
 	UARPGFluidSurfaceSubsystem* Fluids = World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
-	if (!Fluids || Carried.SolidCellCount() == 0)
+	if (!Fluids)
 	{
 		return nullptr;
 	}

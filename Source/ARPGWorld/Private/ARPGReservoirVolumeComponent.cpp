@@ -189,8 +189,18 @@ bool UARPGWaterBodyVolumeComponent::ContainsPoint(FVector WorldPoint, float Belo
 	const EWaterBodyQueryFlags Flags =
 		EWaterBodyQueryFlags::ComputeLocation | EWaterBodyQueryFlags::ComputeImmersionDepth;
 
-	const FWaterBodyQueryResult Result =
-		WaterBody->QueryWaterInfoClosestToWorldLocation(WorldPoint, Flags);
+	// The query FAILS while the body is still registering, which is not the same
+	// as "the point is dry" -- fall back to the authored box rather than call a
+	// river empty for the first frames of the level.
+	const TValueOrError<FWaterBodyQueryResult, EWaterBodyQueryError> Query =
+		WaterBody->TryQueryWaterInfoClosestToWorldLocation(WorldPoint, Flags);
+
+	if (!Query.HasValue())
+	{
+		return Super::ContainsPoint(WorldPoint, BelowReach);
+	}
+
+	const FWaterBodyQueryResult& Result = Query.GetValue();
 
 	if (Result.IsInExclusionVolume())
 	{
@@ -211,13 +221,19 @@ FVector2D UARPGWaterBodyVolumeComponent::GetSurfaceFlowAt(const FVector2D& At) c
 
 	const FVector Probe(At.X, At.Y, GetSurfaceHeightAt(FVector(At.X, At.Y, 0.f)));
 
-	const FWaterBodyQueryResult Result = WaterBody->QueryWaterInfoClosestToWorldLocation(
-		Probe, EWaterBodyQueryFlags::ComputeLocation | EWaterBodyQueryFlags::ComputeVelocity);
+	const TValueOrError<FWaterBodyQueryResult, EWaterBodyQueryError> Query =
+		WaterBody->TryQueryWaterInfoClosestToWorldLocation(Probe,
+			EWaterBodyQueryFlags::ComputeLocation | EWaterBodyQueryFlags::ComputeVelocity);
+
+	if (!Query.HasValue())
+	{
+		return FVector2D::ZeroVector;
+	}
 
 	// FLAT. Whatever vertical component the flow has is the plugin describing a
 	// waterfall, and a floe riding one is not a thing this models -- it drifts on
 	// the surface or it does not drift.
-	const FVector Velocity = Result.GetVelocity();
+	const FVector Velocity = Query.GetValue().GetVelocity();
 	return FVector2D(Velocity.X, Velocity.Y);
 }
 
@@ -230,8 +246,14 @@ float UARPGWaterBodyVolumeComponent::GetSurfaceHeightAt(FVector WorldPoint) cons
 
 	// Per-location, which is the entire point: a river runs downhill and one
 	// authored offset cannot say so.
-	const FWaterBodyQueryResult Result = WaterBody->QueryWaterInfoClosestToWorldLocation(
-		WorldPoint, EWaterBodyQueryFlags::ComputeLocation);
+	const TValueOrError<FWaterBodyQueryResult, EWaterBodyQueryError> Query =
+		WaterBody->TryQueryWaterInfoClosestToWorldLocation(
+			WorldPoint, EWaterBodyQueryFlags::ComputeLocation);
 
-	return static_cast<float>(Result.GetWaterSurfaceLocation().Z);
+	if (!Query.HasValue())
+	{
+		return Super::GetSurfaceHeightAt(WorldPoint);
+	}
+
+	return static_cast<float>(Query.GetValue().GetWaterSurfaceLocation().Z);
 }

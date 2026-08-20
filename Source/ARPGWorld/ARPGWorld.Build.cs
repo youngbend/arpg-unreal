@@ -30,7 +30,12 @@ public class ARPGWorld : ModuleRules
 			"GameplayTags",
 			"ARPGCore",
 			"ARPGCombat",
-			"ARPGMagic"
+			"ARPGMagic",
+
+			// PUBLIC because EPhysicalSurface is the key of the spread
+			// definition's SurfaceFuel map, and that map is a UPROPERTY on a
+			// public header -- anything that includes it needs the enum.
+			"PhysicsCore"
 		});
 
 		// PRIVATE. Nothing above this module has any business seeing the geometry

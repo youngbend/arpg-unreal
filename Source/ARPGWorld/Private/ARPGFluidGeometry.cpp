@@ -1,7 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ARPGFluidGeometry.h"
-#include "CompGeom/ConstrainedDelaunay2.h"
+#include "ConstrainedDelaunay2.h"
 #include "Components/DynamicMeshComponent.h"
 #include "Curve/GeneralPolygon2.h"
 #include "Curve/PolygonIntersectionUtils.h"

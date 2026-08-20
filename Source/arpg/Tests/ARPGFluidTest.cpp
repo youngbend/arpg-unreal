@@ -119,17 +119,22 @@ namespace ARPGFluidTestUtils
 	}
 
 	/**
-	 * The Solidify row that makes ice and water freeze, and nothing else.
+	 * The Solidify row that makes an agent and water set, and nothing else.
 	 *
 	 * NOTHING IN C++ KNOWS THAT WATER FREEZES -- this row, Surface-scoped, is the
 	 * whole declaration, and it is the same table every other relationship uses.
+	 *
+	 * THE AGENT'S TAG IS A PARAMETER because not everything that sets a surface is
+	 * ice. An earth crust is agent and product both, and a row still naming ice
+	 * matches nothing the test then goes on to do.
 	 */
-	UARPGMagicCombinationTable* MakeFreezeTable(UARPGMagicElement* Ice)
+	UARPGMagicCombinationTable* MakeFreezeTable(UARPGMagicElement* Ice,
+		FGameplayTag AgentTag = TAG_Element_Ice)
 	{
 		UARPGMagicCombinationTable* Table = NewObject<UARPGMagicCombinationTable>();
 
 		UARPGMagicCombinationEntry* Entry = NewObject<UARPGMagicCombinationEntry>(Table);
-		Entry->RequiredElements.AddTag(TAG_Element_Ice);
+		Entry->RequiredElements.AddTag(AgentTag);
 		Entry->RequiredElements.AddTag(TAG_Element_Water);
 		Entry->Result = Ice;
 		Entry->Mode = EARPGReactionMode::Solidify;
@@ -979,38 +984,60 @@ bool FARPGFilmFlowTest::RunTest(const FString& Parameters)
 	const FVector2D High(-200, 0);
 	const FVector2D Low(200, 0);
 
-	const double Poured = 400000.0;   // 0.4 cubic metres, at the high end
-	const double Fell = Field.Pour(High, 60.f, Poured);
+	// POURED IN THE MIDDLE, and shallow. The centre of a ramped disc is the same
+	// distance from every rim, so which way the film goes is the ramp's answer and
+	// nothing else's. Depth matters as much as placement: a pour deep enough to
+	// swamp the gradient spreads in every direction on its own head and leaves by
+	// whichever rim happens to be nearest, which measures the pour and not the
+	// ramp. Two centimetres against a centimetre of fall per cell is a film the
+	// slope can steer.
+	const double Poured = 20000.0;
+	const double Fell = Field.Pour(FVector2D::ZeroVector, 60.f, Poured);
 
 	TestEqual(TEXT("All of it landed on the slab"), Fell, 0.0, 1.0);
 	TestEqual(TEXT("And is on it"), Field.WetVolume(), Poured, Poured * 0.01);
-	TestTrue(TEXT("Where it was poured"), Field.WetAt(High) > 0.f);
+	TestTrue(TEXT("Where it was poured"), Field.WetAt(FVector2D::ZeroVector) > 0.f);
 	TestEqual(TEXT("And nowhere else yet"), Field.WetAt(Low), 0.f);
 
 	// DOWNHILL. Each step moves a fraction of the height difference toward lower
-	// neighbours, so the water walks along the ramp rather than teleporting.
+	// neighbours, so the water walks along the ramp rather than teleporting -- and
+	// it has to be WATCHED walking, because by the end of the run it has walked
+	// off the far edge and the slab is dry again.
 	double Shed = 0.0;
-	FVector2D ShedAt = FVector2D::ZeroVector;
+	FVector2D ShedMoment = FVector2D::ZeroVector;
 
-	for (int32 Step = 0; Step < 20; ++Step)
+	bool bReachedLow = false;
+	bool bReachedHigh = false;
+
+	// A FILM FLOOR NEAR ZERO, deliberately. Drying the last of a film in place is
+	// what stops a slab dribbling forever and has its own test; here it would
+	// simply absorb the water this one is trying to follow.
+	for (int32 Step = 0; Step < 200; ++Step)
 	{
 		FVector2D StepAt;
-		Shed += Field.FlowStep(1.f / 20.f, /*Rate=*/6.f, /*YieldSlope=*/0.f,
-			/*MinimumFilm=*/0.05f, StepAt);
+		const double Left = Field.FlowStep(1.f / 20.f, /*Rate=*/6.f, /*YieldSlope=*/0.f,
+			/*MinimumFilm=*/0.005f, StepAt);
 
-		if (Shed > 0.0)
+		if (Left > 0.0)
 		{
-			ShedAt = StepAt;
+			Shed += Left;
+			ShedMoment += StepAt * Left;
 		}
+
+		bReachedLow = bReachedLow || Field.WetAt(Low) > 0.f;
+		bReachedHigh = bReachedHigh || Field.WetAt(High) > 0.f;
 	}
 
-	TestTrue(TEXT("A second later it has reached the low end"), Field.WetAt(Low) > 0.f);
+	TestTrue(TEXT("It reached the low end"), bReachedLow);
+	TestFalse(TEXT("And never the high one"), bReachedHigh);
 
 	// AND OFF THE RIM. The edge of the grid, and any hole, is a cliff rather than
 	// a neighbour: there is nothing over there to hold water at any height, so
 	// the film pours off instead of pooling against it.
 	TestTrue(TEXT("And some has run off the slab entirely"), Shed > 0.0);
-	TestTrue(TEXT("On the downhill side"), ShedAt.X > 0.f);
+
+	// Weighted by how much left where, rather than wherever the last drip went.
+	TestTrue(TEXT("On the downhill side"), (ShedMoment / Shed).X > 0.0);
 
 	// NOTHING IS INVENTED AND NOTHING VANISHES. What is on the slab plus what ran
 	// off is what was poured, give or take the floor that dries the last film.
@@ -1477,11 +1504,14 @@ bool FARPGObsidianCrustTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("And worth no energy to a spell"),
 		Crust->GetSurfaceEnergyDensity(), 0.f);
 
-	// So a fireball does nothing to it. OnElementalReaction bails on a zero
-	// density before it converts anything, which is cheap as well as absolute.
+	// So a fireball does nothing to it. Asked THROUGH THE VOLUME, which is the
+	// path a reaction actually takes: OnElementalReaction bails on a zero density
+	// before it converts anything into ground, which is cheap as well as
+	// absolute. Calling ConsumeSurfaceArea directly would walk straight past the
+	// guard being asserted and melt a bowl out of permanent rock.
 	const double Before = Crust->GetArea();
 	Crust->NoteContactAt(FVector2D::ZeroVector);
-	Crust->ConsumeSurfaceArea(Before * 0.5);
+	Crust->Volume->Consume(500.f, nullptr);
 
 	TestEqual(TEXT("Nothing takes a bite out of it"), Crust->GetArea(), Before, 1.0);
 
@@ -1714,8 +1744,8 @@ bool FARPGSlabFrameTest::RunTest(const FString& Parameters)
 	const FVector2D Probe(137.f, -84.f);
 	const FVector2D RoundTrip = Bar->ToField(Bar->ToWorld(Probe));
 
-	TestEqual(TEXT("World and field round-trip"), RoundTrip.X, Probe.X, 0.01f);
-	TestEqual(TEXT("In both axes"), RoundTrip.Y, Probe.Y, 0.01f);
+	TestEqual(TEXT("World and field round-trip"), RoundTrip.X, Probe.X, 0.01);
+	TestEqual(TEXT("In both axes"), RoundTrip.Y, Probe.Y, 0.01);
 
 	// AND MOVING IS THE FRAME TOO. Drift used to translate the field; it now moves
 	// the origin, which is cheaper and leaves the cached centroid alone.
@@ -1730,7 +1760,7 @@ bool FARPGSlabFrameTest::RunTest(const FString& Parameters)
 
 	// What the world thinks the slab's centre is follows the frame.
 	TestEqual(TEXT("Its world centre moved with it"),
-		Bar->GetWorldCentre().X, CentroidBefore.X + 1000.f, 1.f);
+		Bar->GetWorldCentre().X, CentroidBefore.X + 1000.0, 1.0);
 
 	// And the reach query the launch spell uses reads the same frame.
 	TestEqual(TEXT("A point inside it is no distance away"),
@@ -1763,7 +1793,7 @@ bool FARPGSlabRiseTest::RunTest(const FString& Parameters)
 	// appear. Draft already means "how far under its resting height this is
 	// sitting", so a spell that raises a slab sets it and the rise IS the number
 	// coming back to zero -- no second concept, no animation track.
-	const float Resting = Slab->GetActorLocation().Z;
+	const double Resting = Slab->GetActorLocation().Z;
 
 	Slab->BeginBuried(EarthDefinition->Thickness);
 	TestEqual(TEXT("It starts buried"), Slab->Draft, EarthDefinition->Thickness, 0.01f);
@@ -1771,7 +1801,7 @@ bool FARPGSlabRiseTest::RunTest(const FString& Parameters)
 	// AND IS ACTUALLY DOWN THERE. Recording the depth without moving the slab
 	// would leave it standing in full view until the first tick dropped it -- a
 	// wall that appears, sinks, then rises, which is worse than not animating.
-	const float Buried = Slab->GetActorLocation().Z;
+	const double Buried = Slab->GetActorLocation().Z;
 	TestTrue(TEXT("And is below where it will end up"), Buried < Resting);
 
 	for (int32 Tick = 0; Tick < 120 && Slab->Draft > 0.f; ++Tick)
@@ -1787,12 +1817,12 @@ bool FARPGSlabRiseTest::RunTest(const FString& Parameters)
 		Slab->GetActorLocation().Z > Buried);
 
 	TestEqual(TEXT("Back at the height it was built for"),
-		Slab->GetActorLocation().Z, Resting, 0.01f);
+		Slab->GetActorLocation().Z, Resting, 0.01);
 
 	// And having arrived, it stays: nothing moves a rooted slab again.
 	Slab->Tick(1.f);
 	TestEqual(TEXT("Then it never moves again"),
-		Slab->GetActorLocation().Z, Resting, 0.01f);
+		Slab->GetActorLocation().Z, Resting, 0.01);
 
 	return true;
 }
@@ -1850,7 +1880,20 @@ bool FARPGRunoffFallsTest::RunTest(const FString& Parameters)
 
 	// And the last of it still arrives: the flush on drying is what stops the
 	// remainder being lost because it was under the batch.
-	for (int32 Step = 0; Step < 600; ++Step)
+	//
+	// RUN UNTIL IT IS DRY rather than for a fixed count. Five metres of tower at a
+	// sixtieth of a second is a lot of ticks for very little simulated time, and
+	// that the film finishes at all is its own test -- this one is about what is
+	// left holding water when it does.
+	for (int32 Step = 0; Step < 3000 && Tower->GetFilmVolume() > 0.0; ++Step)
+	{
+		Tower->Tick(1.f / 60.f);
+	}
+
+	TestFalse(TEXT("The tower dries"), Tower->GetFilmVolume() > 0.0);
+
+	// Then long enough for the batch that drying flushed to finish falling.
+	for (int32 Step = 0; Step < 180; ++Step)
 	{
 		Tower->Tick(1.f / 60.f);
 	}
@@ -1928,8 +1971,8 @@ bool FARPGThrownSlabTest::RunTest(const FString& Parameters)
 	// moving. Resampling a grid through a translation would be paying to lose
 	// detail for nothing.
 	TestEqual(TEXT("At the place it came to rest"),
-		Landed->GetWorldCentre().X, 2000.f, 5.f);
-	TestEqual(TEXT("In both axes"), Landed->GetWorldCentre().Y, 500.f, 5.f);
+		Landed->GetWorldCentre().X, 2000.0, 5.0);
+	TestEqual(TEXT("In both axes"), Landed->GetWorldCentre().Y, 500.0, 5.0);
 	TestTrue(TEXT("And standable there"), Landed->IsStandableAt(FVector(2000, 500, 0)));
 
 	// PUT DOWN ONCE. A projectile ends by hitting something or by expiring and
@@ -2297,8 +2340,11 @@ bool FARPGFluidFloatTest::RunTest(const FString& Parameters)
 
 	// A BIGGER SLAB OF THE SAME ICE RIDES THE SAME DEPTH, because the area
 	// cancels. Falls out of the equation rather than being arranged.
+	// RE-SEEDED, not re-outlined. A slab's shape is its cells, and SetRing writes
+	// the base class's polygon -- which a solid draws nothing from.
 	const double Before = Floe->GetArea();
-	Floe->SetRing(ARPGFluidGeometry::MakeCircle(FVector2D::ZeroVector, 300.0));
+	Floe->Setup(IceDefinition, ARPGFluidGeometry::MakeCircle(FVector2D::ZeroVector, 300.0),
+		Floe->GroundHeight);
 	TestTrue(TEXT("Setup: it did get bigger"), Floe->GetArea() > Before);
 
 	Floe->Tick(1.f);
@@ -2426,9 +2472,11 @@ bool FARPGFluidDriftTest::RunTest(const FString& Parameters)
 
 	TestFalse(TEXT("A floe with open water around it is not anchored"), Raft->bAnchored);
 
-	const double StartX = ARPGFluidGeometry::PolygonCentroid(Raft->GetRing()).X;
+	// THE FRAME, not a ring: a slab is its cells, and drifting moves the frame
+	// they are read through rather than the cells themselves.
+	const double StartX = Raft->GetWorldCentre().X;
 	Raft->Tick(1.f);
-	const double DriftedX = ARPGFluidGeometry::PolygonCentroid(Raft->GetRing()).X;
+	const double DriftedX = Raft->GetWorldCentre().X;
 
 	// One second at 1 m/s. Downstream, and by the water's own speed because
 	// DriftResponse is 1.
@@ -2455,13 +2503,13 @@ bool FARPGFluidDriftTest::RunTest(const FString& Parameters)
 
 	TestTrue(TEXT("A floe spanning the water is anchored by the shore"), Plug->bAnchored);
 
-	const double PlugX = ARPGFluidGeometry::PolygonCentroid(Plug->GetRing()).X;
+	const double PlugX = Plug->GetWorldCentre().X;
 	Plug->Tick(1.f);
 
 	TestEqual(TEXT("And the current cannot move it"),
-		ARPGFluidGeometry::PolygonCentroid(Plug->GetRing()).X, PlugX, 0.01);
+		Plug->GetWorldCentre().X, PlugX, 0.01);
 	TestEqual(TEXT("Nor does it report a velocity to carry anyone"),
-		Plug->GetSurfaceComponent()->GetComponentVelocity().X, 0.f);
+		Plug->GetSurfaceComponent()->GetComponentVelocity().X, 0.0);
 
 	// It still RIDES, though -- there is water under it, and being wedged is about
 	// going nowhere horizontally.
@@ -2554,10 +2602,10 @@ bool FARPGFluidHeavySolidTest::RunTest(const FString& Parameters)
 
 	Fluids->Definitions = { WaterDefinition };
 	Fluids->Solids = { Crust };
-	Fluids->CombinationTable = MakeFreezeTable(Earth);
+	Fluids->CombinationTable = MakeFreezeTable(Earth, TAG_Element_Earth);
 
 	AARPGFluidPool* Pool = Fluids->Deposit(FVector(0, 0, 0), 400.f, TAG_Element_Water);
-	const float Bed = Pool->GroundHeight;
+	const double Bed = Pool->GroundHeight;
 
 	UARPGElementalVolumeComponent* Agent = MakeShard(Scope.World, Earth, FVector(0, 0, 0), 200.f);
 	if (!Fluids->TrySolidify(Pool->Volume, Agent) || Fluids->GetSolids().Num() != 1)
@@ -2574,7 +2622,7 @@ bool FARPGFluidHeavySolidTest::RunTest(const FString& Parameters)
 	// It comes to rest ON THE BOTTOM rather than sitting awash at the surface,
 	// which is what clamping the draft to the thickness would have given.
 	TestEqual(TEXT("It settles onto the bed"),
-		Slab->GetActorLocation().Z, Bed, 1.f);
+		Slab->GetActorLocation().Z, Bed, 1.0);
 
 	// And nothing melts it. MeltRate and EnergyPerArea are the two independent
 	// questions -- does time take it, can a reaction take it -- and permanent rock
@@ -3160,7 +3208,7 @@ bool FARPGFluidReplicationTest::RunTest(const FString& Parameters)
 
 	TestTrue(TEXT("A body given only replicated state draws itself"),
 		Pool->GetSurfaceTriangleCount() > 0);
-	TestEqual(TEXT("At the height it was told"), Pool->GetActorLocation().Z, 250.f, 1.f);
+	TestEqual(TEXT("At the height it was told"), Pool->GetActorLocation().Z, 250.0, 1.0);
 	TestTrue(TEXT("And knows where it is"), Pool->ContainsPoint(FVector(400, 0, 250)));
 
 	return true;

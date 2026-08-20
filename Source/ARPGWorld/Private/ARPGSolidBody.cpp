@@ -784,7 +784,13 @@ void AARPGSolidBody::TickRunoff(float DeltaTime)
 	// FREE WHEN DRY, which is nearly always. HasWet is a cached total rather than
 	// a sweep, so a slab nobody has melted pays one comparison per tick and an
 	// earth wall pays that for the whole level.
-	if (!Definition || !Field.HasWet())
+	//
+	// UNLESS SOMETHING IS STILL IN THE AIR. The last of a film dries on the same
+	// tick it flushes, and that flush is usually still falling when it happens --
+	// so returning on HasWet alone stranded the final batch a couple of metres
+	// above the ground for the rest of the level. Pending runoff is zero whenever
+	// a slab is genuinely idle, so the fast path costs the same comparison.
+	if (!Definition || (!Field.HasWet() && PendingRunoff <= 0.0))
 	{
 		return;
 	}
@@ -878,6 +884,11 @@ void AARPGSolidBody::TickRunoff(float DeltaTime)
 
 	PendingRunoff = 0.0;
 	RunoffFall = 0.f;
+}
+
+bool AARPGSolidBody::ContainsPoint(FVector WorldPoint) const
+{
+	return Field.IsSolidAt(ToField(FVector2D(WorldPoint.X, WorldPoint.Y)));
 }
 
 bool AARPGSolidBody::IsStandableAt(FVector WorldPoint) const

@@ -115,7 +115,7 @@ public:
 	 * costs nothing. Everything that depends on the actual region asks this.
 	 */
 	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
-	bool ContainsPoint(FVector WorldPoint) const;
+	virtual bool ContainsPoint(FVector WorldPoint) const;
 
 	/** Height of the walkable or swimmable surface, including how far it is riding. */
 	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")

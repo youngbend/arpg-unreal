@@ -12,23 +12,6 @@
 #include "ARPGWorldSettings.h"
 #include "Engine/World.h"
 
-namespace
-{
-	/**
-	 * True where this machine owns the simulation.
-	 *
-	 * A world subsystem ticks and receives calls on clients as well as the
-	 * server, and none of the solvers were gated: each client ran its own copy
-	 * of world state that nothing replicates, and applied gameplay effects from
-	 * it. A world with no net driver -- an automation fixture -- counts as
-	 * authoritative, because there is nobody else to be.
-	 */
-	bool WorldHasAuthority(const UWorld* World)
-	{
-		return !World || World->GetNetMode() != NM_Client;
-	}
-}
-
 void UARPGElementalReactionSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
@@ -53,6 +36,18 @@ void UARPGElementalReactionSubsystem::Deinitialize()
 bool UARPGElementalReactionSubsystem::DoesSupportWorldType(const EWorldType::Type WorldType) const
 {
 	return WorldType == EWorldType::Game || WorldType == EWorldType::PIE;
+}
+
+bool UARPGElementalReactionSubsystem::HasAuthority() const
+{
+	const UWorld* World = GetWorld();
+
+	// A world subsystem ticks and receives calls on clients as well as the
+	// server, and none of the solvers were gated: each client ran its own copy
+	// of world state that nothing replicates, and applied gameplay effects from
+	// it. A world with no net driver -- an automation fixture -- counts as
+	// authoritative, because there is nobody else to be.
+	return !World || World->GetNetMode() != NM_Client;
 }
 
 void UARPGElementalReactionSubsystem::HandleVolumesMet(UARPGElementalVolumeComponent* A,
@@ -80,7 +75,7 @@ void UARPGElementalReactionSubsystem::Resolve(UARPGElementalVolumeComponent* A,
 	// Server only. A reaction spends both volumes' energy, spawns a product and
 	// deals damage -- a client resolving its own copy would double-count every
 	// collision it also receives from the server.
-	if (!WorldHasAuthority(GetWorld()))
+	if (!HasAuthority())
 	{
 		return;
 	}

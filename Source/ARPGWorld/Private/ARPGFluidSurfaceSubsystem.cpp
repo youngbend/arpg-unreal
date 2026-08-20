@@ -549,7 +549,7 @@ bool UARPGFluidSurfaceSubsystem::TrySolidify(UARPGElementalVolumeComponent* A,
 	// WHAT IT RIDES. A floe is not an independent object: it asks this for the
 	// waterline under it, for the current carrying it, and for where the water
 	// stops. Set before Setup, which is what first places it.
-	Solid->FloatsOn = Surface->_getUObject();
+	Solid->FloatsOn = Cast<UObject>(Surface);
 
 	Solid->Setup(SolidDefinition, SolidifiedRing, SurfaceHeight);
 
@@ -566,7 +566,7 @@ bool UARPGFluidSurfaceSubsystem::TrySolidify(UARPGElementalVolumeComponent* A,
 	{
 		// Only this subsystem's own bodies are its to retire. Anything else that
 		// reports itself used up owns its own lifetime.
-		RetireBody(Cast<AARPGSurfaceBody>(Surface->_getUObject()));
+		RetireBody(Cast<AARPGSurfaceBody>(Surface));
 	}
 
 	// Spent freezing it.
@@ -791,10 +791,7 @@ void UARPGFluidSurfaceSubsystem::GatherViewers()
 	// else that asks the same question.
 	if (const USignificanceManager* Significance = USignificanceManager::Get(World))
 	{
-		TArray<FTransform> Viewpoints;
-		Significance->GetViewpoints(Viewpoints);
-
-		for (const FTransform& Viewpoint : Viewpoints)
+		for (const FTransform& Viewpoint : Significance->GetViewpoints())
 		{
 			ViewerLocations.Add(Viewpoint.GetLocation());
 		}

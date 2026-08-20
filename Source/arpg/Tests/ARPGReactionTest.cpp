@@ -16,6 +16,7 @@
 #include "Components/SphereComponent.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
+#include "GameFramework/WorldSettings.h"
 #include "GameFramework/Actor.h"
 
 #include <initializer_list>
@@ -47,6 +48,18 @@ namespace ARPGReactionTestUtils
 			Context.SetCurrentWorld(World);
 			World->InitializeActorsForPlay(FURL());
 			World->BeginPlay();
+
+			// AND ACTUALLY BEGUN. UWorld::BeginPlay routes BeginPlay through the
+			// game mode, and a world built by hand has none -- so it returns having
+			// started nothing, and every actor spawned afterwards is skipped too
+			// because the world never reports having begun play. Anything whose
+			// state is set up in BeginPlay -- a spell arming its reaction volume, a
+			// fuel component filling itself from FuelSeconds -- was silently left
+			// at its defaults. This is what a game mode's StartPlay does.
+			if (AWorldSettings* Settings = World->GetWorldSettings())
+			{
+				Settings->NotifyBeginPlay();
+			}
 		}
 
 		~FTestWorld()
@@ -214,8 +227,8 @@ bool FARPGReactionCastSpellTest::RunTest(const FString& Parameters)
 
 	AARPGDischargeEffect* Fireball = CastSpell(Rig.Fire, 40.f, 100.f, FVector(0, 0, 0));
 
-	TestNotNull(TEXT("A cast spell has a collider to meet things with"), Fireball->Collider);
-	TestNotNull(TEXT("And a volume saying what it is made of"), Fireball->Volume);
+	TestNotNull(TEXT("A cast spell has a collider to meet things with"), Fireball->Collider.Get());
+	TestNotNull(TEXT("And a volume saying what it is made of"), Fireball->Volume.Get());
 	TestSamePtr(TEXT("Made of the element that was cast"),
 		Fireball->Volume->Element.Get(), Rig.Fire);
 

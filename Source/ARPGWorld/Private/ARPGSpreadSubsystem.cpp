@@ -947,13 +947,15 @@ void UARPGSpreadSubsystem::TickFieldChunk(FIntPoint Coord, FFieldChunk& Chunk, f
 		// Deltas accumulate across the whole pass, so every sender contributes
 		// to a cell before it decides whether it caught -- order-independent.
 		//
-		// Flat arrays indexed by cell, reused across chunks and media, with a
+		// Flat arrays indexed by cell, reused across media and ticks, with a
 		// list of the cells actually written so the reset costs the number of
 		// touched cells rather than the size of the grid. This was two TMaps
 		// constructed and destroyed inside this loop -- so per chunk, per medium,
 		// per simulation tick.
 		TArray<float>& DeltaIntensity = Work.DeltaIntensity;
 		TArray<float>& DeltaEnergy = Work.DeltaEnergy;
+		TArray<int32>& ScratchTouchedIntensity = Work.TouchedIntensity;
+		TArray<int32>& ScratchTouchedEnergy = Work.TouchedEnergy;
 		ScratchTouchedIntensity.Reset();
 		ScratchTouchedEnergy.Reset();
 

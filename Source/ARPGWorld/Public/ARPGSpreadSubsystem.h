@@ -328,6 +328,19 @@ private:
 		 */
 		TArray<float> DeltaIntensity;
 		TArray<float> DeltaEnergy;
+
+		/**
+		 * Which cells of the pair above were actually written.
+		 *
+		 * PER SLOT FOR THE SAME REASON, and easy to miss because they are only
+		 * bookkeeping: they exist so clearing the deltas costs the number of
+		 * touched cells rather than the size of the grid, which means they are
+		 * appended to from inside the sweep exactly as often as the deltas are.
+		 * Shared, two chunks running at once would each reset and grow the same
+		 * array while the other walked it.
+		 */
+		TArray<int32> TouchedIntensity;
+		TArray<int32> TouchedEnergy;
 	};
 
 	/**
@@ -421,18 +434,7 @@ private:
 	/** The chunks with anything alight, flattened so the sweep can index them. */
 	TArray<TPair<FIntPoint, FFieldChunk*>> Burning;
 
-	/**
-	 * Scratch reused by every chunk, every medium, every tick.
-	 *
-	 * These used to be two TMaps and an array constructed inside the per-medium
-	 * loop, so a modest fire allocated and freed several heap blocks per chunk
-	 * per medium at 10Hz. Indexed by cell, sized once to the grid, and cleared by
-	 * walking only the cells actually touched -- which is why the touch lists
-	 * exist rather than a Memset over the whole grid.
-	 */
-	TArray<int32> ScratchTouchedIntensity;
-	TArray<int32> ScratchTouchedEnergy;
-	/** Sizes the scratch buffers to the current grid, once. */
+	/** Sizes the per-slot scratch buffers to the current grid, once. */
 	void EnsureScratch();
 
 	/**

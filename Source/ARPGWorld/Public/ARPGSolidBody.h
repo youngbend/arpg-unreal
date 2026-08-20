@@ -239,6 +239,20 @@ public:
 	/** Thins the whole slab, and reports when there is too little left to be one. */
 	virtual bool ConsumeSurfaceArea(double Area) override;
 
+	/**
+	 * Is there slab at this point?
+	 *
+	 * THE FIELD, NOT THE RING. A slab's shape is its cells: Setup seeds them from
+	 * an outline and everything afterwards -- a melt, a refreeze, a hole through
+	 * it -- happens to the cells, with no polygon kept in step. The base class
+	 * answers this from Ring, which for a slab is empty, so every point on every
+	 * slab read as outside and FindSolidAt never found one.
+	 *
+	 * Not the same question as IsStandableAt, which also asks whether the
+	 * definition means the slab to be walked on at all.
+	 */
+	virtual bool ContainsPoint(FVector WorldPoint) const override;
+
 	virtual double GetArea() const override;
 
 	/** Nothing takes it with time, so nothing should take it for room either. */

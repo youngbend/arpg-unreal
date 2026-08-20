@@ -104,6 +104,9 @@ public:
 	UARPGMagicElement* GetLastProduct() const { return LastProduct; }
 
 private:
+	/** True where this machine owns the simulation. */
+	bool HasAuthority() const;
+
 	void HandleVolumesMet(UARPGElementalVolumeComponent* A, UARPGElementalVolumeComponent* B);
 
 	/**

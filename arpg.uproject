@@ -92,6 +92,10 @@
       "Enabled": true
     },
     {
+      "Name": "SignificanceManager",
+      "Enabled": true
+    },
+    {
       "Name": "Niagara",
       "Enabled": true
     }
