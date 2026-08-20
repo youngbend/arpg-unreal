@@ -92,6 +92,16 @@ FARPGPlaceholderShape AARPGPlaceholderDischarge::GetShapeFor(EARPGDischargeType 
 		Result.MinRadius = 80.f;
 		Result.MaxRadius = 300.f;
 		Result.Hold = 0.2f;
+
+		// AND IT DOES NOT REACT. A product is born AT the contact point, which
+		// means inside whichever volume survived the trade -- and two different
+		// elements neutralise even with no recipe between them. So a steam cloud
+		// would immediately eat the fireball's surplus, which is the exact
+		// behaviour SurplusSurvivesAtReducedPower exists to protect.
+		//
+		// The result of a reaction re-entering the solver where it was born is a
+		// feedback loop, not a feature. An authored effect can still opt in.
+		Result.bReacts = false;
 		break;
 
 	default:
@@ -119,6 +129,19 @@ void AARPGPlaceholderDischarge::InitializeFromContext(const FARPGDischargeContex
 	// the placeholder stops being a truthful picture of what the spell hits,
 	// which is the only reason it exists.
 	Hitbox->TraceRadius = Radius;
+
+	// And the same number again for what it leaves on the ground, so an element
+	// that pools wets exactly the ground the spell covered. A burst sweeps because
+	// its volume genuinely does travel forward; an emanation and a cloak are
+	// centred, so they wet where they stood. Elements that pool nothing -- fire,
+	// air -- deposit nothing from this, with no branch here.
+	DepositRadius = Radius;
+	bDepositSwept = Shape.bSwept;
+
+	// And again for what it MEETS. Three things now come off this one number --
+	// what it hits, what it leaves, and what it reacts with -- which is the rule
+	// this class already lived by, extended rather than bent.
+	ReactionRadius = Shape.bReacts ? Radius : 0.f;
 
 	// Written before FinishSpawning, so the base class's BeginPlay picks them up
 	// -- this is the window the deferred spawn exists for.
@@ -209,6 +232,16 @@ void AARPGPlaceholderProjectile::InitializeFromContext(const FARPGDischargeConte
 
 	Radius = FMath::Lerp(MinRadius, MaxRadius, Power);
 	Hitbox->TraceRadius = Radius;
+
+	// A thrown volume of liquid SPREADS where it lands rather than staying its own
+	// width, which is the difference between a bolt leaving a puddle and a bolt
+	// leaving a wet coin too small for the fluid system to keep. Not swept: what a
+	// projectile wet is where it landed, not its line of flight.
+	DepositRadius = Radius * DepositSpread;
+
+	// The orb's own size, unspread: what it splashes is wider than what it is, but
+	// what it MEETS is exactly what it is.
+	ReactionRadius = Radius;
 
 	// The hitbox stays armed for the whole flight and stops on the first
 	// contact, which is what a projectile is: one hit, wherever it lands.

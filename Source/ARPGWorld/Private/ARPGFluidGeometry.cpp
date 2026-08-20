@@ -1,9 +1,13 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ARPGFluidGeometry.h"
+#include "ConstrainedDelaunay2.h"
+#include "Components/DynamicMeshComponent.h"
 #include "Curve/GeneralPolygon2.h"
 #include "Curve/PolygonIntersectionUtils.h"
 #include "Curve/PolygonOffsetUtils.h"
+#include "DynamicMesh/DynamicMesh3.h"
+#include "DynamicMesh/MeshNormals.h"
 
 namespace
 {
@@ -385,6 +389,33 @@ void IntersectWithHoles(const TArray<FVector2D>& A, const TArray<FVector2D>& B,
 	}
 }
 
+namespace
+{
+	/**
+	 * Scales a ring about its centroid to enclose a target area, either way.
+	 *
+	 * Area scales with the SQUARE of a uniform scale, so this is one square root
+	 * rather than an iterative solve. Uniform rather than an offset because an
+	 * offset erodes thin necks away entirely and changes the shape -- wrong when
+	 * the point is only that fluid was added or taken.
+	 */
+	TArray<FVector2D> ScaleToArea(const TArray<FVector2D>& Ring, double TargetArea)
+	{
+		const double Scale = FMath::Sqrt(TargetArea / PolygonArea(Ring));
+		const FVector2D Centre = PolygonCentroid(Ring);
+
+		TArray<FVector2D> Scaled;
+		Scaled.Reserve(Ring.Num());
+
+		for (const FVector2D& Point : Ring)
+		{
+			Scaled.Add(Centre + (Point - Centre) * Scale);
+		}
+
+		return Scaled;
+	}
+}
+
 TArray<FVector2D> ShrinkToArea(const TArray<FVector2D>& Ring, double TargetArea)
 {
 	const double Area = PolygonArea(Ring);
@@ -398,22 +429,288 @@ TArray<FVector2D> ShrinkToArea(const TArray<FVector2D>& Ring, double TargetArea)
 		return TArray<FVector2D>();
 	}
 
-	// Area scales with the SQUARE of a uniform scale, so this is one square root
-	// rather than an iterative solve. Uniform rather than an inward offset
-	// because an offset erodes thin necks away entirely and changes the shape --
-	// wrong when the point is only that some of the fluid was consumed.
-	const double Scale = FMath::Sqrt(TargetArea / Area);
-	const FVector2D Centre = PolygonCentroid(Ring);
+	return ScaleToArea(Ring, TargetArea);
+}
 
-	TArray<FVector2D> Scaled;
-	Scaled.Reserve(Ring.Num());
+TArray<FVector2D> GrowToArea(const TArray<FVector2D>& Ring, double TargetArea)
+{
+	const double Area = PolygonArea(Ring);
 
-	for (const FVector2D& Point : Ring)
+	// Refuses to shrink, so the pair keep one-way contracts.
+	if (Area <= 0.0 || TargetArea <= Area)
 	{
-		Scaled.Add(Centre + (Point - Centre) * Scale);
+		return Ring;
 	}
 
-	return Scaled;
+	return ScaleToArea(Ring, TargetArea);
+}
+
+// ---------------------------------------------------------------------------
+// Meshing
+// ---------------------------------------------------------------------------
+
+namespace
+{
+	/**
+	 * One tile of surface texture per metre of world.
+	 *
+	 * Anchored to WORLD position rather than the mesh's own space -- see
+	 * BuildSlabMesh. The number itself only decides how big the material's detail
+	 * reads; it is here rather than on the definition because changing it per
+	 * fluid buys nothing a material's own tiling cannot do better.
+	 */
+	constexpr double SurfaceUVScale = 100.0;
+
+	/** Appends a vertex carrying its world-anchored UV. */
+	int32 AppendSurfaceVertex(UE::Geometry::FDynamicMesh3& Mesh, const FVector2D& Origin,
+		double LocalX, double LocalY, double Z)
+	{
+		const int32 Index = Mesh.AppendVertex(FVector3d(LocalX, LocalY, Z));
+
+		Mesh.SetVertexUV(Index, FVector2f(
+			static_cast<float>((LocalX + Origin.X) / SurfaceUVScale),
+			static_cast<float>((LocalY + Origin.Y) / SurfaceUVScale)));
+
+		return Index;
+	}
+
+	/**
+	 * The wall under one ring, joining its top edge to its bottom.
+	 *
+	 * Wound so the face points AWAY from the body's interior for an outer ring
+	 * given counter-clockwise, and into the gap for a hole given clockwise --
+	 * which is the winding each already has by the time it gets here.
+	 */
+	void AppendWall(UE::Geometry::FDynamicMesh3& Mesh, const TArray<FVector2D>& Ring,
+		const FVector2D& Origin, double BottomZ, double TopZ)
+	{
+		const int32 Count = Ring.Num();
+
+		for (int32 Index = 0; Index < Count; ++Index)
+		{
+			const FVector2D& A = Ring[Index];
+			const FVector2D& B = Ring[(Index + 1) % Count];
+
+			// Fresh vertices per quad rather than shared with the cap, so the lip
+			// of the slab is a HARD edge. Sharing them would average the cap's
+			// upward normal into the wall's sideways one and round the whole thing
+			// off, which on a 20cm puddle reads as a blob rather than as water
+			// with an edge.
+			const int32 TopA = AppendSurfaceVertex(Mesh, Origin, A.X, A.Y, TopZ);
+			const int32 TopB = AppendSurfaceVertex(Mesh, Origin, B.X, B.Y, TopZ);
+			const int32 BottomA = AppendSurfaceVertex(Mesh, Origin, A.X, A.Y, BottomZ);
+			const int32 BottomB = AppendSurfaceVertex(Mesh, Origin, B.X, B.Y, BottomZ);
+
+			Mesh.AppendTriangle(TopA, BottomA, BottomB);
+			Mesh.AppendTriangle(TopA, BottomB, TopB);
+		}
+	}
+}
+
+void BuildSlabMesh(UDynamicMeshComponent* Component, const TArray<FVector2D>& Ring,
+	const TArray<FVector2D>& Hole, const FVector2D& Origin, double BottomZ, double TopZ)
+{
+	using namespace UE::Geometry;
+
+	if (!Component)
+	{
+		return;
+	}
+
+	FDynamicMesh3 Mesh;
+	Mesh.EnableVertexNormals(FVector3f::UnitZ());
+	Mesh.EnableVertexUVs(FVector2f::Zero());
+
+	FGeneralPolygon2d Polygon;
+	if (!ToGeneralPolygon(Ring, Polygon))
+	{
+		// Eroded away to nothing. An EMPTY mesh rather than an early return: the
+		// component is still showing the last shape it was given, and leaving it
+		// there is how a fully evaporated puddle stays visible forever.
+		Component->SetMesh(MoveTemp(Mesh));
+		Component->NotifyMeshUpdated();
+		return;
+	}
+
+	// The hole has to wind against the outline for the fill rule to read it as a
+	// gap rather than as a second body sitting inside the first.
+	TArray<FVector2D> WoundHole;
+	if (Hole.Num() >= 3)
+	{
+		FPolygon2d HolePolygon;
+		for (const FVector2D& Point : Hole)
+		{
+			HolePolygon.AppendVertex(FVector2d(Point.X, Point.Y));
+		}
+
+		if (!HolePolygon.IsClockwise())
+		{
+			HolePolygon.Reverse();
+		}
+
+		// Containment and orientation both unchecked: IntersectWithHoles already
+		// produced this as a hole of this outline, and a rejected hole would
+		// silently mesh over a gap someone can fall through.
+		Polygon.AddHole(HolePolygon, /*bCheckContainment=*/false, /*bCheckOrientation=*/false);
+
+		WoundHole = FromPolygon(HolePolygon);
+	}
+
+	// A CONSTRAINED DELAUNAY rather than ear clipping, because these outlines are
+	// arbitrarily concave -- a pool that three spells have landed in and an ice
+	// shard has cut across -- and a solid's may have a gap in the middle. Both are
+	// exactly what the constrained triangulator is for.
+	FConstrainedDelaunay2d Triangulator;
+	Triangulator.FillRule = FConstrainedDelaunay2d::EFillRule::Positive;
+	Triangulator.Add(Polygon);
+
+	if (!Triangulator.Triangulate() || Triangulator.Triangles.Num() == 0)
+	{
+		Component->SetMesh(FDynamicMesh3());
+		Component->NotifyMeshUpdated();
+		return;
+	}
+
+	const int32 CapCount = Triangulator.Vertices.Num();
+	const bool bHasDepth = TopZ - BottomZ > UE_DOUBLE_SMALL_NUMBER;
+
+	for (const FVector2d& Vertex : Triangulator.Vertices)
+	{
+		AppendSurfaceVertex(Mesh, Origin, Vertex.X, Vertex.Y, TopZ);
+	}
+
+	if (bHasDepth)
+	{
+		for (const FVector2d& Vertex : Triangulator.Vertices)
+		{
+			AppendSurfaceVertex(Mesh, Origin, Vertex.X, Vertex.Y, BottomZ);
+		}
+	}
+
+	for (const FIndex3i& Triangle : Triangulator.Triangles)
+	{
+		Mesh.AppendTriangle(Triangle.A, Triangle.B, Triangle.C);
+
+		if (bHasDepth)
+		{
+			// Reversed, so the underside faces DOWN. A one-sided slab whose floor
+			// pointed up is invisible from below and lets you see into it through
+			// the walls.
+			Mesh.AppendTriangle(Triangle.A + CapCount, Triangle.C + CapCount,
+				Triangle.B + CapCount);
+		}
+	}
+
+	if (bHasDepth)
+	{
+		AppendWall(Mesh, FromPolygon(Polygon.GetOuter()), Origin, BottomZ, TopZ);
+
+		if (WoundHole.Num() >= 3)
+		{
+			AppendWall(Mesh, WoundHole, Origin, BottomZ, TopZ);
+		}
+	}
+
+	FMeshNormals::QuickComputeVertexNormals(Mesh);
+
+	Component->SetMesh(MoveTemp(Mesh));
+	Component->NotifyMeshUpdated();
+}
+
+void BuildFieldMesh(UDynamicMeshComponent* Component, const FARPGSolidField& Field,
+	const FVector2D& Origin)
+{
+	using namespace UE::Geometry;
+
+	if (!Component)
+	{
+		return;
+	}
+
+	FDynamicMesh3 Mesh;
+	Mesh.EnableVertexNormals(FVector3f::UnitZ());
+	Mesh.EnableVertexUVs(FVector2f::Zero());
+
+	if (!Field.IsValidField())
+	{
+		Component->SetMesh(MoveTemp(Mesh));
+		Component->NotifyMeshUpdated();
+		return;
+	}
+
+	const float Half = Field.CellSize * 0.5f;
+
+	// A CELL AT A TIME, and that is the point. Nothing here triangulates an
+	// outline, so nothing here can grow: the worst case is a fixed handful of
+	// triangles per cell however many spells have landed on the floe. The Godot
+	// pathology this replaced was unbounded by construction.
+	for (int32 Y = 0; Y < Field.CountY; ++Y)
+	{
+		for (int32 X = 0; X < Field.CountX; ++X)
+		{
+			if (!Field.IsSolid(X, Y))
+			{
+				continue;
+			}
+
+			const int32 At = Field.Index(X, Y);
+			const FVector2D Centre = Field.CentreOf(X, Y) - Origin;
+
+			const double TopZ = Field.Top[At] * 0.1;
+			const double BottomZ = Field.Bottom[At] * 0.1;
+
+			const FVector2D Corners[4] = {
+				Centre + FVector2D(-Half, -Half),
+				Centre + FVector2D(Half, -Half),
+				Centre + FVector2D(Half, Half),
+				Centre + FVector2D(-Half, Half)
+			};
+
+			int32 TopVerts[4];
+			int32 BottomVerts[4];
+
+			for (int32 Corner = 0; Corner < 4; ++Corner)
+			{
+				TopVerts[Corner] = AppendSurfaceVertex(Mesh, Origin,
+					Corners[Corner].X, Corners[Corner].Y, TopZ);
+				BottomVerts[Corner] = AppendSurfaceVertex(Mesh, Origin,
+					Corners[Corner].X, Corners[Corner].Y, BottomZ);
+			}
+
+			Mesh.AppendTriangle(TopVerts[0], TopVerts[1], TopVerts[2]);
+			Mesh.AppendTriangle(TopVerts[0], TopVerts[2], TopVerts[3]);
+
+			Mesh.AppendTriangle(BottomVerts[0], BottomVerts[2], BottomVerts[1]);
+			Mesh.AppendTriangle(BottomVerts[0], BottomVerts[3], BottomVerts[2]);
+
+			// A WALL ONLY WHERE THE ICE STOPS. Between two iced cells there is
+			// nothing to see and a face there would be interior geometry the
+			// collision cook has to chew through for no reason. The neighbours
+			// that are missing are the silhouette -- and the rim of a hole is the
+			// same test, which is how a hole gets its inside face without being a
+			// thing anyone tracked.
+			static const FIntPoint Steps[4] = { {0, -1}, {1, 0}, {0, 1}, {-1, 0} };
+
+			for (int32 Side = 0; Side < 4; ++Side)
+			{
+				if (Field.IsSolid(X + Steps[Side].X, Y + Steps[Side].Y))
+				{
+					continue;
+				}
+
+				const int32 A = Side;
+				const int32 B = (Side + 1) % 4;
+
+				Mesh.AppendTriangle(TopVerts[A], BottomVerts[A], BottomVerts[B]);
+				Mesh.AppendTriangle(TopVerts[A], BottomVerts[B], TopVerts[B]);
+			}
+		}
+	}
+
+	FMeshNormals::QuickComputeVertexNormals(Mesh);
+
+	Component->SetMesh(MoveTemp(Mesh));
+	Component->NotifyMeshUpdated();
 }
 
 } // namespace ARPGFluidGeometry

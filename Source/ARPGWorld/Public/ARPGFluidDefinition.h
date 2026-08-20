@@ -56,10 +56,100 @@ public:
 		meta = (ClampMin = "0.0"))
 	float ReservoirArea = 200000.f;
 
+	/**
+	 * Mass per unit volume, in kg per cubic centimetre. Water is 0.001.
+	 *
+	 * What anything frozen out of this floats ON, so it is half of the answer to
+	 * whether a slab rides or sinks -- the other half being the solid's own. Lava
+	 * is heavy, and a crust of obsidian floating on it is a different sum from ice
+	 * on water even though the code doing it is the same.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Body",
+		meta = (ClampMin = "0.0001"))
+	float Density = 0.001f;
+
+	// --- Running off a slab -------------------------------------------------
+	//
+	// ON THE FLUID AND NOT THE SLAB, which is where these started and where they
+	// were wrong. Viscosity is a property of water or lava, not of the ice or
+	// earth it happens to be running over: with the knob on the solid you would
+	// tune "how thick is lava" inside the earth asset, and a second solid that
+	// melted into lava would need the same numbers copied and kept in step.
+	//
+	// A slab reads these through its own MeltsInto, so it never has to know.
+
+	/**
+	 * How much of the available head the film moves per second.
+	 *
+	 * NOT A SPEED IN CM/S. The solver moves a fraction of the height difference
+	 * between neighbouring cells, so this is a rate of settling: high is a thin
+	 * quick sheet, low is a slow ooze.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Runoff",
+		meta = (ClampMin = "0.0"))
+	float FlowRate = 6.f;
+
+	/**
+	 * Head, in cm per cell, below which this fluid does not move at all.
+	 *
+	 * THE HALF OF VISCOSITY A RATE CANNOT EXPRESS, and the one that gives lava its
+	 * character. A slower rate makes a fluid arrive later; a yield slope makes it
+	 * STOP -- on a gradient water would sheet straight off, lava sits where it is
+	 * and goes no further. It is also what makes a viscous film pile up thick
+	 * rather than spreading, which falls out rather than being written: a fluid
+	 * that needs more head before it moves necessarily stands deeper.
+	 *
+	 * Zero for water, which runs off anything.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Runoff",
+		meta = (ClampMin = "0.0"))
+	float YieldSlope = 0.f;
+
+	/**
+	 * Below this depth in cm a cell is dry.
+	 *
+	 * A FLOOR, or the film never finishes: each step moves a fraction of what is
+	 * left, so depth approaches zero and never arrives, and a slab carrying a
+	 * millionth of a millimetre would tick forever. A viscous fluid leaves more
+	 * behind, which is also true of the real thing.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Runoff",
+		meta = (ClampMin = "0.001"))
+	float MinimumFilm = 0.05f;
+
+	/**
+	 * Least volume worth spawning a body for, in cubic cm, when runoff lands.
+	 *
+	 * Runoff arrives in dribbles by design, and every deposit is a polygon merge
+	 * or an actor spawn. Without a threshold a melting tower would make that call
+	 * every tick for a teaspoon.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Runoff",
+		meta = (ClampMin = "0.0"))
+	float RunoffBatch = 20000.f;
+
 	/** How much energy the body's volume carries per unit of area. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Body",
 		meta = (ClampMin = "0.0"))
 	float EnergyPerArea = 0.001f;
+
+	/**
+	 * 0-1. How well a body of this carries a charge that conducts THROUGH it.
+	 *
+	 * WHICH charges it carries is not a property of the fluid: that is a Conduct
+	 * row in the shared combination table. This is only how well this particular
+	 * substance does it, and lava should be near zero where water is high.
+	 *
+	 * Nothing used to set this on a pool at all -- the volume's own default is 0,
+	 * and no definition carried the number -- so a real deposited puddle silently
+	 * refused to conduct while the conduction tests, which set it by hand, passed.
+	 * That is the phase 6 gate ("lightning floods a puddle chain and hurts a
+	 * second player standing in it") failing on the one part of itself that phase
+	 * 6 could not yet build.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Body",
+		meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float Conductivity = 0.85f;
 
 	/** Outward offset per second while it is raining. 0 means rain does nothing. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weather",
@@ -85,70 +175,5 @@ public:
 	virtual FPrimaryAssetId GetPrimaryAssetId() const override
 	{
 		return FPrimaryAssetId("ARPGFluid", GetFName());
-	}
-};
-
-/**
- * What an element is like as a SOLID frozen out of a fluid. Port of Godot's
- * SolidDefinition.
- *
- * Nothing here knows that water freezes: WHICH pairs solidify is a Solidify row
- * in the combination table's Surface scope -- the same table and the same
- * scoping every other relationship in the game uses. So ice + water making a
- * floe and lava + water making a crust of obsidian are two rows and two assets,
- * and neither is a branch in any C++ file.
- */
-UCLASS(BlueprintType)
-class ARPGWORLD_API UARPGSolidDefinition : public UPrimaryDataAsset
-{
-	GENERATED_BODY()
-
-public:
-	/** What this is made of -- matched against a Solidify row's result. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Identity")
-	TObjectPtr<UARPGMagicElement> Element;
-
-	/** How far the slab stands above the fluid surface it formed on. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Body",
-		meta = (ClampMin = "0.0"))
-	float Thickness = 30.f;
-
-	/**
-	 * Whether the slab carries collision.
-	 *
-	 * The whole point for ice, and deliberately optional: a crust of obsidian
-	 * over lava should be standable, a sheet of frost should not.
-	 */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Body")
-	bool bStandable = true;
-
-	/** Inward offset per second as it melts. 0 means it is permanent. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Melting",
-		meta = (ClampMin = "0.0"))
-	float MeltRate = 0.5f;
-
-	/**
-	 * What the slab turns back into as it melts, if anything.
-	 *
-	 * Null is right for obsidian, which is permanent rock rather than frozen
-	 * lava. Ice points back at water, so a floe melting returns its area to the
-	 * pool it came from rather than the fluid simply vanishing.
-	 */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Melting")
-	TObjectPtr<UARPGFluidDefinition> MeltsInto;
-
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Body",
-		meta = (ClampMin = "0.0"))
-	float MinimumArea = 2500.f;
-
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Presentation")
-	TSoftObjectPtr<UMaterialInterface> SurfaceMaterial;
-
-	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
-	FGameplayTag GetElementTag() const;
-
-	virtual FPrimaryAssetId GetPrimaryAssetId() const override
-	{
-		return FPrimaryAssetId("ARPGSolid", GetFName());
 	}
 };

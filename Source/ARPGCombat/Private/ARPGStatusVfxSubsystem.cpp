@@ -1,6 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ARPGStatusVfxSubsystem.h"
+#include "NiagaraComponent.h"
+#include "NiagaraFunctionLibrary.h"
+#include "NiagaraSystem.h"
 #include "ARPGCombat.h"
 #include "ARPGGameplayTags.h"
 #include "ARPGGeometryProbe.h"
@@ -258,6 +261,37 @@ void UARPGStatusVfxSubsystem::Realise(FARPGStatusVfxRequest& Request, AActor* Ta
 		return;
 	}
 
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	// THE CHEAP ONE FIRST. Most status visuals are a single emitter, and wrapping
+	// each in an actor purely so something can be spawned is a class per status
+	// that holds one component and does nothing. Attached rather than spawned, so
+	// it follows the target with no placement pass and no per-frame anything.
+	if (UNiagaraSystem* System = Presentation->VfxSystem.LoadSynchronous())
+	{
+		UNiagaraComponent* Attached = UNiagaraFunctionLibrary::SpawnSystemAttached(
+			System, Target->GetRootComponent(), NAME_None,
+			FVector::ZeroVector, FRotator::ZeroRotator,
+			EAttachLocation::SnapToTarget, /*bAutoDestroy=*/false);
+
+		if (Attached)
+		{
+			// FITTED THE SAME WAY THE ACTOR PATH IS, so a burning tree is alight at
+			// its own size whichever kind of visual it named. Fitting is a
+			// measurement of the TARGET; the two paths differ only in what they
+			// apply the answer to.
+			ARPGGeometryProbe::FitVfxComponent(Attached, Target,
+				Presentation->VfxFit, Presentation->VfxScale);
+
+			Request.Attached = Attached;
+			return;
+		}
+	}
+
 	// Synchronous, and deliberately so: this runs at most a few times a second
 	// behind a hard budget, and an async load would leave the visual arriving
 	// after a short affliction had already ended.
@@ -267,12 +301,6 @@ void UARPGStatusVfxSubsystem::Realise(FARPGStatusVfxRequest& Request, AActor* Ta
 		UE_LOG(LogARPGCombat, Warning,
 			TEXT("Status '%s' names a VFX class that failed to load; it will show nothing."),
 			*Presentation->StatusTag.ToString());
-		return;
-	}
-
-	UWorld* World = GetWorld();
-	if (!World)
-	{
 		return;
 	}
 
@@ -297,6 +325,19 @@ void UARPGStatusVfxSubsystem::Realise(FARPGStatusVfxRequest& Request, AActor* Ta
 
 void UARPGStatusVfxSubsystem::Release(FARPGStatusVfxRequest& Request)
 {
+	// An attached system deactivates rather than being destroyed outright, which
+	// is Niagara's own fade: emission stops and whatever is already in flight
+	// finishes its life. The same distinction the actor path makes below, for
+	// free.
+	if (UNiagaraComponent* Attached = Request.Attached.Get())
+	{
+		Request.Attached = nullptr;
+
+		Attached->Deactivate();
+		Attached->SetAutoDestroy(true);
+		return;
+	}
+
 	AActor* Instance = Request.Instance.Get();
 	Request.Instance = nullptr;
 

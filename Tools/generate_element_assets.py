@@ -141,6 +141,32 @@ ELEMENTS = [
         "complexity": 2,
     },
     {
+        "id": "Lava", "tag": "Element.Lava", "display": "Lava",
+        "core": colour(1.0, 0.85, 0.45), "glow": colour(1.0, 0.32, 0.05, 0.95),
+        "edge": colour(0.25, 0.04, 0.01, 0.0), "emission": 5.0,
+        # FIRE damage. Molten rock burns; inventing a Lava resistance would mean
+        # armour had nothing authored to say about it, which is the same argument
+        # that put earth and air on Physical.
+        "damage_type": "DA_Damage_Fire",
+        # The hardest-hitting thing in the game, and the slowest -- it is two
+        # elements spent to make one.
+        "base_damage": 32.0, "poise": 10.0, "cost": 0.0, "usage": 1.6,
+        "status": "Burning", "status_duration": 10.0,
+        "complexity": 2,
+    },
+    {
+        "id": "Obsidian", "tag": "Element.Obsidian", "display": "Obsidian",
+        "core": colour(0.35, 0.3, 0.4), "glow": colour(0.08, 0.06, 0.10, 0.95),
+        "edge": colour(0.01, 0.01, 0.02, 0.0), "emission": 0.4,
+        "damage_type": "DA_Damage_Physical",
+        # NOT REALLY A SPELL. Obsidian exists as an element because a Solidify row
+        # names a Result and a solid definition is keyed by an element tag -- it is
+        # the NAME OF A MATERIAL, not something anyone casts. Complexity 3 and no
+        # loadout slot, and no Hand row anywhere produces it.
+        "base_damage": 0.0, "poise": 0.0, "cost": 0.0, "usage": 0.0,
+        "complexity": 3,
+    },
+    {
         "id": "Steam", "tag": "Element.Steam", "display": "Steam",
         "core": colour(1.0, 1.0, 1.0, 0.9), "glow": colour(0.88, 0.92, 0.95, 0.55),
         "edge": colour(0.55, 0.7, 0.8, 0.0), "emission": 1.0,
@@ -280,6 +306,42 @@ COMBINATIONS = [
     # both and MEANING it is what makes the difference.
     {"name": "MagnetismRecipe", "elements": ["Element.Earth", "Element.Lightning"],
      "result": "Magnetism", "scope": 1},
+
+    # --- Lava, and what it sets into ----------------------------------------
+    #
+    # IN HAND AND IN THE WORLD, which is the unusual part: most pairs mean
+    # different things in a caster's hands and out in the world, and this one
+    # does not. Fusing fire and earth is molten rock, and throwing fire at rock
+    # is molten rock. Scope 1|2 = 3, and NOT Field: a grass fire crossing stony
+    # ground is a grass fire, not a lava flow.
+    #
+    # FIRE IS SPENT FAST AND EARTH SLOWLY, the opposite of the Melt row's ratio,
+    # because rock is not ice. It takes a great deal of fire to melt a little
+    # stone, which is what makes lava expensive rather than the obvious opener.
+    {"name": "Lava", "elements": ["Element.Fire", "Element.Earth"],
+     "result": "Lava", "scope": 1 | 2,
+     "rates": {"Element.Fire": 1.6, "Element.Earth": 0.5}},
+
+    # SURFACE ONLY, and this is what keeps obsidian out of the player's hands.
+    # There is no mechanism that forbids an element from being held; what an
+    # element can BE is exactly what some row produces in the Hand scope, and no
+    # row produces this one. Obsidian is the name of a material, not a spell.
+    #
+    # The exact shape of the ice + water row one scope over: an agent thrown at a
+    # body of fluid, freezing part of its surface into something you stand on.
+    # Nothing in C++ knows that water quenches lava.
+    {"name": "Quench", "elements": ["Element.Water", "Element.Lava"],
+     "result": "Obsidian", "scope": 8, "mode": 2,
+     "rates": {"Element.Water": 1.0, "Element.Lava": 0.0}},
+
+    # AND THE SAME PAIR MEETING IN THE AIR IS STEAM, which is the reason scope
+    # exists at all -- a water jet crossing a lava jet is two spells trading
+    # energy, and the same water hitting a POOL of it sets the surface to glass.
+    # One relationship, two physics, two rows. Without this the pair would simply
+    # neutralise mid-air, which is the quiet hole a Surface-only row leaves.
+    {"name": "QuenchAir", "elements": ["Element.Water", "Element.Lava"],
+     "result": "Steam", "scope": 2,
+     "rates": {"Element.Water": 1.2, "Element.Lava": 0.9}},
 ]
 
 # Page 0 is the four a new character starts with; lightning sits on page 1 so

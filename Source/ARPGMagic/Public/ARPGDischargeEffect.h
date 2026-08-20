@@ -7,7 +7,13 @@
 #include "ARPGDischargeContext.h"
 #include "ARPGDischargeEffect.generated.h"
 
+class AARPGDischargeEffect;
+class UARPGElementalVolumeComponent;
 class UARPGHitboxComponent;
+class USphereComponent;
+
+DECLARE_MULTICAST_DELEGATE_OneParam(FARPGOnDischargeLanded,
+	AARPGDischargeEffect* /*Effect*/);
 
 /**
  * What a cast spell actually is in the world: the fireball, the emanation, the
@@ -59,11 +65,97 @@ public:
 		meta = (ClampMin = "0.0"))
 	float Lifetime = 5.f;
 
+	// --- What it leaves behind --------------------------------------------------
+
+	/**
+	 * Radius of the body of its own element this leaves lying on the ground when
+	 * it finishes. 0 -- the default -- leaves nothing.
+	 *
+	 * NOT "does water make puddles". Whether an element pools at all is the fluid
+	 * system's question, answered by whether a fluid definition describes it: set
+	 * this on a fire orb and it deposits nothing, with no branch here and no list
+	 * of wet elements to keep in sync. What this number says is only how much
+	 * GROUND this particular spell covers.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ARPG|Magic|Deposit",
+		meta = (ClampMin = "0.0"))
+	float DepositRadius = 0.f;
+
+	/**
+	 * Whether the footprint sweeps from where the spell was cast to where it
+	 * finished, rather than being a disc at the finish.
+	 *
+	 * For a JET or a beam, whose body is elongated at any one instant, the stadium
+	 * is the honest footprint. For a projectile it is not: a bolt that travelled
+	 * thirty metres wet the ground where it landed, not the whole line of flight.
+	 * So this is off by default and the disc is what a projectile or a burst gets.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ARPG|Magic|Deposit")
+	bool bDepositSwept = false;
+
+	// --- What it meets ----------------------------------------------------------
+
+	/**
+	 * Radius within which this spell is MADE OF its element, and so reacts with
+	 * any other element it meets. 0 -- the default -- never reacts.
+	 *
+	 * Distinct from the hitbox, which is what it does to a PERSON. This is what it
+	 * does to another spell: a fireball meeting a water jet trades energy and
+	 * makes steam, and neither of them hit anybody to do it. Placeholders drive
+	 * both from the same number, so what you see is what reacts.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ARPG|Magic|Reaction",
+		meta = (ClampMin = "0.0"))
+	float ReactionRadius = 0.f;
+
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<UARPGHitboxComponent> Hitbox;
 
+	/**
+	 * The only PRIMITIVE on a discharge effect, and the reason one is needed.
+	 *
+	 * The hitbox is a scene component that sweeps by hand, deliberately -- an
+	 * overlap volume moving fast enough passes through a target between frames.
+	 * But reactions are detected by physics overlap, so without a real collider
+	 * here a spell could never meet another spell at all, which is exactly the
+	 * state this was in: every solver built and tested, and nothing to trigger
+	 * one.
+	 */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<USphereComponent> Collider;
+
+	/** What this spell is MADE OF, energised from its own discharge context. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UARPGElementalVolumeComponent> Volume;
+
+	/**
+	 * Raised when a spell with a deposit radius finishes, so a body of its element
+	 * can be left where it ended.
+	 *
+	 * WHY A STATIC DELEGATE RATHER THAN A DIRECT CALL, and it is the same reason
+	 * UARPGElementalVolumeComponent::OnVolumesMet is one: the fluid system lives in
+	 * ARPGWorld, which already depends on ARPGMagic, so an effect calling it
+	 * directly would close the cycle. Inverting it here keeps the dependency
+	 * running one way and keeps a discharge effect a description of a cast spell,
+	 * with no knowledge of what the ground does with what it spills.
+	 *
+	 * Subscribers MUST filter by world: this is process-wide, so a PIE session with
+	 * a server and a client world would otherwise cross-talk.
+	 */
+	static FARPGOnDischargeLanded OnDischargeLanded;
+
 protected:
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+
+	/**
+	 * Sizes and arms the reaction volume from the context and ReactionRadius.
+	 *
+	 * Called from BeginPlay and BEFORE Super's, because the volume binds its own
+	 * overlap handler in its BeginPlay -- which the actor's Super dispatches. Arm
+	 * it after and the collider it binds to is still switched off.
+	 */
+	void ConfigureReactionVolume();
 
 	UPROPERTY(BlueprintReadOnly, Category = "ARPG|Magic")
 	FARPGDischargeContext Context;

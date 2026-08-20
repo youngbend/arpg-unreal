@@ -104,11 +104,23 @@ public:
 	UARPGMagicElement* GetLastProduct() const { return LastProduct; }
 
 private:
+	/** True where this machine owns the simulation. */
+	bool HasAuthority() const;
+
 	void HandleVolumesMet(UARPGElementalVolumeComponent* A, UARPGElementalVolumeComponent* B);
 
-	/** Spawns the product as a Collision discharge at the contact point. */
+	/**
+	 * Spawns the product as a Collision discharge at the contact point.
+	 *
+	 * @param bDeposits false when a consumed body has ALREADY put this fluid on
+	 *        the ground. Fire melting ice returns the melted water at the contact,
+	 *        and the water product landing there would deposit the same water a
+	 *        second time -- one puddle described twice, and the ice would leave
+	 *        more water than there was ice.
+	 */
 	void SpawnProduct(UARPGMagicElement* Product, const FVector& Contact,
-		const FVector& Direction, float Magnitude, AActor* SourceActor);
+		const FVector& Direction, float Magnitude, AActor* SourceActor,
+		bool bDeposits = true);
 
 	FVector LastContactPoint = FVector::ZeroVector;
 

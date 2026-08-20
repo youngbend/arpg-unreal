@@ -5,10 +5,10 @@
 #include "CoreMinimal.h"
 #include "Engine/DataAsset.h"
 #include "GameplayTagContainer.h"
+#include "StateTreeReference.h"
 #include "ARPGNPCDefinition.generated.h"
 
 class UARPGWeaponDefinition;
-class UBehaviorTree;
 class USkeletalMesh;
 
 /**
@@ -73,8 +73,17 @@ public:
 		meta = (ClampMin = "0.0"))
 	float MaxPoise = 50.f;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Behaviour")
-	TObjectPtr<UBehaviorTree> BehaviorTree;
+	/**
+	 * The StateTree this archetype runs.
+	 *
+	 * A REFERENCE RATHER THAN A BARE UStateTree*, because FStateTreeReference
+	 * carries the tree's exposed parameters alongside it -- so an archetype can
+	 * reuse one shared tree and override its numbers, which is what stops a
+	 * "cautious goblin" needing its own copy of the whole asset.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Behaviour",
+		meta = (Schema = "/Script/GameplayStateTree.StateTreeAIComponentSchema"))
+	FStateTreeReference StateTreeRef;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Behaviour")
 	EARPGDamageReaction DamageReaction = EARPGDamageReaction::Investigate;
@@ -82,6 +91,19 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Movement",
 		meta = (ClampMin = "0.0"))
 	float MoveSpeed = 400.f;
+
+	/**
+	 * Degrees per second the NPC pivots.
+	 *
+	 * ON THE DEFINITION rather than on the face-target node, for the same reason
+	 * LeashRange is: how fast a creature turns is a property of the creature. It
+	 * is applied to the movement component's RotationRate on possession, which is
+	 * what the engine's focus system actually reads -- so the same number governs
+	 * a deliberate face-off and any other rotation the pawn does.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Movement",
+		meta = (ClampMin = "0.0"))
+	float TurnRateDegrees = 360.f;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Perception",
 		meta = (ClampMin = "0.0"))

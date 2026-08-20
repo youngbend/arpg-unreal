@@ -43,13 +43,19 @@ void UARPGWeaponComponent::BeginPlay()
 	if (HasAuthority() && DefaultWeapon && !Weapon)
 	{
 		EquipWeapon(DefaultWeapon);
+		return;
 	}
-	else if (Weapon)
-	{
-		// Already equipped -- e.g. a client whose Weapon replicated in before
-		// this component began play.
-		ApplyWeaponToOwner();
-	}
+
+	// Runs with NOTHING equipped too, which is the point. The hitbox ships with
+	// an authored WeaponBaseDamage, so a character who has never equipped
+	// anything used to swing bare hands for a weapon's worth of damage -- and the
+	// combo component's AttackTree was likewise left at whatever a Blueprint had
+	// put there. Pushing the empty state makes unarmed mean unarmed from the
+	// first frame.
+	//
+	// It is also the already-equipped path: a client whose Weapon replicated in
+	// before this component began play.
+	ApplyWeaponToOwner();
 }
 
 UARPGComboComponent* UARPGWeaponComponent::GetCombo() const
@@ -114,7 +120,7 @@ void UARPGWeaponComponent::ApplyWeaponToOwner()
 	// writing it repeatedly would compound.
 	if (UARPGHitboxComponent* Hitbox = GetWeaponHitbox())
 	{
-		Hitbox->WeaponBaseDamage = Weapon ? Weapon->BaseDamage : 0.f;
+		Hitbox->WeaponBaseDamage = Weapon ? Weapon->BaseDamage : UnarmedBaseDamage;
 		if (Weapon && Weapon->BaseDamageType)
 		{
 			Hitbox->DamageType = Weapon->BaseDamageType;

@@ -17,6 +17,7 @@ class UARPGDamageTypeAsset;
 class UARPGComboComponent;
 class UARPGInventoryComponent;
 class UARPGLocomotionComponent;
+class UARPGNoiseComponent;
 class UARPGVitalRegenComponent;
 class UARPGHandVisualComponent;
 class UARPGMagicComponent;
@@ -26,6 +27,7 @@ class UARPGWeaponComponent;
 class UARPGModalInputComponent;
 class UARPGPlayerActionComponent;
 class UARPGWeaponAttackTree;
+class UARPGWeaponDefinition;
 class UGameplayAbility;
 struct FInputActionValue;
 
@@ -99,6 +101,18 @@ protected:
 	 *  shipping a character that looks unfinished out of the box.
 	 */
 	void ResolveDefaultMagicContent();
+
+	/**
+	 *  Equips the default weapon and fills in the unarmed moveset, for a Blueprint
+	 *  that left either empty.
+	 *
+	 *  THE TWO ARE NOT INTERCHANGEABLE, which is the bug this shape exists to
+	 *  prevent. The weapon carries the sword moveset and hands it to the combo
+	 *  component for exactly as long as it is equipped; the unarmed tree is what
+	 *  is left when it is not. Seeding the unarmed slot with the sword's tree --
+	 *  the previous behaviour -- meant unequipping changed nothing at all.
+	 */
+	void ResolveDefaultCombatContent();
 
 	/** Initialize input action bindings */
 	virtual void SetupPlayerInputComponent(class UInputComponent* PlayerInputComponent) override;
@@ -218,9 +232,30 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "ARPG|Abilities")
 	TArray<TSubclassOf<UGameplayAbility>> DefaultAbilities;
 
-	/** Assigned to the combo component on begin play. Soft, so no hard content reference. */
+	/**
+	 *  The moveset for BARE HANDS, assigned to the combo component's fallback slot
+	 *  on begin play. Soft, so no hard content reference.
+	 *
+	 *  EMPTY BY DEFAULT, and a weapon's tree must never be put here. This slot is
+	 *  what answers when nothing is equipped, so pointing it at the sword tree --
+	 *  which is what it used to default to -- gave an unarmed character the entire
+	 *  sword moveset. A weapon IS its moveset: the sword's tree belongs on the
+	 *  sword's UARPGWeaponDefinition, and reaches the combo component only while
+	 *  that weapon is equipped.
+	 */
 	UPROPERTY(EditAnywhere, Category = "ARPG|Combat")
-	TSoftObjectPtr<UARPGWeaponAttackTree> DefaultAttackTree;
+	TSoftObjectPtr<UARPGWeaponAttackTree> UnarmedAttackTree;
+
+	/**
+	 *  Equipped on begin play if the weapon component has no DefaultWeapon of its
+	 *  own. A convenience default only -- SET THIS ON THE BLUEPRINT.
+	 *
+	 *  Here rather than as a hard reference on the component because this project
+	 *  ships exactly one weapon, and a character who spawns with nothing equipped
+	 *  has no attacks at all now that the unarmed slot is empty.
+	 */
+	UPROPERTY(EditAnywhere, Category = "ARPG|Combat")
+	TSoftObjectPtr<UARPGWeaponDefinition> DefaultWeapon;
 
 	UPROPERTY(VisibleAnywhere, Category = "Components")
 	TObjectPtr<UARPGComboComponent> ComboComponent;
@@ -266,6 +301,19 @@ protected:
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<UARPGInventoryComponent> InventoryComponent;
+
+	/**
+	 * How loud the player is, which is the ONLY thing that makes NPC hearing
+	 * work on them.
+	 *
+	 * UARPGPerceptionComponent::CanHear treats a candidate with no noise
+	 * component as silent by construction and falls back to sight alone -- so
+	 * without this the player could sprint through a dark room behind a guard and
+	 * be, correctly but uselessly, inaudible. A third of perception was inert on
+	 * the one actor it matters most for.
+	 */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UARPGNoiseComponent> NoiseComponent;
 
 	/** Toggles the sprint. */
 	void ToggleSprint();

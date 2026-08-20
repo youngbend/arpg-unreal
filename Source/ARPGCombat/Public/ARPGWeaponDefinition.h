@@ -116,8 +116,8 @@ public:
 
 	/**
 	 * Reach, in centimetres. Doubles as the AI's attack range so
-	 * BTCheckAttackRange stays in step with the hitbox without a second property
-	 * that can drift out of sync.
+	 * FARPGStateTreeCondition_TargetInAttackRange stays in step with the hitbox
+	 * without a second property that can drift out of sync.
 	 */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Combat",
 		meta = (ClampMin = "0.0"))

@@ -30,7 +30,12 @@ public class ARPGWorld : ModuleRules
 			"GameplayTags",
 			"ARPGCore",
 			"ARPGCombat",
-			"ARPGMagic"
+			"ARPGMagic",
+
+			// PUBLIC because EPhysicalSurface is the key of the spread
+			// definition's SurfaceFuel map, and that map is a UPROPERTY on a
+			// public header -- anything that includes it needs the enum.
+			"PhysicsCore"
 		});
 
 		// PRIVATE. Nothing above this module has any business seeing the geometry
@@ -39,11 +44,25 @@ public class ARPGWorld : ModuleRules
 		// pulled the whole GeometryProcessing include graph into ARPGWorld's
 		// dependents for nothing. UDeveloperSettings is likewise only the
 		// settings object's own base class.
+		//
+		// GeometryFramework is UDynamicMeshComponent, which a fluid body draws
+		// itself with. It stays private on the same rule: the body's header names
+		// the component as a forward declaration only, so nothing downstream has
+		// to know how a puddle is rendered in order to ask where one is.
+		//
+		// Water is the plugin's spline-authored bodies, and it is deliberately
+		// only reached by UARPGWaterBodyVolumeComponent. A river is AUTHORED and
+		// STATIC, which is what water bodies are for; a puddle is spawned and
+		// reshaped four times a second, which is what the fluid subsystem is for.
+		// Nothing outside that one class should have to know which it is holding.
 		PrivateDependencyModuleNames.AddRange(new string[] {
 			"GameplayTasks",
 			"DeveloperSettings",
 			"GeometryCore",
-			"GeometryAlgorithms"
+			"GeometryAlgorithms",
+			"GeometryFramework",
+			"SignificanceManager",
+			"Water"
 		});
 	}
 }

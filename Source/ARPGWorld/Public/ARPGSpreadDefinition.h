@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "Engine/DataAsset.h"
 #include "GameplayTagContainer.h"
+#include "Chaos/ChaosEngineInterface.h"
 #include "ARPGSpreadDefinition.generated.h"
 
 class UARPGMagicElement;
@@ -203,6 +204,44 @@ public:
 	/** Never burns out, and ignores fuel entirely. Corruption, not fire. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Field")
 	bool bPermanent = false;
+
+	/**
+	 * How much fuel each kind of ground is worth TO THIS MEDIUM, as a fraction of
+	 * FuelSeconds.
+	 *
+	 * THE HALF THAT USED TO BE MISSING. The fuel map held one amount per cell,
+	 * which is element-agnostic: a cell that carried fire well necessarily carried
+	 * every medium well, differing only by FuelSeconds. So a marsh could not
+	 * refuse fire and carry a frost, and stone could not be a firebreak that a
+	 * corruption crossed happily.
+	 *
+	 * The ground says WHAT it is and the medium says what that is WORTH, which is
+	 * the same split as everywhere else here -- an element pools because a fluid
+	 * definition names it, not because the ground knows about water.
+	 *
+	 * A surface with no entry falls back to DefaultSurfaceFuel, so a table needs
+	 * only the interesting cases: grass 1, stone 0, and let everything else be
+	 * ordinary.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Field",
+		meta = (EditCondition = "bUsesField"))
+	TMap<TEnumAsByte<EPhysicalSurface>, float> SurfaceFuel;
+
+	/**
+	 * What an unlisted surface is worth. 1 keeps unbaked ground burning.
+	 *
+	 * Deliberately generous: a missing bake, a new surface type nobody has added
+	 * to the table yet, and a test world all land here, and the failure mode of
+	 * "burns when it should not" is far easier to notice than "silently
+	 * fireproof".
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Field",
+		meta = (EditCondition = "bUsesField", ClampMin = "0.0", ClampMax = "1.0"))
+	float DefaultSurfaceFuel = 1.f;
+
+	/** What one cell of this ground is worth to this medium, 0-1. */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Spread")
+	float GetSurfaceFuel(uint8 Surface) const;
 
 	/** Contact damage per second to anything standing in a burning cell. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Damage",

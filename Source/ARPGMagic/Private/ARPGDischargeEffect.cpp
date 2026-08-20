@@ -2,11 +2,15 @@
 
 #include "ARPGDischargeEffect.h"
 #include "ARPGElementTintable.h"
+#include "ARPGElementalVolumeComponent.h"
 #include "ARPGHitboxComponent.h"
 #include "ARPGMagic.h"
 #include "ARPGMagicElement.h"
+#include "Components/SphereComponent.h"
 #include "GameplayEffect.h"
 #include "TimerManager.h"
+
+FARPGOnDischargeLanded AARPGDischargeEffect::OnDischargeLanded;
 
 AARPGDischargeEffect::AARPGDischargeEffect()
 {
@@ -20,6 +24,28 @@ AARPGDischargeEffect::AARPGDischargeEffect()
 	// element says so -- the faction filter is the hitbox's job, and a discharge
 	// keeps the default behaviour rather than opting out.
 	Hitbox->bOneShot = false;
+
+	Collider = CreateDefaultSubobject<USphereComponent>(TEXT("ReactionCollider"));
+	Collider->SetupAttachment(Hitbox);
+
+	// MOVABLE, or the engine never refreshes its overlap list and begin-overlap
+	// never fires -- the volume component warns about exactly this, and a
+	// projectile is the last thing that can afford to be static.
+	Collider->SetMobility(EComponentMobility::Movable);
+
+	// OVERLAP EVERYTHING, BLOCK NOTHING. This exists to notice other elements, not
+	// to stop the spell flying: a collider that blocked would have the fireball
+	// bouncing off the water it is supposed to react with.
+	Collider->SetCollisionObjectType(ECC_WorldDynamic);
+	Collider->SetCollisionResponseToAllChannels(ECR_Overlap);
+
+	// Off until a context says otherwise. Most spells have no reaction radius, and
+	// a live collider on every one of them is overlap traffic for nothing.
+	Collider->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+
+	Volume = CreateDefaultSubobject<UARPGElementalVolumeComponent>(TEXT("Volume"));
+	Volume->SetupAttachment(Collider);
+	Volume->OverlapSource = Collider;
 }
 
 void AARPGDischargeEffect::InitializeFromContext(const FARPGDischargeContext& InContext)
@@ -60,8 +86,44 @@ void AARPGDischargeEffect::InitializeFromContext(const FARPGDischargeContext& In
 	OnDischargeInitialized(Context);
 }
 
+void AARPGDischargeEffect::ConfigureReactionVolume()
+{
+	if (!Collider || !Volume)
+	{
+		return;
+	}
+
+	// Reactions are resolved server-side, and the effect replicates down, so a
+	// client generating its own overlaps is traffic whose every conclusion the
+	// reaction subsystem then discards for lack of authority.
+	if (ReactionRadius <= 0.f || !Context.PrimaryElement || !HasAuthority())
+	{
+		return;
+	}
+
+	Collider->SetSphereRadius(ReactionRadius);
+	Collider->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+
+	Volume->Element = Context.PrimaryElement;
+
+	// THE SAME NUMBER AS THE DAMAGE, which is the whole reason ComputedDamage is
+	// precomputed on the context: a reaction then already accounts for charge,
+	// mastery and buffs without re-deriving any of them, and a heavily charged
+	// fireball genuinely out-trades a tapped one.
+	Volume->SetEnergy(Context.ComputedDamage);
+
+	// The caster, not this actor -- reaction damage attributes the same way hit
+	// damage does, and self-attribution would give kill credit to the projectile.
+	Volume->SourceActor = Context.Caster;
+}
+
 void AARPGDischargeEffect::BeginPlay()
 {
+	// BEFORE Super, which is what dispatches the volume component's own BeginPlay
+	// -- and that is where it binds to the collider's overlap events. Arm it after
+	// and the volume binds to a collider that is still switched off.
+	ConfigureReactionVolume();
+
 	Super::BeginPlay();
 
 	// Damage is server-authoritative, so only the server arms anything; clients
@@ -87,4 +149,21 @@ void AARPGDischargeEffect::BeginPlay()
 	{
 		SetLifeSpan(Lifetime);
 	}
+}
+
+void AARPGDischargeEffect::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	// DESTROYED specifically, which is the spell FINISHING: its Blueprint killed
+	// it on impact, or its lifespan ran out. Every other reason is the world going
+	// away underneath it -- a level transition, PIE ending -- and leaving a puddle
+	// behind on the way out is exactly what the reason enum exists to prevent.
+	//
+	// Broadcast before Super, which is where the components end and the actor
+	// stops being able to answer where it is.
+	if (EndPlayReason == EEndPlayReason::Destroyed && DepositRadius > 0.f)
+	{
+		OnDischargeLanded.Broadcast(this);
+	}
+
+	Super::EndPlay(EndPlayReason);
 }

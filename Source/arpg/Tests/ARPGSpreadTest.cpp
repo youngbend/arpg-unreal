@@ -9,9 +9,13 @@
 #include "ARPGMagicElement.h"
 #include "ARPGSpreadDefinition.h"
 #include "ARPGSpreadFuelMap.h"
+#include "ARPGFuelComponent.h"
+#include "ARPGSpreadDefinition.h"
+#include "ARPGSpreadFuelMap.h"
 #include "ARPGSpreadSubsystem.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
+#include "GameFramework/WorldSettings.h"
 
 /**
  * The fire spread field.
@@ -40,6 +44,18 @@ namespace ARPGSpreadTestUtils
 			Context.SetCurrentWorld(World);
 			World->InitializeActorsForPlay(FURL());
 			World->BeginPlay();
+
+			// AND ACTUALLY BEGUN. UWorld::BeginPlay routes BeginPlay through the
+			// game mode, and a world built by hand has none -- so it returns having
+			// started nothing, and every actor spawned afterwards is skipped too
+			// because the world never reports having begun play. Anything whose
+			// state is set up in BeginPlay -- a spell arming its reaction volume, a
+			// fuel component filling itself from FuelSeconds -- was silently left
+			// at its defaults. This is what a game mode's StartPlay does.
+			if (AWorldSettings* Settings = World->GetWorldSettings())
+			{
+				Settings->NotifyBeginPlay();
+			}
 		}
 
 		~FTestWorld()
@@ -263,29 +279,46 @@ bool FARPGSpreadFuelMapTest::RunTest(const FString& Parameters)
 	Map->Resolution = 16;
 	Map->ChunkSize = 1600.f;
 
-	// An unbaked chunk burns. That is deliberate: a missing entry means "never
-	// part of the baked world", not "no fuel", and conflating the two would make
-	// an unbaked test level silently fireproof.
-	TestEqual(TEXT("An unbaked chunk reads as full fuel"),
-		Map->GetFuelAt(FIntPoint(5, 5), 0.5f, 0.5f), 1.f);
+	// A CELL NAMES A SURFACE NOW, not an amount. An unbaked chunk still burns: a
+	// missing entry means "never part of the baked world", not "no fuel", and
+	// conflating the two would make an unbaked test level silently fireproof.
+	// Default is what a definition's table falls back to.
+	TestEqual(TEXT("An unbaked chunk reads as ordinary ground"),
+		static_cast<int32>(Map->GetSurfaceAt(FIntPoint(5, 5), 0.5f, 0.5f)),
+		static_cast<int32>(SurfaceType_Default));
 
-	// Half the chunk bare, half full.
+	// Half the chunk stone, half grass.
 	TArray<uint8> Cells;
-	Cells.SetNumZeroed(16 * 16);
+	Cells.Init(static_cast<uint8>(SurfaceType2), 16 * 16);   // stone
 	for (int32 Y = 8; Y < 16; ++Y)
 	{
 		for (int32 X = 0; X < 16; ++X)
 		{
-			Cells[Y * 16 + X] = 255;
+			Cells[Y * 16 + X] = static_cast<uint8>(SurfaceType1);   // grass
 		}
 	}
 	Map->SetChunkCells(FIntPoint(0, 0), Cells);
 
-	TestEqual(TEXT("The bare half reads as no fuel"), Map->GetFuelAt(FIntPoint(0, 0), 0.5f, 0.2f), 0.f);
-	TestEqual(TEXT("And the grassy half as full"), Map->GetFuelAt(FIntPoint(0, 0), 0.5f, 0.8f), 1.f);
+	TestEqual(TEXT("The bare half is stone"),
+		static_cast<int32>(Map->GetSurfaceAt(FIntPoint(0, 0), 0.5f, 0.2f)),
+		static_cast<int32>(SurfaceType2));
+	TestEqual(TEXT("And the grassy half is grass"),
+		static_cast<int32>(Map->GetSurfaceAt(FIntPoint(0, 0), 0.5f, 0.8f)),
+		static_cast<int32>(SurfaceType1));
 
 	UARPGMagicElement* Fire = MakeElement(GetTransientPackage(), TAG_Element_Fire);
-	UARPGSpreadSubsystem* Spread = Setup(Scope.World, MakeFire(GetTransientPackage(), Fire));
+	UARPGSpreadDefinition* Burns = MakeFire(GetTransientPackage(), Fire);
+
+	// AND WHAT THAT IS WORTH IS THE MEDIUM'S BUSINESS. Grass carries this fire,
+	// stone is a firebreak, and the map said neither of those things.
+	Burns->SurfaceFuel.Add(SurfaceType1, 1.f);
+	Burns->SurfaceFuel.Add(SurfaceType2, 0.f);
+	Burns->DefaultSurfaceFuel = 1.f;
+
+	// No jitter, so this test asserts on the firebreak rather than on noise.
+	Map->JitterRange = 0.f;
+
+	UARPGSpreadSubsystem* Spread = Setup(Scope.World, Burns);
 	Spread->FuelMap = Map;
 
 	// The bake reaches the simulation: seeding the bare half does nothing, and
@@ -398,6 +431,327 @@ bool FARPGSpreadRainTest::RunTest(const FString& Parameters)
 	// re-ignite at the reach it had before.
 	TestEqual(TEXT("Leaving no banked energy to restart from"),
 		Spread->GetFieldEnergy(Origin, TAG_Element_Fire), 0.f);
+
+	return true;
+}
+
+
+// ---------------------------------------------------------------------------
+// Objects that are fuel
+//
+// The ground burns and objects did not: fuel is baked per cell, so a wooden
+// crate on bare stone was scenery the fire went round. A fuel component is the
+// other half -- something that feeds the fire where it stands, has a finite
+// amount of itself to give, and can be caught halfway through giving it.
+// ---------------------------------------------------------------------------
+
+namespace ARPGSpreadTestUtils
+{
+	/** A crate: an actor with a footprint and something to burn. */
+	inline UARPGFuelComponent* MakeCrate(UWorld* World, const FVector& At, float Seconds)
+	{
+		FActorSpawnParameters Params;
+		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		AActor* Actor = World->SpawnActor<AActor>(AActor::StaticClass(), FTransform(At), Params);
+
+		UARPGFuelComponent* Fuel = NewObject<UARPGFuelComponent>(Actor);
+		Fuel->MediumTag = TAG_Element_Fire;
+		Fuel->FuelSeconds = Seconds;
+		Fuel->Radius = 120.f;
+		Fuel->Output = 2.f;
+		Fuel->CatchThreshold = 0.15f;
+		Fuel->CharParameterIndex = -1;   // no primitives to publish onto
+		Fuel->RegisterComponent();
+
+		return Fuel;
+	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFuelBurnsTest,
+	"ARPG.World.Spread.Fuel.AnObjectInAFireIsConsumedByIt",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGFuelBurnsTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGSpreadTestUtils;
+	FTestWorld Scope;
+
+	UARPGMagicElement* Fire = MakeElement(GetTransientPackage(), TAG_Element_Fire);
+	UARPGSpreadSubsystem* Spread = Setup(Scope.World, MakeFire(GetTransientPackage(), Fire));
+
+	const FVector Origin(0, 0, 0);
+	UARPGFuelComponent* Crate = MakeCrate(Scope.World, Origin, /*Seconds=*/2.f);
+
+	TestEqual(TEXT("A fresh crate is whole"), Crate->FuelRemaining, 2.f);
+	TestEqual(TEXT("And uncharred"), Crate->GetCharred(), 0.f);
+	TestFalse(TEXT("And not alight"), Crate->IsAlight());
+
+	// NOT BURNING UNTIL THERE IS A FIRE. A crate is not slowly rotting.
+	Run(Spread, 5);
+	TestEqual(TEXT("Nothing burns it on its own"), Crate->FuelRemaining, 2.f);
+
+	Spread->AddExposure(Origin, 150.f, 4.f, TAG_Element_Fire);
+	TestTrue(TEXT("Setup: the ground is alight"), Spread->IsBurning(Origin, TAG_Element_Fire));
+
+	Run(Spread, 5);
+
+	TestTrue(TEXT("Standing in fire, it catches"), Crate->IsAlight());
+	TestTrue(TEXT("And is being consumed"), Crate->FuelRemaining < 2.f);
+	TestTrue(TEXT("Which shows as char"), Crate->GetCharred() > 0.f);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFuelHalfBurntTest,
+	"ARPG.World.Spread.Fuel.QuenchedHalfwayLeavesAHalfBurntCrate",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGFuelHalfBurntTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGSpreadTestUtils;
+	FTestWorld Scope;
+
+	UARPGMagicElement* Fire = MakeElement(GetTransientPackage(), TAG_Element_Fire);
+	UARPGSpreadSubsystem* Spread = Setup(Scope.World, MakeFire(GetTransientPackage(), Fire));
+
+	const FVector Origin(0, 0, 0);
+	UARPGFuelComponent* Crate = MakeCrate(Scope.World, Origin, /*Seconds=*/10.f);
+
+	Spread->AddExposure(Origin, 150.f, 6.f, TAG_Element_Fire);
+	Run(Spread, 10);
+
+	const float PartWay = Crate->FuelRemaining;
+
+	TestTrue(TEXT("It has burned some"), PartWay < 10.f);
+	TestTrue(TEXT("But not all"), PartWay > 0.f);
+
+	// PUT IT OUT. Water on the field, which is the ordinary extinguish path --
+	// nothing here knows the fire went out for a reason rather than by running
+	// down.
+	Spread->Extinguish(Origin, 400.f, TAG_Element_Fire);
+	Run(Spread, 20);
+
+	TestFalse(TEXT("The fire is out"), Spread->IsBurning(Origin, TAG_Element_Fire));
+	TestFalse(TEXT("So the crate stops burning"), Crate->IsAlight());
+
+	// AND STOPS WHERE IT STOPPED. Nothing restores fuel, resets a timer or decays
+	// anything: the burn is spent only while the cells are alight, and a half
+	// burnt crate is what that means rather than something implemented.
+	TestEqual(TEXT("Half burnt, and staying that way"),
+		Crate->FuelRemaining, PartWay, 0.001f);
+
+	const float Charred = Crate->GetCharred();
+	TestTrue(TEXT("Visibly so"), Charred > 0.f && Charred < 1.f);
+
+	// AND IT IS STILL FUEL. Relight it and it burns the remainder -- which also
+	// falls out rather than being written.
+	Spread->AddExposure(Origin, 150.f, 6.f, TAG_Element_Fire);
+	Run(Spread, 10);
+
+	TestTrue(TEXT("Relit, it carries on from where it was"),
+		Crate->FuelRemaining < PartWay);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFuelSpentTest,
+	"ARPG.World.Spread.Fuel.BurningOutSaysSoWithoutDecidingWhatItMeans",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGFuelSpentTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGSpreadTestUtils;
+	FTestWorld Scope;
+
+	UARPGMagicElement* Fire = MakeElement(GetTransientPackage(), TAG_Element_Fire);
+	UARPGSpreadSubsystem* Spread = Setup(Scope.World, MakeFire(GetTransientPackage(), Fire));
+
+	const FVector Origin(0, 0, 0);
+	UARPGFuelComponent* Crate = MakeCrate(Scope.World, Origin, /*Seconds=*/0.3f);
+
+	Spread->AddExposure(Origin, 150.f, 8.f, TAG_Element_Fire);
+	Run(Spread, 20);
+
+	TestEqual(TEXT("It burned out"), Crate->FuelRemaining, 0.f);
+	TestTrue(TEXT("Which is spent"), Crate->IsSpent());
+	TestEqual(TEXT("And fully charred"), Crate->GetCharred(), 1.f);
+	TestFalse(TEXT("And no longer alight"), Crate->IsAlight());
+
+	// SPENT IS NOT DESTROYED. A log becomes charcoal, a rope parts, a barricade
+	// collapses -- the object decides, and nothing here decided for it.
+	TestNotNull(TEXT("The actor is still there"), Crate->GetOwner());
+
+	// AND IT CAN BE PUT BACK. A repaired barricade burns again without anyone
+	// re-registering it, which is why spent sources stay on the register.
+	Crate->Replenish(0.3f);
+	TestEqual(TEXT("Repaired, it is whole again"), Crate->GetCharred(), 0.f);
+
+	Spread->AddExposure(Origin, 150.f, 8.f, TAG_Element_Fire);
+	Run(Spread, 5);
+
+	TestTrue(TEXT("And burns again"), Crate->FuelRemaining < 0.3f);
+
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// What kind of ground it is
+// ---------------------------------------------------------------------------
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGSurfaceFuelTest,
+	"ARPG.World.Spread.Fuel.TheGroundSaysWhatItIsAndTheMediumSaysWhatThatIsWorth",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGSurfaceFuelTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGSpreadTestUtils;
+
+	UARPGMagicElement* Fire = MakeElement(GetTransientPackage(), TAG_Element_Fire);
+	UARPGSpreadDefinition* Definition = MakeFire(GetTransientPackage(), Fire);
+
+	// A TABLE WITH ONLY THE INTERESTING CASES. Grass burns, stone does not, and
+	// everything else is ordinary -- a medium should not have to enumerate every
+	// surface in the project to say that it burns grass.
+	Definition->SurfaceFuel.Add(SurfaceType1, 1.f);   // grass
+	Definition->SurfaceFuel.Add(SurfaceType2, 0.f);   // stone
+	Definition->DefaultSurfaceFuel = 0.5f;
+
+	TestEqual(TEXT("Grass carries it"), Definition->GetSurfaceFuel(SurfaceType1), 1.f);
+	TestEqual(TEXT("Stone is a firebreak"), Definition->GetSurfaceFuel(SurfaceType2), 0.f);
+
+	// THE FALLBACK IS GENEROUS ON PURPOSE. A missing bake, a surface nobody has
+	// added to the table, and a test world all land here, and "burns when it
+	// should not" is far easier to notice than "silently fireproof".
+	TestEqual(TEXT("Anything unlisted is ordinary"),
+		Definition->GetSurfaceFuel(SurfaceType7), 0.5f);
+
+	// AND THE SAME GROUND IS WORTH SOMETHING ELSE TO SOMETHING ELSE, which one
+	// element-agnostic amount per cell could never say. A marsh refuses fire and
+	// carries a frost.
+	UARPGMagicElement* Ice = MakeElement(GetTransientPackage(), TAG_Element_Ice);
+	UARPGSpreadDefinition* Frost = MakeFire(GetTransientPackage(), Ice);
+	Frost->SurfaceFuel.Add(SurfaceType1, 0.f);
+	Frost->SurfaceFuel.Add(SurfaceType3, 1.f);   // marsh
+	Frost->DefaultSurfaceFuel = 0.f;
+
+	TestEqual(TEXT("A frost does not cross dry grass"),
+		Frost->GetSurfaceFuel(SurfaceType1), 0.f);
+	TestEqual(TEXT("But crosses the marsh fire would not"),
+		Frost->GetSurfaceFuel(SurfaceType3), 1.f);
+	TestEqual(TEXT("Where fire finds the marsh ordinary"),
+		Definition->GetSurfaceFuel(SurfaceType3), 0.5f);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFuelJitterTest,
+	"ARPG.World.Spread.Fuel.NoTwoCellsHoldExactlyTheSameAndTheSameCellAlwaysDoes",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGFuelJitterTest::RunTest(const FString& Parameters)
+{
+	UARPGSpreadFuelMap* Map = NewObject<UARPGSpreadFuelMap>();
+	Map->Resolution = 16;
+	Map->JitterRange = 0.35f;
+
+	TArray<uint8> Cells;
+	Cells.Init(static_cast<uint8>(SurfaceType1), 16 * 16);
+	Map->SetChunkCells(FIntPoint(0, 0), Cells);
+
+	// A UNIFORM GRID BURNS IN DIAMONDS. Every cell in a ring reaches ignition on
+	// the same tick, so the front is a shape the grid chose rather than one the
+	// fire did -- and that regularity is what made the same fire look different
+	// depending on where the viewer stood relative to a cell boundary.
+	TSet<float> Seen;
+	float Lowest = 2.f;
+	float Highest = 0.f;
+
+	for (int32 Y = 0; Y < 16; ++Y)
+	{
+		for (int32 X = 0; X < 16; ++X)
+		{
+			const float Jitter = Map->GetJitterAt(FIntPoint(0, 0),
+				(X + 0.5f) / 16.f, (Y + 0.5f) / 16.f);
+
+			Seen.Add(Jitter);
+			Lowest = FMath::Min(Lowest, Jitter);
+			Highest = FMath::Max(Highest, Jitter);
+		}
+	}
+
+	TestTrue(TEXT("Cells vary rather than agreeing"), Seen.Num() > 32);
+	TestTrue(TEXT("Within the range they were given"), Lowest >= 0.65f - 0.01f);
+	TestTrue(TEXT("At both ends of it"), Highest <= 1.35f + 0.01f);
+	TestTrue(TEXT("And actually spread across it"), Highest - Lowest > 0.3f);
+
+	// RAGGED, NOT RANDOM. Hashed from the cell's coordinate, so a patch of ground
+	// always burns the same way and two bakes of one level agree.
+	UARPGSpreadFuelMap* Again = NewObject<UARPGSpreadFuelMap>();
+	Again->Resolution = 16;
+	Again->JitterRange = 0.35f;
+	Again->SetChunkCells(FIntPoint(0, 0), Cells);
+
+	TestEqual(TEXT("The same cell is the same every bake"),
+		Again->GetJitterAt(FIntPoint(0, 0), 0.3f, 0.7f),
+		Map->GetJitterAt(FIntPoint(0, 0), 0.3f, 0.7f));
+
+	// AND A DIFFERENT CHUNK IS DIFFERENT GROUND, so the pattern does not tile.
+	TestNotEqual(TEXT("A different chunk is not the same ground"),
+		Map->GetJitterAt(FIntPoint(0, 0), 0.3f, 0.7f),
+		Map->GetJitterAt(FIntPoint(1, 0), 0.3f, 0.7f));
+
+	// An unbaked map is exactly 1, so nothing that never asked for noise gets it.
+	UARPGSpreadFuelMap* Bare = NewObject<UARPGSpreadFuelMap>();
+	TestEqual(TEXT("Unbaked ground has no variation"),
+		Bare->GetJitterAt(FIntPoint(0, 0), 0.5f, 0.5f), 1.f);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGScorchTest,
+	"ARPG.World.Spread.Fuel.GroundBurnsPartwayAndStaysThatWay",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGScorchTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGSpreadTestUtils;
+	FTestWorld Scope;
+
+	UARPGMagicElement* Fire = MakeElement(GetTransientPackage(), TAG_Element_Fire);
+	UARPGSpreadDefinition* Definition = MakeFire(GetTransientPackage(), Fire);
+	Definition->FuelSeconds = 4.f;
+
+	UARPGSpreadSubsystem* Spread = Setup(Scope.World, Definition);
+
+	const FVector Origin(0, 0, 0);
+
+	TestEqual(TEXT("Unburnt ground is unscorched"),
+		Spread->GetScorchAt(Origin, TAG_Element_Fire), 0.f);
+
+	Spread->AddExposure(Origin, 150.f, 6.f, TAG_Element_Fire);
+	Run(Spread, 10);
+
+	const float PartWay = Spread->GetScorchAt(Origin, TAG_Element_Fire);
+
+	TestTrue(TEXT("Burning scorches it"), PartWay > 0.f);
+	TestTrue(TEXT("But not all at once"), PartWay < 1.f);
+
+	// THE SAME RULE THE CRATE LIVES BY, at a different granularity. Fuel is spent
+	// only while the cell is alight and never regrows, so quenching stops the burn
+	// where it stopped -- partially burnt grass, and nothing implements it.
+	Spread->Extinguish(Origin, 400.f, TAG_Element_Fire);
+	Run(Spread, 30);
+
+	TestFalse(TEXT("The fire is out"), Spread->IsBurning(Origin, TAG_Element_Fire));
+	TestEqual(TEXT("And the scorch stays exactly where it was"),
+		Spread->GetScorchAt(Origin, TAG_Element_Fire), PartWay, 0.001f);
+
+	// AND THE REMAINDER IS STILL THERE TO BURN.
+	Spread->AddExposure(Origin, 150.f, 6.f, TAG_Element_Fire);
+	Run(Spread, 10);
+
+	TestTrue(TEXT("Relit, it carries on from where it was"),
+		Spread->GetScorchAt(Origin, TAG_Element_Fire) > PartWay);
 
 	return true;
 }

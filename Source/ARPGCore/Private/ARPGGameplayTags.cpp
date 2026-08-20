@@ -25,6 +25,8 @@ UE_DEFINE_GAMEPLAY_TAG(TAG_Element_Lightning,          "Element.Lightning");
 UE_DEFINE_GAMEPLAY_TAG(TAG_Element_Water,              "Element.Water");
 UE_DEFINE_GAMEPLAY_TAG(TAG_Element_Ice,                "Element.Ice");
 UE_DEFINE_GAMEPLAY_TAG(TAG_Element_Steam,              "Element.Steam");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Element_Lava,               "Element.Lava");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Element_Obsidian,           "Element.Obsidian");
 UE_DEFINE_GAMEPLAY_TAG(TAG_Element_Magnetism,          "Element.Magnetism");
 UE_DEFINE_GAMEPLAY_TAG(TAG_Element_ConductedLightning, "Element.ConductedLightning");
 

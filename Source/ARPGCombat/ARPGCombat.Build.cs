@@ -25,7 +25,8 @@ public class ARPGCombat : ModuleRules
 		// PRIVATE: ability tasks are used inside the melee ability's .cpp and
 		// appear in no header here, so downstream modules do not inherit it.
 		PrivateDependencyModuleNames.AddRange(new string[] {
-			"GameplayTasks"
+			"GameplayTasks",
+			"Niagara"
 		});
 	}
 }

@@ -12,23 +12,6 @@
 #include "ARPGWorldSettings.h"
 #include "Engine/World.h"
 
-namespace
-{
-	/**
-	 * True where this machine owns the simulation.
-	 *
-	 * A world subsystem ticks and receives calls on clients as well as the
-	 * server, and none of the solvers were gated: each client ran its own copy
-	 * of world state that nothing replicates, and applied gameplay effects from
-	 * it. A world with no net driver -- an automation fixture -- counts as
-	 * authoritative, because there is nobody else to be.
-	 */
-	bool WorldHasAuthority(const UWorld* World)
-	{
-		return !World || World->GetNetMode() != NM_Client;
-	}
-}
-
 void UARPGElementalReactionSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
@@ -53,6 +36,18 @@ void UARPGElementalReactionSubsystem::Deinitialize()
 bool UARPGElementalReactionSubsystem::DoesSupportWorldType(const EWorldType::Type WorldType) const
 {
 	return WorldType == EWorldType::Game || WorldType == EWorldType::PIE;
+}
+
+bool UARPGElementalReactionSubsystem::HasAuthority() const
+{
+	const UWorld* World = GetWorld();
+
+	// A world subsystem ticks and receives calls on clients as well as the
+	// server, and none of the solvers were gated: each client ran its own copy
+	// of world state that nothing replicates, and applied gameplay effects from
+	// it. A world with no net driver -- an automation fixture -- counts as
+	// authoritative, because there is nobody else to be.
+	return !World || World->GetNetMode() != NM_Client;
 }
 
 void UARPGElementalReactionSubsystem::HandleVolumesMet(UARPGElementalVolumeComponent* A,
@@ -80,7 +75,7 @@ void UARPGElementalReactionSubsystem::Resolve(UARPGElementalVolumeComponent* A,
 	// Server only. A reaction spends both volumes' energy, spawns a product and
 	// deals damage -- a client resolving its own copy would double-count every
 	// collision it also receives from the server.
-	if (!WorldHasAuthority(GetWorld()))
+	if (!HasAuthority())
 	{
 		return;
 	}
@@ -182,21 +177,22 @@ void UARPGElementalReactionSubsystem::Resolve(UARPGElementalVolumeComponent* A,
 		UARPGElementalVolumeComponent* Charge = bAIsCharge ? A : B;
 		UARPGElementalVolumeComponent* Medium = bAIsCharge ? B : A;
 
-		// NOT THROUGH THE ICE. A floe floating on a pool roofs over the water
-		// beneath it, and the pool's own collider knows nothing about that -- so
-		// a bolt that struck the ice would enter the river underneath and
+		// NOT THROUGH THE ICE. A floe floating on a body of water roofs over what
+		// is beneath it, and the water's own collider knows nothing about that --
+		// so a bolt that struck the ice would enter the water underneath and
 		// conduct from there. What it hit was the ice.
 		//
 		// Asked at the CHARGE's own position, because that is where the strike
-		// landed.
+		// landed. And asked for ANY medium, not only a reservoir: a floe forms on
+		// whatever was frozen, and a pool is only a reservoir once it has gathered
+		// past a threshold -- so gating on that meant ice on an ordinary puddle
+		// roofed nothing at all, which is the common case rather than the rare
+		// one. The query walks the live solids and is free when there are none.
 		bool bRoofed = false;
-		if (Medium->bReservoir)
+		if (const UARPGFluidSurfaceSubsystem* Fluids =
+				GetWorld()->GetSubsystem<UARPGFluidSurfaceSubsystem>())
 		{
-			if (const UARPGFluidSurfaceSubsystem* Fluids =
-					GetWorld()->GetSubsystem<UARPGFluidSurfaceSubsystem>())
-			{
-				bRoofed = Fluids->IsCoveredBySolid(Charge->GetVolumeLocation());
-			}
+			bRoofed = Fluids->IsCoveredBySolid(Charge->GetVolumeLocation());
 		}
 
 		if (!bRoofed && Medium->Conductivity > 0.f)
@@ -286,17 +282,40 @@ void UARPGElementalReactionSubsystem::Resolve(UARPGElementalVolumeComponent* A,
 	// destroy its owner from inside Consume.
 	AActor* SourceActor = A->SourceActor ? A->SourceActor.Get() : B->SourceActor.Get();
 
+	// WHERE, for anything that cares. A puddle does not -- a liquid loses ground
+	// uniformly -- but a slab of ice melts at the point the fireball struck it,
+	// and OnElementalReaction has no room to say so. Left here rather than
+	// threaded through the hook's signature, which every projectile would then
+	// carry for the sake of one case.
+	UARPGFluidSurfaceSubsystem* Fluids = GetWorld()->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	if (Fluids)
+	{
+		Fluids->NoteReactionContact(A, B, Contact);
+
+		// And an empty ledger, so anything a consumed body hands back below is
+		// attributable to THIS reaction when the product is spawned.
+		Fluids->OpenReactionLedger();
+	}
+
 	A->Consume(Reacted * RateA, Product);
 	B->Consume(Reacted * RateB, Product);
 
 	if (Product && Magnitude >= MinMagnitude)
 	{
-		SpawnProduct(Product, Contact, Direction, Magnitude, SourceActor);
+		// A MELTED SLAB HAS ALREADY LEFT ITS FLUID at this very point, so the
+		// product must not leave it again -- fire + ice -> water is one body of
+		// water, not two. With no body consumed there is nothing else accounting
+		// for it and the product's deposit is the only one there will be.
+		const bool bProductDeposits = !Fluids || !Fluids->WasFluidReturned(Product->ElementTag);
+
+		SpawnProduct(Product, Contact, Direction, Magnitude, SourceActor, bProductDeposits);
 	}
 }
 
 void UARPGElementalReactionSubsystem::SpawnProduct(UARPGMagicElement* Product,
-	const FVector& Contact, const FVector& Direction, float Magnitude, AActor* SourceActor)
+	const FVector& Contact, const FVector& Direction, float Magnitude, AActor* SourceActor,
+	bool bDeposits)
 {
 	UWorld* World = GetWorld();
 	if (!World || !Product)
@@ -346,6 +365,15 @@ void UARPGElementalReactionSubsystem::SpawnProduct(UARPGMagicElement* Product,
 	if (AARPGDischargeEffect* Effect = Cast<AARPGDischargeEffect>(Spawned))
 	{
 		Effect->InitializeFromContext(Context);
+
+		// AFTER the effect has sized itself, because sizing is where the deposit
+		// radius comes from -- an effect derives what it wets from what it covers,
+		// and the one thing that can know this particular puddle is already spoken
+		// for is the caller.
+		if (!bDeposits)
+		{
+			Effect->DepositRadius = 0.f;
+		}
 	}
 
 	Spawned->FinishSpawning(SpawnTransform);

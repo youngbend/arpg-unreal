@@ -124,8 +124,14 @@ namespace ARPGComboTestUtils
 	}
 }
 
+// NAMED AS A LEAF UNDER "Combo", not as "ARPG.Combat.Combo" itself. The
+// automation controller builds its tree by splitting these names on dots, so a
+// test whose name is a strict prefix of another's becomes a PARENT node and
+// stops being run -- silently, and still reported as a pass because it never
+// reported anything. Adding NodeRegistry below is what would have done that to
+// this test.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGComboTest,
-	"ARPG.Combat.Combo",
+	"ARPG.Combat.Combo.StateMachine",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FARPGComboTest::RunTest(const FString& Parameters)
@@ -578,6 +584,52 @@ bool FARPGComboChainDepthTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("an attack with no bonus is untouched by depth"),
 			Plain->GetChainScaledMotionValue(1.f, 5), 1.f);
 	}
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGComboNodeRegistryTest,
+	"ARPG.Combat.Combo.NodeRegistry",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+/**
+ * The registry a tree carries of its own nodes.
+ *
+ * Every tree in the project predates it -- they were built by wiring roots and
+ * follow-ups directly -- so the walk that fills it in is what the graph editor
+ * reads when it opens one of them. Two things can go wrong with a walk over a
+ * structure that now permits sharing: counting a shared node twice, and never
+ * finishing at all.
+ */
+bool FARPGComboNodeRegistryTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGComboTestUtils;
+
+	UARPGWeaponAttackTree* Tree = NewObject<UARPGWeaponAttackTree>();
+
+	UARPGComboAttackNode* Opener = MakeNode(Tree, MakeAttack(TEXT("opener")));
+	UARPGComboAttackNode* Finisher = MakeNode(Tree, MakeAttack(TEXT("finisher")));
+
+	// One node reached three ways, which is the sword tree's shape.
+	Opener->FollowLight = Finisher;
+	Opener->FollowHeavy = Finisher;
+	Tree->RootLight = Opener;
+	Tree->ParryLight = Finisher;
+
+	Tree->RebuildNodeRegistry();
+
+	TestEqual(TEXT("A shared node is registered once, not once per parent"),
+		Tree->Nodes.Num(), 2);
+	TestTrue(TEXT("The opener is registered"), Tree->Nodes.Contains(Opener));
+	TestTrue(TEXT("The finisher is registered"), Tree->Nodes.Contains(Finisher));
+
+	// A chain that returns to its own opener is legal: the combo component
+	// resolves one step per press and never walks the structure. This walk does,
+	// so it is the only thing a cycle could hang.
+	Finisher->FollowLight = Opener;
+	Tree->RebuildNodeRegistry();
+
+	TestEqual(TEXT("A cycle terminates and registers each node once"), Tree->Nodes.Num(), 2);
 
 	return true;
 }
