@@ -14,8 +14,9 @@ public class arpgEditorTarget : TargetRules
 			"ARPGCore", "ARPGCombat", "ARPGMagic", "ARPGWorld", "ARPGAI", "arpg",
 
 			// Editor-only, and listed only here: the game target must never
-			// build it. It links UnrealEd and GraphEditor.
-			"ARPGCombatEditor"
+			// build them. They link UnrealEd, GraphEditor and StateTreeEditorModule.
+			"ARPGCombatEditor",
+			"ARPGAIEditor"
 		});
 	}
 }

@@ -24,15 +24,6 @@ void UARPGVitalRegenComponent::BeginPlay()
 	EnsureSubscribed();
 }
 
-UAbilitySystemComponent* UARPGVitalRegenComponent::GetASC() const
-{
-	if (!CachedASC)
-	{
-		CachedASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(GetOwner());
-	}
-	return CachedASC;
-}
-
 void UARPGVitalRegenComponent::EnsureSubscribed()
 {
 	if (bSubscribed)

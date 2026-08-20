@@ -13,25 +13,11 @@
 #include "AbilitySystemComponent.h"
 #include "AbilitySystemGlobals.h"
 #include "Components/PrimitiveComponent.h"
+#include "ARPGWorldAuthority.h"
 #include "ARPGWorldSettings.h"
 #include "Engine/World.h"
 
-namespace
-{
-	/**
-	 * True where this machine owns the simulation.
-	 *
-	 * A world subsystem ticks and receives calls on clients as well as the
-	 * server, and none of the solvers were gated: each client ran its own copy
-	 * of world state that nothing replicates, and applied gameplay effects from
-	 * it. A world with no net driver -- an automation fixture -- counts as
-	 * authoritative, because there is nobody else to be.
-	 */
-	bool WorldHasAuthority(const UWorld* World)
-	{
-		return !World || World->GetNetMode() != NM_Client;
-	}
-}
+
 #include "GameplayEffect.h"
 
 bool UARPGConductionSubsystem::DoesSupportWorldType(const EWorldType::Type WorldType) const
@@ -62,7 +48,7 @@ bool UARPGConductionSubsystem::Conducts(const FGameplayTag& ChargeTag,
 
 bool UARPGConductionSubsystem::HasAuthority() const
 {
-	return WorldHasAuthority(GetWorld());
+	return ARPGWorld::WorldHasAuthority(GetWorld());
 }
 
 const UARPGMagicCombinationTable* UARPGConductionSubsystem::GetTable() const

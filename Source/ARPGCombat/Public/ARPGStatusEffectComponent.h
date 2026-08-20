@@ -85,9 +85,30 @@ public:
 	 * burn resisted differently depending on its cause.
 	 *
 	 * Soft, so declaring one costs no hard content reference from C++.
+	 *
+	 * AN OVERRIDE, not the usual route. Prefer TickDamageTypeTag below: a path
+	 * pins this effect to one asset in one folder, which is exactly the
+	 * coupling that put /Game/ paths inside this module in the first place. Set
+	 * this only when a specific asset is genuinely meant rather than a category.
 	 */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Tick")
 	TSoftObjectPtr<UARPGDamageTypeAsset> TickDamageType;
+
+	/**
+	 * The damage type this effect ticks for, named by its Damage.* tag.
+	 *
+	 * WHY A TAG AND NOT A PATH. Burning burns for fire; that is a statement
+	 * about a CATEGORY, and the asset that answers for fire is content's
+	 * business, not this module's. UARPGAssetManager indexes every scanned
+	 * damage type by its own DamageTypeTag, so this resolves without ARPGCombat
+	 * ever naming a folder -- and re-pointing what "fire damage" means is an
+	 * asset edit rather than a code change.
+	 *
+	 * Ignored when TickDamageType above is set.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Tick",
+		meta = (Categories = "Damage"))
+	FGameplayTag TickDamageTypeTag;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Tick",
 		meta = (ClampMin = "0.0"))

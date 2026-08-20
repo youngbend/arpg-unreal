@@ -4,7 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "GameplayTagContainer.h"
-#include "Subsystems/WorldSubsystem.h"
+#include "ARPGSteppedWorldSubsystem.h"
 #include "ARPGFluidSurfaceSubsystem.generated.h"
 
 class AARPGDischargeEffect;
@@ -43,7 +43,7 @@ class UARPGSolidDefinition;
  * obsidian are two rows and two assets, and neither is a branch in this file.
  */
 UCLASS()
-class ARPGWORLD_API UARPGFluidSurfaceSubsystem : public UTickableWorldSubsystem
+class ARPGWORLD_API UARPGFluidSurfaceSubsystem : public UARPGSteppedWorldSubsystem
 {
 	GENERATED_BODY()
 
@@ -51,7 +51,6 @@ public:
 	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
 	virtual void Deinitialize() override;
 	virtual bool DoesSupportWorldType(const EWorldType::Type WorldType) const override;
-	virtual void Tick(float DeltaTime) override;
 	virtual TStatId GetStatId() const override;
 
 	/** What each fluid is like as a body. */
@@ -260,7 +259,13 @@ public:
 
 	/** Runs one weather step immediately, bypassing the tick rate. */
 	UFUNCTION(BlueprintCallable, Category = "ARPG|Fluid")
-	void StepSimulation(float DeltaTime);
+	//~ UARPGSteppedWorldSubsystem -- the base owns the accumulator and the
+	//  authority gate; this class only says how fast and what a step does.
+	virtual float GetStepRate() const override { return TickRate; }
+	/** Fluids are slower than spread and may legitimately run at half a hertz. */
+	virtual float GetMinStepRate() const override { return 0.5f; }
+	virtual void StepSimulation(float DeltaTime) override;
+	//~ End UARPGSteppedWorldSubsystem
 
 	/**
 	 * Retires a body that has nothing left: drops it from the register and
@@ -334,9 +339,6 @@ private:
 
 	void TickWeather(float DeltaTime);
 
-	/** True where this machine owns the simulation; pools are server-spawned. */
-	bool HasAuthority() const;
-
 	UPROPERTY(Transient)
 	TArray<AARPGFluidPool*> Pools;
 
@@ -380,6 +382,4 @@ private:
 	 * A window in seconds would have to guess how long a discharge lives.
 	 */
 	TArray<FGameplayTag> FluidReturnedThisReaction;
-
-	float TickAccumulator = 0.f;
 };

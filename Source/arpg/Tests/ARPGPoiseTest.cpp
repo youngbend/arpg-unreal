@@ -1,8 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Misc/AutomationTest.h"
+#include "ARPGTestFixtures.h"
 
-#if WITH_DEV_AUTOMATION_TESTS
+#if WITH_DEV_AUTOMATION_TESTS && ARPG_WITH_TESTS
 
 #include "ARPGCombatDummy.h"
 #include "ARPGDamageGameplayEffect.h"
@@ -27,53 +28,9 @@
  */
 namespace ARPGPoiseTestUtils
 {
-	struct FTestWorld
-	{
-		UWorld* World = nullptr;
+	using ARPGTest::FTestWorld;
 
-		FTestWorld()
-		{
-			World = UWorld::CreateWorld(EWorldType::Game, /*bInformEngineOfWorld=*/false);
-			FWorldContext& Context = GEngine->CreateNewWorldContext(EWorldType::Game);
-			Context.SetCurrentWorld(World);
-			World->InitializeActorsForPlay(FURL());
-			World->BeginPlay();
-		}
-
-		~FTestWorld()
-		{
-			GEngine->DestroyWorldContext(World);
-			World->DestroyWorld(/*bInformEngineOfWorld=*/false);
-		}
-
-		void Advance(float Seconds, float Step = 0.05f)
-		{
-			for (float Elapsed = 0.f; Elapsed < Seconds; Elapsed += Step)
-			{
-				World->Tick(LEVELTICK_All, Step);
-			}
-		}
-	};
-
-	/**
-	 * Ticks specific components by hand.
-	 *
-	 * A bare UWorld::CreateWorld world does not dispatch BeginPlay or register
-	 * component ticks for actors spawned into it, so World::Tick alone leaves
-	 * every timer in these components frozen -- which reads exactly like a
-	 * blend-in that never completes or a meter that never drains. Driving them
-	 * directly keeps the test measuring the components rather than the harness.
-	 */
-	void TickComponents(const TArray<UActorComponent*>& Components, float Seconds, float Step = 0.02f)
-	{
-		for (float Elapsed = 0.f; Elapsed < Seconds; Elapsed += Step)
-		{
-			for (UActorComponent* Component : Components)
-			{
-				Component->TickComponent(Step, LEVELTICK_All, nullptr);
-			}
-		}
-	}
+	using ARPGTest::TickComponents;
 
 	struct FCombatant
 	{
@@ -329,4 +286,4 @@ bool FARPGPoiseTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-#endif // WITH_DEV_AUTOMATION_TESTS
+#endif // WITH_DEV_AUTOMATION_TESTS && ARPG_WITH_TESTS

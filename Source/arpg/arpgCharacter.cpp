@@ -16,7 +16,16 @@
 #include "ARPGAbilitySystemComponent.h"
 #include "ARPGHitboxComponent.h"
 #include "ARPGDamageTypeAsset.h"
+#include "ARPGArmorComponent.h"
+#include "ARPGCloakComponent.h"
+#include "ARPGCombatProgressionTrackers.h"
 #include "ARPGComboComponent.h"
+#include "ARPGHitStopComponent.h"
+#include "ARPGHurtboxComponent.h"
+#include "ARPGMagicProgressionTracker.h"
+#include "ARPGPoiseComponent.h"
+#include "ARPGProgressionComponent.h"
+#include "ARPGStatusResistanceComponent.h"
 #include "ARPGInventoryComponent.h"
 #include "ARPGHandVisualComponent.h"
 #include "ARPGMagicCombinationTable.h"
@@ -125,6 +134,31 @@ AarpgCharacter::AarpgCharacter()
 	// hearing channel does nothing on the one actor it matters most for -- see
 	// the header.
 	NoiseComponent = CreateDefaultSubobject<UARPGNoiseComponent>(TEXT("NoiseComponent"));
+
+	// --- What the player is on the receiving end of --------------------------
+	//
+	// See the header. Each of these was implemented, tested and attached to
+	// nothing; the tests built their own actors and added them by hand, so the
+	// suite stayed green while the real pawn went without.
+
+	// FIRST, because without it the player is not a damageable thing at all --
+	// UARPGHitboxComponent skips any actor whose hurtbox does not resolve.
+	Hurtbox = CreateDefaultSubobject<UARPGHurtboxComponent>(TEXT("Hurtbox"));
+
+	PoiseComponent   = CreateDefaultSubobject<UARPGPoiseComponent>(TEXT("PoiseComponent"));
+	ArmorComponent   = CreateDefaultSubobject<UARPGArmorComponent>(TEXT("ArmorComponent"));
+	HitStopComponent = CreateDefaultSubobject<UARPGHitStopComponent>(TEXT("HitStopComponent"));
+	StatusResistance = CreateDefaultSubobject<UARPGStatusResistanceComponent>(TEXT("StatusResistance"));
+	CloakComponent   = CreateDefaultSubobject<UARPGCloakComponent>(TEXT("CloakComponent"));
+
+	// Progression: the visible level and the three hidden trackers. Each tracker
+	// binds its own XP source in BeginPlay -- weapon to hits landed, armour to
+	// hits received, magic to discharges cast -- so attaching them is the whole
+	// of the wiring.
+	Progression       = CreateDefaultSubobject<UARPGProgressionComponent>(TEXT("Progression"));
+	WeaponProgression = CreateDefaultSubobject<UARPGWeaponProgressionTracker>(TEXT("WeaponProgression"));
+	ArmorProgression  = CreateDefaultSubobject<UARPGArmorProgressionTracker>(TEXT("ArmorProgression"));
+	MagicProgression  = CreateDefaultSubobject<UARPGMagicProgressionTracker>(TEXT("MagicProgression"));
 
 	// The movement component's own default is what the character runs at, so the
 	// tiers are anchored to it rather than to a second set of numbers that could

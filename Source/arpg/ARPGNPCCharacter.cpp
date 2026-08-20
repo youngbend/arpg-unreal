@@ -8,7 +8,9 @@
 #include "ARPGHurtboxComponent.h"
 #include "ARPGInventoryComponent.h"
 #include "ARPGNPCComponent.h"
+#include "ARPGHitStopComponent.h"
 #include "ARPGNoiseComponent.h"
+#include "ARPGStatusResistanceComponent.h"
 #include "ARPGOffenseSet.h"
 #include "ARPGParryComponent.h"
 #include "ARPGPoiseComponent.h"
@@ -38,16 +40,9 @@ AARPGNPCCharacter::AARPGNPCCharacter()
 	GetCharacterMovement()->RotationRate = FRotator(0.f, 360.f, 0.f);
 	GetCharacterMovement()->MaxWalkSpeed = 400.f;
 
-	AbilitySystemComponent = CreateDefaultSubobject<UARPGAbilitySystemComponent>(
-		TEXT("AbilitySystemComponent"));
-
 	// Minimal, not Mixed: nothing owns an NPC, so no client needs the full
 	// gameplay-effect list for it. Port plan §3.1.
-	AbilitySystemComponent->SetReplicationMode(EGameplayEffectReplicationMode::Minimal);
-
-	VitalSet      = CreateDefaultSubobject<UARPGVitalSet>(TEXT("VitalSet"));
-	OffenseSet    = CreateDefaultSubobject<UARPGOffenseSet>(TEXT("OffenseSet"));
-	ResistanceSet = CreateDefaultSubobject<UARPGResistanceSet>(TEXT("ResistanceSet"));
+	Combatant.Create(*this, EGameplayEffectReplicationMode::Minimal);
 
 	Hurtbox = CreateDefaultSubobject<UARPGHurtboxComponent>(TEXT("Hurtbox"));
 
@@ -71,12 +66,17 @@ AARPGNPCCharacter::AARPGNPCCharacter()
 
 	NoiseComponent = CreateDefaultSubobject<UARPGNoiseComponent>(TEXT("NoiseComponent"));
 
+	// See the header: hit-stop needs a component at BOTH ends of an exchange,
+	// and status resistance was doing nothing on the actor it is aimed at.
+	HitStopComponent = CreateDefaultSubobject<UARPGHitStopComponent>(TEXT("HitStopComponent"));
+	StatusResistance = CreateDefaultSubobject<UARPGStatusResistanceComponent>(TEXT("StatusResistance"));
+
 	NPCComponent = CreateDefaultSubobject<UARPGNPCComponent>(TEXT("NPCComponent"));
 }
 
 UAbilitySystemComponent* AARPGNPCCharacter::GetAbilitySystemComponent() const
 {
-	return AbilitySystemComponent;
+	return Combatant.AbilitySystem;
 }
 
 void AARPGNPCCharacter::BeginPlay()
@@ -87,9 +87,9 @@ void AARPGNPCCharacter::BeginPlay()
 	// writes land on an ability system with no actor info -- which mostly works,
 	// right up until an attribute-set callback reaches for an avatar that is not
 	// there yet.
-	if (AbilitySystemComponent)
+	if (Combatant.AbilitySystem)
 	{
-		AbilitySystemComponent->InitAbilityActorInfo(this, this);
+		Combatant.AbilitySystem->InitAbilityActorInfo(this, this);
 	}
 
 	Super::BeginPlay();

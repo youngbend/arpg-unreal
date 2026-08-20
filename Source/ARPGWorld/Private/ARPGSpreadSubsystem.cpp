@@ -83,16 +83,6 @@ void UARPGSpreadSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	bMediaDirty = true;
 }
 
-bool UARPGSpreadSubsystem::HasAuthority() const
-{
-	const UWorld* World = GetWorld();
-
-	// A standalone or listen-server world is authoritative; a pure client is not.
-	// Anything with no net driver at all -- an automation fixture -- counts as
-	// authoritative, because there is nobody else to be.
-	return !World || World->GetNetMode() != NM_Client;
-}
-
 bool UARPGSpreadSubsystem::DoesSupportWorldType(const EWorldType::Type WorldType) const
 {
 	return WorldType == EWorldType::Game || WorldType == EWorldType::PIE;
@@ -768,33 +758,6 @@ void UARPGSpreadSubsystem::StepSimulation(float DeltaTime)
 
 	// LAST, so it draws the field as it now is rather than as it was.
 	TickMask();
-}
-
-void UARPGSpreadSubsystem::Tick(float DeltaTime)
-{
-	Super::Tick(DeltaTime);
-
-	// The field is server state. A client simulating its own copy would diverge
-	// immediately -- nothing here replicates -- and TickContactDamage would then
-	// apply gameplay effects and consume invincibility frames from it.
-	if (!HasAuthority())
-	{
-		return;
-	}
-
-	const float Interval = 1.f / FMath::Max(1.f, TickRate);
-
-	TickAccumulator += DeltaTime;
-	if (TickAccumulator < Interval)
-	{
-		return;
-	}
-
-	// The accumulated time, not the frame's: the simulation advances in real
-	// seconds regardless of frame rate, so a fire does not spread faster on a
-	// faster machine.
-	StepSimulation(TickAccumulator);
-	TickAccumulator = 0.f;
 }
 
 void UARPGSpreadSubsystem::EnsureScratch()

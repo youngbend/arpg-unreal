@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Character.h"
 #include "AbilitySystemInterface.h"
+#include "ARPGCombatantSubobjects.h"
 #include "ARPGNPCCharacter.generated.h"
 
 class UARPGAbilitySystemComponent;
@@ -13,7 +14,9 @@ class UARPGHitboxComponent;
 class UARPGHurtboxComponent;
 class UARPGInventoryComponent;
 class UARPGNPCComponent;
+class UARPGHitStopComponent;
 class UARPGNoiseComponent;
+class UARPGStatusResistanceComponent;
 class UARPGOffenseSet;
 class UARPGParryComponent;
 class UARPGPoiseComponent;
@@ -64,8 +67,9 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<UARPGNPCComponent> NPCComponent;
 
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
-	TObjectPtr<UARPGAbilitySystemComponent> AbilitySystemComponent;
+	/** The ASC and three attribute sets. See FARPGCombatantSubobjects. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "ARPG|Abilities")
+	FARPGCombatantSubobjects Combatant;
 
 	/** Takes hits and, through the NPC component, turns them into knowledge. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
@@ -112,13 +116,22 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<UARPGNoiseComponent> NoiseComponent;
 
-private:
-	UPROPERTY()
-	TObjectPtr<UARPGVitalSet> VitalSet;
+	/**
+	 * The freeze on a landed hit.
+	 *
+	 * Hit-stop is applied to ATTACKER AND TARGET together, on the argument that
+	 * a target freezing alone reads as the target glitching rather than as a hit
+	 * landing. With no component on either end of a player-versus-NPC exchange,
+	 * neither half happened.
+	 *
+	 * NO ARMOUR COMPONENT alongside it, deliberately: UARPGNPCDefinition has no
+	 * armour field, so nothing would ever equip any. An NPC's mitigation comes
+	 * from the archetype's attributes directly.
+	 */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UARPGHitStopComponent> HitStopComponent;
 
-	UPROPERTY()
-	TObjectPtr<UARPGOffenseSet> OffenseSet;
-
-	UPROPERTY()
-	TObjectPtr<UARPGResistanceSet> ResistanceSet;
+	/** Resists incoming status effects. Absent, every application landed in full. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UARPGStatusResistanceComponent> StatusResistance;
 };

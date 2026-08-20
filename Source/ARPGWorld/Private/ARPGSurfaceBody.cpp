@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ARPGSurfaceBody.h"
+#include "SignificanceManager.h"
 #include "ARPGElementalVolumeComponent.h"
 #include "ARPGFluidDefinition.h"
 #include "ARPGFluidGeometry.h"
@@ -15,6 +16,75 @@
 FGameplayTag UARPGFluidDefinition::GetElementTag() const
 {
 	return Element ? Element->ElementTag : FGameplayTag();
+}
+
+const FName AARPGSurfaceBody::SignificanceTag(TEXT("ARPGSurfaceBody"));
+
+namespace
+{
+	/**
+	 * Distance falloff against the nearest viewpoint, 1 underfoot to 0 at Reach.
+	 *
+	 * NO VIEWPOINTS MEANS EVERYTHING MATTERS. A dedicated server with no local
+	 * viewer, and every automation fixture, would otherwise quietly switch the
+	 * whole system off -- the kind of optimisation that shows up only as a test
+	 * passing for the wrong reason.
+	 */
+	float ComputeSurfaceSignificance(USignificanceManager::FManagedObjectInfo* Info,
+		const FTransform& Viewpoint)
+	{
+		const AARPGSurfaceBody* Body = Info ? Cast<AARPGSurfaceBody>(Info->GetObject()) : nullptr;
+		if (!IsValid(Body))
+		{
+			return 0.f;
+		}
+
+		// Permanent bodies are authored, not litter: an earth wall someone raised
+		// for cover must never be the thing a budget decides to drop.
+		if (Body->IsPermanent())
+		{
+			return TNumericLimits<float>::Max();
+		}
+
+		const float Reach = 8000.f;
+		const float Distance = FVector::Dist(Body->GetActorLocation(), Viewpoint.GetLocation());
+		return FMath::Clamp(1.f - Distance / Reach, 0.f, 1.f);
+	}
+}
+
+void AARPGSurfaceBody::BeginPlay()
+{
+	Super::BeginPlay();
+
+	if (USignificanceManager* Significance = USignificanceManager::Get(GetWorld()))
+	{
+		Significance->RegisterObject(this, SignificanceTag, &ComputeSurfaceSignificance,
+			USignificanceManager::EPostSignificanceType::None);
+	}
+}
+
+void AARPGSurfaceBody::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	if (USignificanceManager* Significance = USignificanceManager::Get(GetWorld()))
+	{
+		Significance->UnregisterObject(this);
+	}
+
+	Super::EndPlay(EndPlayReason);
+}
+
+float AARPGSurfaceBody::GetSignificance() const
+{
+	const USignificanceManager* Significance = USignificanceManager::Get(GetWorld());
+	if (!Significance)
+	{
+		// No manager -- which is every automation fixture. Everything matters
+		// equally, so the budget falls back to area alone.
+		return 1.f;
+	}
+
+	const USignificanceManager::FManagedObjectInfo* Info = Significance->GetManagedObject(this);
+	return Info ? Info->GetSignificance() : 1.f;
 }
 
 AARPGSurfaceBody::AARPGSurfaceBody()

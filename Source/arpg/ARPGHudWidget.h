@@ -3,12 +3,14 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Blueprint/UserWidget.h"
+#include "CommonUserWidget.h"
 #include "GameplayTagContainer.h"
 #include "ARPGHudWidget.generated.h"
 
 class AActor;
 class UARPGComboComponent;
+class UARPGItemDefinition;
+class UARPGMagicElement;
 class UARPGLocomotionComponent;
 class UARPGMagicComponent;
 class UARPGParryComponent;
@@ -116,7 +118,7 @@ struct FARPGHudStatus
  * Nothing needs un-wiring first.
  */
 UCLASS()
-class UARPGHudWidget : public UUserWidget
+class UARPGHudWidget : public UCommonUserWidget
 {
 	GENERATED_BODY()
 
@@ -140,9 +142,18 @@ public:
 	// graph -- would put a copy of every rule back in Blueprint, which is what
 	// the C++ getters above exist to avoid.
 	//
-	// Everything here is driven from NativeTick. A HUD reads a dozen numbers a
-	// frame; that is cheaper than the delegate plumbing to avoid it, and it
-	// cannot go stale.
+	// Everything here is refreshed WHEN SOMETHING CHANGES, not every frame.
+	//
+	// It used to be driven unconditionally from NativeTick, on the argument that
+	// a dozen reads a frame is cheaper than delegate plumbing and cannot go
+	// stale. The first half was true; the second was the problem. Pulling meant
+	// the HUD had to know which six components to interrogate and reach into all
+	// of them, which is the coupling -- not the arithmetic. The components
+	// already declared every delegate needed to be told instead, and nothing was
+	// listening to any of them.
+	//
+	// So: bind once per possession, mark dirty on change, refresh at most once a
+	// frame and only when there is something to say. See MarkDirty().
 
 	UPROPERTY(meta = (BindWidgetOptional))
 	TObjectPtr<UProgressBar> HealthBar;
@@ -351,6 +362,53 @@ protected:
 
 	/** Pushes the current state into whichever bound widgets exist. */
 	void RefreshBoundWidgets();
+
+	/**
+	 * Subscribes to everything that can change what this HUD shows.
+	 *
+	 * Called on every possession change, after the component pointers are
+	 * resolved. Unbinding first is not optional -- a widget that survives two
+	 * possessions would otherwise hold two subscriptions to the second pawn and
+	 * one to a dead one.
+	 */
+	void BindSubjectDelegates();
+	void UnbindSubjectDelegates();
+
+	/** Queues a refresh for the next frame. Cheap enough to call from anything. */
+	void MarkDirty() { bDirty = true; }
+
+	// Delegate sinks. All of them do the same thing -- the HUD does not care
+	// WHAT changed, only that something did -- but UFUNCTION-bound dynamic
+	// delegates must match their signatures exactly, so each shape needs one.
+	//
+	// ONLY THE THREE SOURCES RefreshBoundWidgets ACTUALLY READS are bound:
+	// attributes, the magic component and the quick slots. The combo, parry,
+	// weapon and locomotion getters below exist for Blueprint to call on demand,
+	// and a Blueprint asking a question when it wants the answer is already
+	// pull-shaped -- subscribing on their behalf would be plumbing for nobody.
+	UFUNCTION() void HandleSelectionChanged(int32 ActiveMask);
+	UFUNCTION() void HandleCombinationResolved(UARPGMagicElement* Combination);
+	UFUNCTION() void HandleQuickSlotSelected(int32 SlotIndex);
+	UFUNCTION() void HandleConsumableUsed(UARPGItemDefinition* Item);
+
+	/** Attribute-change sink. Not a UFUNCTION: GAS uses a plain delegate here. */
+	void HandleAttributeChanged(const struct FOnAttributeChangeData& Data);
+
+	/** Set by every change; cleared by the refresh it causes. */
+	bool bDirty = true;
+
+	/**
+	 * True while the quick-slot cooldown is running.
+	 *
+	 * The one piece of state with no event behind it -- a cooldown just elapses.
+	 * Rather than tick for everything on its account, the HUD stays dirty only
+	 * while a cooldown is actually counting down, which is a second or two after
+	 * a drink rather than every frame of the game.
+	 */
+	bool IsAwaitingCooldown() const;
+
+	/** Attribute delegate handles, so the bindings can be undone on repossession. */
+	TArray<FDelegateHandle> AttributeHandles;
 
 	/** Constructs the plain default layout into an empty widget tree. */
 	void BuildDefaultLayout();

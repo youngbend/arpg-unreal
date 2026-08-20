@@ -30,42 +30,36 @@ AARPGCombatDummy::AARPGCombatDummy()
 
 	Hurtbox = CreateDefaultSubobject<UARPGHurtboxComponent>(TEXT("Hurtbox"));
 
-	AbilitySystemComponent = CreateDefaultSubobject<UARPGAbilitySystemComponent>(
-		TEXT("AbilitySystemComponent"));
 	// Minimal, not Mixed: nothing owns this actor, so no client needs the full
 	// gameplay-effect list for it -- replicated tags and attributes are enough.
-	AbilitySystemComponent->SetReplicationMode(EGameplayEffectReplicationMode::Minimal);
-
-	VitalSet      = CreateDefaultSubobject<UARPGVitalSet>(TEXT("VitalSet"));
-	OffenseSet    = CreateDefaultSubobject<UARPGOffenseSet>(TEXT("OffenseSet"));
-	ResistanceSet = CreateDefaultSubobject<UARPGResistanceSet>(TEXT("ResistanceSet"));
+	Combatant.Create(*this, EGameplayEffectReplicationMode::Minimal);
 
 	FactionTag = TAG_Faction_Enemy;
 }
 
 UAbilitySystemComponent* AARPGCombatDummy::GetAbilitySystemComponent() const
 {
-	return AbilitySystemComponent;
+	return Combatant.AbilitySystem;
 }
 
 void AARPGCombatDummy::BeginPlay()
 {
 	Super::BeginPlay();
 
-	if (!AbilitySystemComponent)
+	if (!Combatant.AbilitySystem)
 	{
 		return;
 	}
 
 	// Owner and avatar are both this actor -- there is no PlayerState in the way.
-	AbilitySystemComponent->InitAbilityActorInfo(this, this);
+	Combatant.AbilitySystem->InitAbilityActorInfo(this, this);
 
 	// The health-change log is presentation, so it binds on every instance,
 	// server and client alike. Watching it on the client is what proves the
 	// attribute actually replicated rather than just changing on the server.
 	if (bLogHealthChanges)
 	{
-		AbilitySystemComponent->GetGameplayAttributeValueChangeDelegate(
+		Combatant.AbilitySystem->GetGameplayAttributeValueChangeDelegate(
 			UARPGVitalSet::GetHealthAttribute())
 			.AddUObject(this, &AARPGCombatDummy::OnHealthChanged);
 	}
@@ -77,16 +71,16 @@ void AARPGCombatDummy::BeginPlay()
 
 	if (FactionTag.IsValid())
 	{
-		AbilitySystemComponent->AddLooseGameplayTag(
+		Combatant.AbilitySystem->AddLooseGameplayTag(
 			FactionTag, 1, EGameplayTagReplicationState::TagOnly);
 	}
 
 	// SetNumericAttributeBase rather than applying an init GameplayEffect: this
 	// is a test fixture, and a base-value set is the one case where bypassing
 	// the effect pipeline is the honest thing to do.
-	AbilitySystemComponent->SetNumericAttributeBase(UARPGVitalSet::GetMaxHealthAttribute(), MaxHealth);
-	AbilitySystemComponent->SetNumericAttributeBase(UARPGVitalSet::GetHealthAttribute(), MaxHealth);
-	AbilitySystemComponent->SetNumericAttributeBase(UARPGResistanceSet::GetBaseArmorAttribute(), BaseArmor);
+	Combatant.AbilitySystem->SetNumericAttributeBase(UARPGVitalSet::GetMaxHealthAttribute(), MaxHealth);
+	Combatant.AbilitySystem->SetNumericAttributeBase(UARPGVitalSet::GetHealthAttribute(), MaxHealth);
+	Combatant.AbilitySystem->SetNumericAttributeBase(UARPGResistanceSet::GetBaseArmorAttribute(), BaseArmor);
 
 	for (const TPair<TObjectPtr<UARPGDamageTypeAsset>, float>& Entry : Resistances)
 	{
@@ -105,7 +99,7 @@ void AARPGCombatDummy::BeginPlay()
 			continue;
 		}
 
-		AbilitySystemComponent->SetNumericAttributeBase(Type->ResistanceAttribute, Entry.Value);
+		Combatant.AbilitySystem->SetNumericAttributeBase(Type->ResistanceAttribute, Entry.Value);
 	}
 }
 

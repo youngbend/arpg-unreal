@@ -1,8 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Misc/AutomationTest.h"
+#include "ARPGTestFixtures.h"
 
-#if WITH_DEV_AUTOMATION_TESTS
+#if WITH_DEV_AUTOMATION_TESTS && ARPG_WITH_TESTS
 
 #include "ARPGCombatDummy.h"
 #include "ARPGGameplayTags.h"
@@ -23,34 +24,7 @@
  */
 namespace ARPGStatusTestUtils
 {
-	struct FTestWorld
-	{
-		UWorld* World = nullptr;
-
-		FTestWorld()
-		{
-			World = UWorld::CreateWorld(EWorldType::Game, /*bInformEngineOfWorld=*/false);
-			FWorldContext& Context = GEngine->CreateNewWorldContext(EWorldType::Game);
-			Context.SetCurrentWorld(World);
-			World->InitializeActorsForPlay(FURL());
-			World->BeginPlay();
-		}
-
-		~FTestWorld()
-		{
-			GEngine->DestroyWorldContext(World);
-			World->DestroyWorld(/*bInformEngineOfWorld=*/false);
-		}
-
-		/** Advances world time in small steps so timer-driven periodic effects fire. */
-		void Advance(float Seconds, float Step = 0.05f)
-		{
-			for (float Elapsed = 0.f; Elapsed < Seconds; Elapsed += Step)
-			{
-				World->Tick(LEVELTICK_All, Step);
-			}
-		}
-	};
+	using ARPGTest::FTestWorld;
 
 	AARPGCombatDummy* SpawnDummy(UWorld* World, float Health = 100.f)
 	{
@@ -228,4 +202,4 @@ bool FARPGStatusEffectTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-#endif // WITH_DEV_AUTOMATION_TESTS
+#endif // WITH_DEV_AUTOMATION_TESTS && ARPG_WITH_TESTS

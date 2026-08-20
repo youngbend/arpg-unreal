@@ -104,6 +104,9 @@ EStateTreeRunStatus FARPGStateTreeTask_AttemptParry::EnterState(
 		return EStateTreeRunStatus::Failed;
 	}
 
+	// Held for the life of the attempt, so Tick does not re-find it every frame.
+	Data.Parry = Parry;
+
 	// Nothing to react to. Failing rather than running lets the tree fall straight
 	// through to a normal attack state on the same tick.
 	const UARPGComboComponent* TargetCombo =
@@ -150,8 +153,10 @@ EStateTreeRunStatus FARPGStateTreeTask_AttemptParry::Tick(FStateTreeExecutionCon
 	FInstanceDataType& Data = Context.GetInstanceData(*this);
 
 	APawn* Pawn = ARPGStateTree::GetPawn(Context);
-	UARPGParryComponent* Parry =
-		Pawn ? Pawn->FindComponentByClass<UARPGParryComponent>() : nullptr;
+
+	// Resolved in EnterState. Still null-checked: a pawn destroyed mid-attempt
+	// takes its components with it, and the weak-by-nature UPROPERTY clears.
+	UARPGParryComponent* Parry = Data.Parry;
 
 	if (!Pawn || !Parry || !Data.Target)
 	{

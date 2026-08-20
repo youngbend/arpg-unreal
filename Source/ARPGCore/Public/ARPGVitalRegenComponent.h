@@ -3,7 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Components/ActorComponent.h"
+#include "ARPGGameplayComponentBase.h"
 #include "ARPGVitalRegenComponent.generated.h"
 
 class UAbilitySystemComponent;
@@ -35,7 +35,7 @@ class UAbilitySystemComponent;
  * refills mid-combo for reasons nobody could reproduce.
  */
 UCLASS(ClassGroup = (ARPG), meta = (BlueprintSpawnableComponent))
-class ARPGCORE_API UARPGVitalRegenComponent : public UActorComponent
+class ARPGCORE_API UARPGVitalRegenComponent : public UARPGGameplayComponentBase
 {
 	GENERATED_BODY()
 
@@ -59,7 +59,6 @@ public:
 	void NotifyStaminaSpent() { StaminaHoldTimer = StaminaRegenDelay; }
 
 protected:
-	UAbilitySystemComponent* GetASC() const;
 
 	/**
 	 * Binds the stamina watcher if it is not already bound. Idempotent.
@@ -78,9 +77,6 @@ protected:
 
 private:
 	void HandleStaminaChanged(const struct FOnAttributeChangeData& Data);
-
-	UPROPERTY(Transient)
-	mutable TObjectPtr<UAbilitySystemComponent> CachedASC;
 
 	float StaminaHoldTimer = 0.f;
 

@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/PlayerState.h"
 #include "AbilitySystemInterface.h"
+#include "ARPGCombatantSubobjects.h"
 #include "ARPGPlayerState.generated.h"
 
 class UARPGAbilitySystemComponent;
@@ -36,29 +37,18 @@ public:
 	/** Typed accessor, so call sites don't cast. */
 	UARPGAbilitySystemComponent* GetARPGAbilitySystemComponent() const
 	{
-		return AbilitySystemComponent;
+		return Combatant.AbilitySystem;
 	}
 
-	UARPGVitalSet*      GetVitalSet() const      { return VitalSet; }
-	UARPGOffenseSet*    GetOffenseSet() const    { return OffenseSet; }
-	UARPGResistanceSet* GetResistanceSet() const { return ResistanceSet; }
+	UARPGVitalSet*      GetVitalSet() const      { return Combatant.VitalSet; }
+	UARPGOffenseSet*    GetOffenseSet() const    { return Combatant.OffenseSet; }
+	UARPGResistanceSet* GetResistanceSet() const { return Combatant.ResistanceSet; }
 
 protected:
 	virtual void BeginPlay() override;
 
 private:
+	/** The ASC and three attribute sets. See FARPGCombatantSubobjects. */
 	UPROPERTY(VisibleAnywhere, Category = "ARPG|Abilities")
-	TObjectPtr<UARPGAbilitySystemComponent> AbilitySystemComponent;
-
-	// Attribute sets are subobjects of the ASC's OWNING ACTOR, which is how GAS
-	// discovers and registers them. Creating them anywhere else (on the pawn, at
-	// runtime) means they never get registered and every attribute reads as 0.
-	UPROPERTY()
-	TObjectPtr<UARPGVitalSet> VitalSet;
-
-	UPROPERTY()
-	TObjectPtr<UARPGOffenseSet> OffenseSet;
-
-	UPROPERTY()
-	TObjectPtr<UARPGResistanceSet> ResistanceSet;
+	FARPGCombatantSubobjects Combatant;
 };

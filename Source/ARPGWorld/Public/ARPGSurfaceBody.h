@@ -38,6 +38,31 @@ class ARPGWORLD_API AARPGSurfaceBody : public AActor, public IARPGElementalSurfa
 public:
 	AARPGSurfaceBody();
 
+	//~ AActor
+	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+	//~ End AActor
+
+	/** The tag every surface body registers under with USignificanceManager. */
+	static const FName SignificanceTag;
+
+	/**
+	 * How much this body matters right now: 1 underfoot, 0 beyond reach.
+	 *
+	 * REGISTERED WITH THE ENGINE rather than computed on demand. The fluid
+	 * subsystem already read USignificanceManager for its VIEWPOINTS, then threw
+	 * that away and did its own linear distance scan per body -- and the budget
+	 * cull, which is the one place the answer actually changes what happens,
+	 * ignored significance entirely and dropped whichever body had the smallest
+	 * area. A puddle at the player's feet is small; the field they crossed ten
+	 * minutes ago is large. The cull was reliably picking the wrong one.
+	 *
+	 * Registering means the engine maintains this against its own viewpoint list,
+	 * on its own schedule, and every other system that wants to know what matters
+	 * reads the same number.
+	 */
+	float GetSignificance() const;
+
 	//~ IARPGElementalSurface. A body is small enough to hand back whole, so the
 	// contact bound is ignored -- the caller clips against the agent anyway.
 	virtual TArray<FVector2D> GetSurfaceFootprint(const FVector2D& Centre, double Radius) const override;

@@ -6,6 +6,7 @@
 #include "GameFramework/Actor.h"
 #include "AbilitySystemInterface.h"
 #include "GameplayTagContainer.h"
+#include "ARPGCombatantSubobjects.h"
 #include "ARPGCombatDummy.generated.h"
 
 class UCapsuleComponent;
@@ -86,15 +87,7 @@ private:
 	UPROPERTY(VisibleAnywhere, Category = "Components")
 	TObjectPtr<UARPGHurtboxComponent> Hurtbox;
 
-	UPROPERTY(VisibleAnywhere, Category = "Components")
-	TObjectPtr<UARPGAbilitySystemComponent> AbilitySystemComponent;
-
-	UPROPERTY()
-	TObjectPtr<UARPGVitalSet> VitalSet;
-
-	UPROPERTY()
-	TObjectPtr<UARPGOffenseSet> OffenseSet;
-
-	UPROPERTY()
-	TObjectPtr<UARPGResistanceSet> ResistanceSet;
+	/** The ASC and three attribute sets. See FARPGCombatantSubobjects. */
+	UPROPERTY(VisibleAnywhere, Category = "ARPG|Abilities")
+	FARPGCombatantSubobjects Combatant;
 };

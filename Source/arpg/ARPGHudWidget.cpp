@@ -38,17 +38,105 @@ void UARPGHudWidget::RefreshSubject() const
 		return; // unchanged, which is the overwhelmingly common case
 	}
 
+	// Whatever we were listening to belongs to the previous pawn.
+	const_cast<UARPGHudWidget*>(this)->UnbindSubjectDelegates();
+
 	CachedSubject = Pawn;
 
 	// One walk of the component array per possession change, rather than one per
 	// bound widget per frame.
-	CachedASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(Pawn);
+	CachedASC = UARPGGameplayComponentBase::ResolveASC(Pawn);
 	CachedMagic = Pawn ? Pawn->FindComponentByClass<UARPGMagicComponent>() : nullptr;
 	CachedCombo = Pawn ? Pawn->FindComponentByClass<UARPGComboComponent>() : nullptr;
 	CachedWeapon = Pawn ? Pawn->FindComponentByClass<UARPGWeaponComponent>() : nullptr;
 	CachedParry = Pawn ? Pawn->FindComponentByClass<UARPGParryComponent>() : nullptr;
 	CachedQuickSlots = Pawn ? Pawn->FindComponentByClass<UARPGQuickSlotComponent>() : nullptr;
 	CachedLocomotion = Pawn ? Pawn->FindComponentByClass<UARPGLocomotionComponent>() : nullptr;
+
+	const_cast<UARPGHudWidget*>(this)->BindSubjectDelegates();
+	const_cast<UARPGHudWidget*>(this)->MarkDirty();
+}
+
+void UARPGHudWidget::BindSubjectDelegates()
+{
+	if (UAbilitySystemComponent* ASC = CachedASC)
+	{
+		// The eight attributes the bars are built from. Bound individually
+		// because GAS has no "any attribute changed" delegate, and watching the
+		// eight that are actually drawn is cheaper than being woken by every
+		// attribute on three sets.
+		const FGameplayAttribute Watched[] = {
+			UARPGVitalSet::GetHealthAttribute(),  UARPGVitalSet::GetMaxHealthAttribute(),
+			UARPGVitalSet::GetManaAttribute(),    UARPGVitalSet::GetMaxManaAttribute(),
+			UARPGVitalSet::GetStaminaAttribute(), UARPGVitalSet::GetMaxStaminaAttribute(),
+			UARPGVitalSet::GetPoiseAttribute(),   UARPGVitalSet::GetMaxPoiseAttribute()
+		};
+
+		for (const FGameplayAttribute& Attribute : Watched)
+		{
+			AttributeHandles.Add(
+				ASC->GetGameplayAttributeValueChangeDelegate(Attribute)
+					.AddUObject(this, &UARPGHudWidget::HandleAttributeChanged));
+		}
+	}
+
+	if (UARPGMagicComponent* Magic = CachedMagic)
+	{
+		Magic->OnSelectionChanged.AddDynamic(this, &UARPGHudWidget::HandleSelectionChanged);
+		Magic->OnCombinationResolved.AddDynamic(this, &UARPGHudWidget::HandleCombinationResolved);
+	}
+
+	if (UARPGQuickSlotComponent* QuickSlots = CachedQuickSlots)
+	{
+		QuickSlots->OnSelectionChanged.AddDynamic(this, &UARPGHudWidget::HandleQuickSlotSelected);
+		QuickSlots->OnConsumableUsed.AddDynamic(this, &UARPGHudWidget::HandleConsumableUsed);
+	}
+}
+
+void UARPGHudWidget::UnbindSubjectDelegates()
+{
+	if (UAbilitySystemComponent* ASC = CachedASC)
+	{
+		// By handle, not by object: RemoveAll would also drop subscriptions any
+		// other system had made through this same widget, and the attribute
+		// delegates are keyed per attribute rather than per listener.
+		const FGameplayAttribute Watched[] = {
+			UARPGVitalSet::GetHealthAttribute(),  UARPGVitalSet::GetMaxHealthAttribute(),
+			UARPGVitalSet::GetManaAttribute(),    UARPGVitalSet::GetMaxManaAttribute(),
+			UARPGVitalSet::GetStaminaAttribute(), UARPGVitalSet::GetMaxStaminaAttribute(),
+			UARPGVitalSet::GetPoiseAttribute(),   UARPGVitalSet::GetMaxPoiseAttribute()
+		};
+
+		for (int32 Index = 0; Index < AttributeHandles.Num() && Index < UE_ARRAY_COUNT(Watched); ++Index)
+		{
+			ASC->GetGameplayAttributeValueChangeDelegate(Watched[Index]).Remove(AttributeHandles[Index]);
+		}
+	}
+	AttributeHandles.Reset();
+
+	if (UARPGMagicComponent* Magic = CachedMagic)
+	{
+		Magic->OnSelectionChanged.RemoveDynamic(this, &UARPGHudWidget::HandleSelectionChanged);
+		Magic->OnCombinationResolved.RemoveDynamic(this, &UARPGHudWidget::HandleCombinationResolved);
+	}
+
+	if (UARPGQuickSlotComponent* QuickSlots = CachedQuickSlots)
+	{
+		QuickSlots->OnSelectionChanged.RemoveDynamic(this, &UARPGHudWidget::HandleQuickSlotSelected);
+		QuickSlots->OnConsumableUsed.RemoveDynamic(this, &UARPGHudWidget::HandleConsumableUsed);
+	}
+}
+
+void UARPGHudWidget::HandleAttributeChanged(const FOnAttributeChangeData&) { MarkDirty(); }
+void UARPGHudWidget::HandleSelectionChanged(int32) { MarkDirty(); }
+void UARPGHudWidget::HandleCombinationResolved(UARPGMagicElement*) { MarkDirty(); }
+void UARPGHudWidget::HandleQuickSlotSelected(int32) { MarkDirty(); }
+void UARPGHudWidget::HandleConsumableUsed(UARPGItemDefinition*) { MarkDirty(); }
+
+bool UARPGHudWidget::IsAwaitingCooldown() const
+{
+	const UARPGQuickSlotComponent* QuickSlots = CachedQuickSlots;
+	return QuickSlots && QuickSlots->GetCooldownRemaining() > 0.f;
 }
 
 AActor* UARPGHudWidget::GetSubject() const
@@ -363,7 +451,21 @@ bool UARPGHudWidget::IsQuickSlotReady() const
 void UARPGHudWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 {
 	Super::NativeTick(MyGeometry, InDeltaTime);
+
+	// Resolving the subject is what notices a repossession and rebinds, so it
+	// runs every frame -- it is a pointer comparison in the common case.
+	RefreshSubject();
+
+	// A cooldown just elapses; nothing announces it. Staying dirty while one
+	// runs keeps the quick-slot label honest for the second or two it takes,
+	// instead of ticking the whole HUD forever on its account.
+	if (!bDirty && !IsAwaitingCooldown())
+	{
+		return;
+	}
+
 	RefreshBoundWidgets();
+	bDirty = false;
 }
 
 FLinearColor UARPGHudWidget::ResolveSlotTint(const FARPGHudElementSlot& Slot)

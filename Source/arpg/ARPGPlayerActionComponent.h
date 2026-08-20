@@ -3,7 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Components/ActorComponent.h"
+#include "ARPGGameplayComponentBase.h"
 #include "ARPGModalInputComponent.h"
 #include "ARPGMagicTypes.h"
 #include "GameplayTagContainer.h"
@@ -45,7 +45,7 @@ class UAbilitySystemComponent;
  * not drinking.
  */
 UCLASS(ClassGroup = (ARPG), meta = (BlueprintSpawnableComponent))
-class UARPGPlayerActionComponent : public UActorComponent
+class UARPGPlayerActionComponent : public UARPGGameplayComponentBase
 {
 	GENERATED_BODY()
 
@@ -121,7 +121,6 @@ public:
 	static FGameplayTag FaceToDischargeAbilityTag(EARPGInputFace Slot);
 
 protected:
-	UAbilitySystemComponent* GetASC() const;
 	UARPGComboComponent* GetCombo() const;
 	UARPGWeaponComponent* GetWeapon() const;
 	UARPGParryComponent* GetParry() const;
@@ -192,9 +191,6 @@ private:
 
 	UPROPERTY(Transient)
 	mutable TObjectPtr<UARPGLocomotionComponent> CachedLocomotion;
-
-	UPROPERTY(Transient)
-	mutable TObjectPtr<UAbilitySystemComponent> CachedASC;
 
 	/** LB is held. Distinct from "blocking": the guard may not be up yet. */
 	bool bParryHeld = false;

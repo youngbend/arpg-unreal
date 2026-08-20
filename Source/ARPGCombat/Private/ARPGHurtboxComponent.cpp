@@ -97,18 +97,6 @@ void UARPGHurtboxComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 	}
 }
 
-UAbilitySystemComponent* UARPGHurtboxComponent::GetAbilitySystemComponent() const
-{
-	if (!CachedASC)
-	{
-		// Resolved lazily rather than in BeginPlay: for a player pawn the ASC
-		// lives on the PlayerState, which may not have replicated in yet when
-		// this component begins play.
-		CachedASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(GetOwner());
-	}
-	return CachedASC;
-}
-
 bool UARPGHurtboxComponent::IsInvincible() const
 {
 	if (bForceInvincible || InvincibilityTimer > 0.f)

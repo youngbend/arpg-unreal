@@ -28,6 +28,16 @@ class ARPGCORE_API UARPGGameplayComponentBase : public UActorComponent
 	GENERATED_BODY()
 
 public:
+	/**
+	 * Resolves an actor's ability system component.
+	 *
+	 * The one-line body every caller here shares, exposed as a static so the
+	 * things that CANNOT derive from this class -- the HUD widget most of all,
+	 * which is a UUserWidget -- still resolve an ASC the same way rather than
+	 * growing another private copy of the lookup.
+	 */
+	static UAbilitySystemComponent* ResolveASC(const AActor* Actor);
+
 	/** The owner's ability system component, resolved on first use. May be null. */
 	UFUNCTION(BlueprintPure, Category = "ARPG")
 	UAbilitySystemComponent* GetASC() const;

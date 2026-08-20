@@ -121,15 +121,6 @@ bool UARPGFluidSurfaceSubsystem::DoesSupportWorldType(const EWorldType::Type Wor
 	return WorldType == EWorldType::Game || WorldType == EWorldType::PIE;
 }
 
-bool UARPGFluidSurfaceSubsystem::HasAuthority() const
-{
-	const UWorld* World = GetWorld();
-
-	// Pools and solids are replicated actors owned by the server. A client
-	// spawning its own would leave every puddle in the level doubled.
-	return !World || World->GetNetMode() != NM_Client;
-}
-
 TStatId UARPGFluidSurfaceSubsystem::GetStatId() const
 {
 	RETURN_QUICK_DECLARE_CYCLE_STAT(UARPGFluidSurfaceSubsystem, STATGROUP_Tickables);
@@ -867,7 +858,7 @@ void UARPGFluidSurfaceSubsystem::EnforceBudget()
 		while (Register.Num() > MaxBodiesOfEachKind)
 		{
 			int32 Smallest = INDEX_NONE;
-			double LeastArea = TNumericLimits<double>::Max();
+			double LeastWorth = TNumericLimits<double>::Max();
 
 			for (int32 Index = 0; Index < Register.Num(); ++Index)
 			{
@@ -889,10 +880,21 @@ void UARPGFluidSurfaceSubsystem::EnforceBudget()
 					continue;
 				}
 
-				const double Area = Register[Index]->GetArea();
-				if (Area < LeastArea)
+				// SIGNIFICANCE FIRST, AREA AS THE TIE-BREAK. Area alone picked
+				// the wrong body with some regularity: the puddle at the
+				// player's feet is small and the field they crossed ten minutes
+				// ago is large, so a pure area cull reliably dropped the one
+				// being looked at. USignificanceManager already answers "how
+				// much does this matter" against the engine's own viewpoints,
+				// and multiplying keeps area meaningful among equals -- between
+				// two puddles the same distance away, the smaller still goes.
+				//
+				// A zero-significance body scores zero whatever its area, which
+				// is the intent: nothing is watching it.
+				const double Worth = Register[Index]->GetSignificance() * Register[Index]->GetArea();
+				if (Worth < LeastWorth)
 				{
-					LeastArea = Area;
+					LeastWorth = Worth;
 					Smallest = Index;
 				}
 			}
@@ -908,7 +910,7 @@ void UARPGFluidSurfaceSubsystem::EnforceBudget()
 			}
 
 			UE_LOG(LogARPGWorld, Verbose,
-				TEXT("Over the %s budget, so the smallest one goes."), Kind);
+				TEXT("Over the %s budget, so the least significant one goes."), Kind);
 
 			AARPGSurfaceBody* Spent = Register[Smallest];
 			Register.RemoveAt(Smallest);
@@ -937,27 +939,6 @@ void UARPGFluidSurfaceSubsystem::StepSimulation(float DeltaTime)
 	GatherViewers();
 	TickWeather(DeltaTime);
 	EnforceBudget();
-}
-
-void UARPGFluidSurfaceSubsystem::Tick(float DeltaTime)
-{
-	Super::Tick(DeltaTime);
-
-	if (!HasAuthority())
-	{
-		return;
-	}
-
-	const float Interval = 1.f / FMath::Max(0.5f, TickRate);
-
-	TickAccumulator += DeltaTime;
-	if (TickAccumulator < Interval)
-	{
-		return;
-	}
-
-	StepSimulation(TickAccumulator);
-	TickAccumulator = 0.f;
 }
 
 void UARPGFluidSurfaceSubsystem::TickWeather(float DeltaTime)

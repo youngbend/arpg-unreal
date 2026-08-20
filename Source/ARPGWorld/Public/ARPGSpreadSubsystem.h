@@ -5,7 +5,7 @@
 #include "CoreMinimal.h"
 #include "GameplayTagContainer.h"
 #include "GameFramework/Actor.h"
-#include "Subsystems/WorldSubsystem.h"
+#include "ARPGSteppedWorldSubsystem.h"
 #include "ARPGSpreadSubsystem.generated.h"
 
 class UARPGFuelComponent;
@@ -56,7 +56,7 @@ class UTexture2D;
  * forgiving; 10Hz is plenty and keeps the cost off the render frame.
  */
 UCLASS()
-class ARPGWORLD_API UARPGSpreadSubsystem : public UTickableWorldSubsystem
+class ARPGWORLD_API UARPGSpreadSubsystem : public UARPGSteppedWorldSubsystem
 {
 	GENERATED_BODY()
 
@@ -66,7 +66,6 @@ public:
 
 	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
 	virtual bool DoesSupportWorldType(const EWorldType::Type WorldType) const override;
-	virtual void Tick(float DeltaTime) override;
 	virtual TStatId GetStatId() const override;
 
 	// --- Configuration --------------------------------------------------------
@@ -224,7 +223,11 @@ public:
 
 	/** Runs one simulation step immediately, bypassing the tick rate. */
 	UFUNCTION(BlueprintCallable, Category = "ARPG|Spread")
-	void StepSimulation(float DeltaTime);
+	//~ UARPGSteppedWorldSubsystem -- the base owns the accumulator and the
+	//  authority gate; this class only says how fast and what a step does.
+	virtual float GetStepRate() const override { return TickRate; }
+	virtual void StepSimulation(float DeltaTime) override;
+	//~ End UARPGSteppedWorldSubsystem
 
 	// --- Targets --------------------------------------------------------------
 
@@ -411,16 +414,6 @@ private:
 	/** Directional weight for one neighbour step under the current wind. */
 	float GetWindWeight(FVector2D StepDirection, float Bias) const;
 
-	/**
-	 * True when this machine may resolve the simulation and deal its damage.
-	 *
-	 * A world subsystem ticks on clients too, and nothing here was gated: every
-	 * client ran its own unreplicated fire field and applied contact damage from
-	 * it, burning real invincibility frames against a hazard the server had never
-	 * agreed existed.
-	 */
-	bool HasAuthority() const;
-
 	mutable TArray<FMedium> Media;
 
 	/** Coord to grids. A map rather than a grid: the world is mostly not alight. */
@@ -446,8 +439,6 @@ private:
 	 * comparison.
 	 */
 	mutable float AttritionRates[MaxMedia][MaxMedia] = {};
-
-	float TickAccumulator = 0.f;
 
 	UPROPERTY(Transient)
 	TArray<TWeakObjectPtr<AActor>> Targets;

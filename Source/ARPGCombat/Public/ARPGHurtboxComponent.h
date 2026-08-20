@@ -3,7 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Components/ActorComponent.h"
+#include "ARPGGameplayComponentBase.h"
 #include "GameplayEffectTypes.h"
 #include "ARPGHurtboxComponent.generated.h"
 
@@ -31,7 +31,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FARPGOnHitReceived,
  * which ability system component should the hit be routed to.
  */
 UCLASS(ClassGroup = (ARPG), meta = (BlueprintSpawnableComponent))
-class ARPGCOMBAT_API UARPGHurtboxComponent : public UActorComponent
+class ARPGCOMBAT_API UARPGHurtboxComponent : public UARPGGameplayComponentBase
 {
 	GENERATED_BODY()
 
@@ -78,9 +78,15 @@ public:
 	UFUNCTION(BlueprintPure, Category = "ARPG|Hurtbox")
 	bool IsInvincible() const;
 
-	/** The ASC hits are routed to. Cached from the owner via IAbilitySystemInterface. */
+	/**
+	 * The ASC hits are routed to.
+	 *
+	 * Kept as a named alias for GetASC() because four call sites across three
+	 * modules read as "ask the hurtbox which ability system to damage", and
+	 * GetASC() on its own does not say whose.
+	 */
 	UFUNCTION(BlueprintPure, Category = "ARPG|Hurtbox")
-	UAbilitySystemComponent* GetAbilitySystemComponent() const;
+	UAbilitySystemComponent* GetAbilitySystemComponent() const { return GetASC(); }
 
 	/**
 	 * Consumes the invincibility check and starts a fresh window.
@@ -98,9 +104,6 @@ public:
 	FARPGOnHitReceived OnHitReceived;
 
 private:
-	UPROPERTY(Transient)
-	mutable TObjectPtr<UAbilitySystemComponent> CachedASC;
-
 	/**
 	 * Counts down only while a window is actually open.
 	 *

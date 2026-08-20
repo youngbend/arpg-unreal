@@ -14,7 +14,17 @@ class UInputAction;
 class UARPGAbilitySystemComponent;
 class UARPGHitboxComponent;
 class UARPGDamageTypeAsset;
+class UARPGArmorComponent;
+class UARPGArmorProgressionTracker;
+class UARPGCloakComponent;
 class UARPGComboComponent;
+class UARPGHitStopComponent;
+class UARPGHurtboxComponent;
+class UARPGMagicProgressionTracker;
+class UARPGPoiseComponent;
+class UARPGProgressionComponent;
+class UARPGStatusResistanceComponent;
+class UARPGWeaponProgressionTracker;
 class UARPGInventoryComponent;
 class UARPGLocomotionComponent;
 class UARPGNoiseComponent;
@@ -314,6 +324,87 @@ protected:
 	 */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<UARPGNoiseComponent> NoiseComponent;
+
+	// --- What the player is on the RECEIVING end of --------------------------
+	//
+	// Every one of these existed in C++, was covered by automation tests, and
+	// was attached to nothing the player ever played as. The tests all built
+	// their own actor and added the component by hand, so they passed while the
+	// real pawn went without -- which is precisely the shape of gap a green
+	// suite cannot see.
+
+	/**
+	 * MARKS THE PLAYER DAMAGEABLE AT ALL, and its absence was not a degradation.
+	 *
+	 * UARPGHitboxComponent resolves a target through UARPGHurtboxComponent::
+	 * FindFor and, finding nothing, `continue`s with the comment "not a
+	 * damageable thing". The player was therefore invulnerable to every hitbox
+	 * in the game -- NPC swings, fire spread, conduction, elemental volumes --
+	 * silently and by construction.
+	 */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UARPGHurtboxComponent> Hurtbox;
+
+	/** Flinch, hyperarmor and stance break. The NPC had one; the player did not. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UARPGPoiseComponent> PoiseComponent;
+
+	/** Equipped armour's contribution to armour and resistances. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UARPGArmorComponent> ArmorComponent;
+
+	/**
+	 * The freeze on a landed hit, applied to attacker and target alike.
+	 *
+	 * Phase 12 shipped this and nothing carried it, so the feature was inert on
+	 * the player in both directions -- their hits did not catch, and hits on them
+	 * did not either.
+	 */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UARPGHitStopComponent> HitStopComponent;
+
+	/** Resists incoming status effects. Absent, every application landed in full. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UARPGStatusResistanceComponent> StatusResistance;
+
+	/**
+	 * Where a Cloak discharge goes.
+	 *
+	 * UARPGGameplayAbility_Cloak logs "which has no cloak component; nothing
+	 * will be applied" and returns. One of the four discharge deliveries -- the
+	 * whole of RT+B -- did nothing at all.
+	 */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UARPGCloakComponent> CloakComponent;
+
+	// --- Progression ---------------------------------------------------------
+	//
+	// The visible level plus the three hidden trackers. Phase 7 is code
+	// complete and fully tested, and none of it was attached to the player, so
+	// no XP of any kind accrued in an actual session.
+
+	/** XP, level-ups and the points the player allocates by hand. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UARPGProgressionComponent> Progression;
+
+	/** Proficiency from LANDING hits, keyed by weapon type. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UARPGWeaponProgressionTracker> WeaponProgression;
+
+	/** Proficiency from BEING hit, keyed by armour type. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UARPGArmorProgressionTracker> ArmorProgression;
+
+	/**
+	 * Proficiency from CASTING, keyed by element.
+	 *
+	 * Also the project's only implementation of IARPGMagicProgression, which the
+	 * magic component looks for on the owner's components before the actor. With
+	 * no tracker the caster is treated as exempt, so the complexity gate that
+	 * decides which combinations are castable was never actually gating.
+	 */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UARPGMagicProgressionTracker> MagicProgression;
 
 	/** Toggles the sprint. */
 	void ToggleSprint();

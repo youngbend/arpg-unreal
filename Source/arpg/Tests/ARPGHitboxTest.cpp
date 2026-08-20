@@ -1,8 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Misc/AutomationTest.h"
+#include "ARPGTestFixtures.h"
 
-#if WITH_DEV_AUTOMATION_TESTS
+#if WITH_DEV_AUTOMATION_TESTS && ARPG_WITH_TESTS
 
 #include "ARPGCombatDummy.h"
 #include "ARPGDamageTypeAsset.h"
@@ -26,25 +27,7 @@
  */
 namespace ARPGHitboxTestUtils
 {
-	struct FTestWorld
-	{
-		UWorld* World = nullptr;
-
-		FTestWorld()
-		{
-			World = UWorld::CreateWorld(EWorldType::Game, /*bInformEngineOfWorld=*/false);
-			FWorldContext& Context = GEngine->CreateNewWorldContext(EWorldType::Game);
-			Context.SetCurrentWorld(World);
-			World->InitializeActorsForPlay(FURL());
-			World->BeginPlay();
-		}
-
-		~FTestWorld()
-		{
-			GEngine->DestroyWorldContext(World);
-			World->DestroyWorld(/*bInformEngineOfWorld=*/false);
-		}
-	};
+	using ARPGTest::FTestWorld;
 
 	/**
 	 * As in the damage test, the ability system is initialised explicitly rather
@@ -446,4 +429,4 @@ bool FARPGHitboxSwingPairingTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-#endif // WITH_DEV_AUTOMATION_TESTS
+#endif // WITH_DEV_AUTOMATION_TESTS && ARPG_WITH_TESTS

@@ -9,12 +9,8 @@
 
 AARPGPlayerState::AARPGPlayerState()
 {
-	AbilitySystemComponent = CreateDefaultSubobject<UARPGAbilitySystemComponent>(
-		TEXT("AbilitySystemComponent"));
-
-	VitalSet      = CreateDefaultSubobject<UARPGVitalSet>(TEXT("VitalSet"));
-	OffenseSet    = CreateDefaultSubobject<UARPGOffenseSet>(TEXT("OffenseSet"));
-	ResistanceSet = CreateDefaultSubobject<UARPGResistanceSet>(TEXT("ResistanceSet"));
+	// Mixed: this ASC is owned and predicted for by exactly one client.
+	Combatant.Create(*this, EGameplayEffectReplicationMode::Mixed);
 
 	// A PlayerState replicates at 1 Hz by default, which is fine for a score
 	// but visibly wrong for a health bar -- attribute changes would arrive up to
@@ -24,7 +20,7 @@ AARPGPlayerState::AARPGPlayerState()
 
 UAbilitySystemComponent* AARPGPlayerState::GetAbilitySystemComponent() const
 {
-	return AbilitySystemComponent;
+	return Combatant.AbilitySystem;
 }
 
 void AARPGPlayerState::BeginPlay()
@@ -34,9 +30,9 @@ void AARPGPlayerState::BeginPlay()
 	// Faction is applied server-side and replicated with TagOnly so clients can
 	// tint nameplates and suppress friendly-fire feedback. The authoritative
 	// filtering still happens on the server (see UARPGHitboxComponent).
-	if (HasAuthority() && AbilitySystemComponent)
+	if (HasAuthority() && Combatant.AbilitySystem)
 	{
-		AbilitySystemComponent->AddLooseGameplayTag(
+		Combatant.AbilitySystem->AddLooseGameplayTag(
 			TAG_Faction_Player, 1, EGameplayTagReplicationState::TagOnly);
 	}
 }

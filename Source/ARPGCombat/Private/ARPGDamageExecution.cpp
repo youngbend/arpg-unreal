@@ -3,6 +3,7 @@
 #include "ARPGDamageExecution.h"
 #include "ARPGCombat.h"
 #include "ARPGCombatLibrary.h"
+#include "ARPGAssetManager.h"
 #include "ARPGDamageTypeAsset.h"
 #include "ARPGGameplayEffectContext.h"
 #include "ARPGGameplayTags.h"
@@ -121,6 +122,13 @@ void UARPGDamageExecution::Execute_Implementation(
 	if (StatusInfo && !StatusInfo->TickDamageType.IsNull())
 	{
 		DamageType = StatusInfo->TickDamageType.LoadSynchronous();
+	}
+	if (!DamageType && StatusInfo && StatusInfo->TickDamageTypeTag.IsValid())
+	{
+		// The ordinary route -- see UARPGStatusEffectComponent::TickDamageTypeTag.
+		// Null here means no asset claims that tag, which falls through to the
+		// context below exactly as an unset damage type always has.
+		DamageType = UARPGAssetManager::FindDamageType(StatusInfo->TickDamageTypeTag);
 	}
 	if (!DamageType && Context)
 	{

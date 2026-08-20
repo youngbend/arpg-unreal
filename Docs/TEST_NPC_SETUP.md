@@ -41,10 +41,41 @@ which fields it skipped.
 
 ## Step 2 — the StateTree
 
-`Tools/generate_npc_statetree.py` **probes** whether StateTree authoring is
-reachable from Python on your engine build and prints what it finds. It does not
-write a partial asset. Run it; if it says no, author the tree by hand with the
-recipe below — it is roughly ten minutes.
+```
+"<UE>/Engine/Binaries/Win64/UnrealEditor-Cmd.exe" <path>/arpg.uproject     -run=ARPGAIEditor.ARPGGenerateNPCTree -unattended -nopause -nosplash
+```
+
+Writes `/Game/ARPG/NPCs/ST_NPC_Melee`, **compiles it**, and sets it on
+`DA_NPC_TestDummy`. Verified by `ARPG.AI.NPC.ArchetypeRunsACompiledTree`, which
+checks `IsReadyToRun()` rather than merely that a tree is assigned — an authored
+but uncompiled tree loads, reports no error and runs nothing, because the runtime
+reads a baked representation and not the editor data.
+
+**A C++ COMMANDLET RATHER THAN A PYTHON SCRIPT**, unlike every other generator in
+`Tools/`. `Tools/generate_npc_statetree.py` still exists and still probes, and
+what it reports is why: `UStateTreeFactory::StateTreeSchemaClass` is protected,
+`UStateTreeEditingSubsystem::CompileStateTree` is a plain static rather than a
+`UFUNCTION`, and `FStateTreePropertyPathBinding` is not exposed to Python at all.
+All three are ordinary C++ from inside an editor module.
+
+**WHAT IT WRITES IS A PLACEHOLDER, and a deliberately small one:**
+
+```
+Root
+  Recover  [ARPG Health Below 0.35]  -> ARPG Use Consumable
+  Fight                              -> ARPG Attack (Light)
+```
+
+An NPC that swings, and drinks when it is hurt. Every node in it reads its pawn
+from the execution context, so none of them needs a property binding.
+
+**The combat states below are NOT generated.** Perception, Attempt Parry, Face
+Target, Create Space and the range conditions all take a `Target`, which has to be
+bound to the perception evaluator's output. A binding carries the source node's
+GUID and a property path, and getting one subtly wrong yields a tree that compiles
+clean and silently runs with a null target — worse than no tree, because it looks
+finished. Add those by hand with the recipe below; you now have a compiled, wired
+asset to extend rather than a blank one.
 
 ### The structure
 

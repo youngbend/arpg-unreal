@@ -8,6 +8,7 @@
 #include "ARPGStateTreeTask_AttemptParry.generated.h"
 
 class AActor;
+class UARPGParryComponent;
 
 /**
  * Per-ATTEMPT state. One tree asset is shared by every NPC using it, so a
@@ -21,6 +22,18 @@ struct ARPGAI_API FARPGStateTreeAttemptParryInstanceData
 
 	UPROPERTY(EditAnywhere, Category = "Input")
 	TObjectPtr<AActor> Target = nullptr;
+
+	/**
+	 * This pawn's guard, resolved once when the attempt starts.
+	 *
+	 * Cached rather than looked up again each tick: Tick ran
+	 * FindComponentByClass on every frame of every attempt, which is a walk of
+	 * the whole component array to re-find something that cannot have changed
+	 * for the life of the attempt. EnterState already had to find it to decide
+	 * whether the attempt was possible at all.
+	 */
+	UPROPERTY()
+	TObjectPtr<UARPGParryComponent> Parry = nullptr;
 
 	/** Where the threshold landed for THIS attempt, jitter included. */
 	UPROPERTY()

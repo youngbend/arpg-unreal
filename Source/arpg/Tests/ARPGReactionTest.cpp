@@ -1,8 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Misc/AutomationTest.h"
+#include "ARPGTestFixtures.h"
 
-#if WITH_DEV_AUTOMATION_TESTS
+#if WITH_DEV_AUTOMATION_TESTS && ARPG_WITH_TESTS
 
 #include "ARPGConductionSubsystem.h"
 #include "ARPGDischargeContext.h"
@@ -37,37 +38,8 @@
  */
 namespace ARPGReactionTestUtils
 {
-	struct FTestWorld
-	{
-		UWorld* World = nullptr;
-
-		FTestWorld()
-		{
-			World = UWorld::CreateWorld(EWorldType::Game, /*bInformEngineOfWorld=*/false);
-			FWorldContext& Context = GEngine->CreateNewWorldContext(EWorldType::Game);
-			Context.SetCurrentWorld(World);
-			World->InitializeActorsForPlay(FURL());
-			World->BeginPlay();
-
-			// AND ACTUALLY BEGUN. UWorld::BeginPlay routes BeginPlay through the
-			// game mode, and a world built by hand has none -- so it returns having
-			// started nothing, and every actor spawned afterwards is skipped too
-			// because the world never reports having begun play. Anything whose
-			// state is set up in BeginPlay -- a spell arming its reaction volume, a
-			// fuel component filling itself from FuelSeconds -- was silently left
-			// at its defaults. This is what a game mode's StartPlay does.
-			if (AWorldSettings* Settings = World->GetWorldSettings())
-			{
-				Settings->NotifyBeginPlay();
-			}
-		}
-
-		~FTestWorld()
-		{
-			GEngine->DestroyWorldContext(World);
-			World->DestroyWorld(/*bInformEngineOfWorld=*/false);
-		}
-	};
+	// This suite has always begun play through AWorldSettings.
+	using FTestWorld = ARPGTest::FTestWorldBegunPlay;
 
 	UARPGMagicElement* MakeElement(UObject* Outer, FGameplayTag Tag)
 	{
@@ -741,4 +713,4 @@ bool FARPGConductionUnauthoredTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-#endif // WITH_DEV_AUTOMATION_TESTS
+#endif // WITH_DEV_AUTOMATION_TESTS && ARPG_WITH_TESTS

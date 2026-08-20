@@ -107,17 +107,6 @@ void UARPGPlayerActionComponent::EnsureSiblings() const
 	CachedLocomotion = Owner->FindComponentByClass<UARPGLocomotionComponent>();
 }
 
-UAbilitySystemComponent* UARPGPlayerActionComponent::GetASC() const
-{
-	// Retried while null rather than latched with the rest: a player's ability
-	// system lives on the PlayerState, which may not have replicated in yet.
-	if (!CachedASC)
-	{
-		CachedASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(GetOwner());
-	}
-	return CachedASC;
-}
-
 UARPGComboComponent* UARPGPlayerActionComponent::GetCombo() const
 {
 	EnsureSiblings();

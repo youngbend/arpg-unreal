@@ -38,6 +38,11 @@
       "Name": "ARPGCombatEditor",
       "Type": "Editor",
       "LoadingPhase": "PostEngineInit"
+    },
+    {
+      "Name": "ARPGAIEditor",
+      "Type": "Editor",
+      "LoadingPhase": "PostEngineInit"
     }
   ],
   "Plugins": [
@@ -110,6 +115,10 @@
     },
     {
       "Name": "Niagara",
+      "Enabled": true
+    },
+    {
+      "Name": "CommonUI",
       "Enabled": true
     }
   ]

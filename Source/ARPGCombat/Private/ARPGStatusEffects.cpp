@@ -100,8 +100,10 @@ UARPGStatusEffect_Burning::UARPGStatusEffect_Burning()
 	Status.VfxFit = EARPGStatusVfxFit::Bounds;
 	Status.VfxPriority = 10;
 	Status.TickDamagePerStack = 5.f;
-	Status.TickDamageType = TSoftObjectPtr<UARPGDamageTypeAsset>(
-		FSoftObjectPath(TEXT("/Game/ARPG/DamageTypes/DA_Damage_Fire.DA_Damage_Fire")));
+	// BY TAG, not by path. ARPGCombat is a runtime library module; naming a
+	// /Game/ folder here made it require a specific content layout to exist.
+	// UARPGAssetManager resolves the tag to whichever asset claims it.
+	Status.TickDamageTypeTag = TAG_Damage_Fire;
 
 	AddDamageTick(*this, /*Period=*/1.f);
 	{
@@ -126,8 +128,7 @@ UARPGStatusEffect_Shocked::UARPGStatusEffect_Shocked()
 	Status.VfxFit = EARPGStatusVfxFit::Bounds;
 	Status.VfxPriority = 20;
 	Status.TickDamagePerStack = 2.f;
-	Status.TickDamageType = TSoftObjectPtr<UARPGDamageTypeAsset>(
-		FSoftObjectPath(TEXT("/Game/ARPG/DamageTypes/DA_Damage_Lightning.DA_Damage_Lightning")));
+	Status.TickDamageTypeTag = TAG_Damage_Lightning;
 
 	AddDamageTick(*this, /*Period=*/0.5f);
 	{
