@@ -5,6 +5,10 @@
 #   UE_ROOT=/path/to/UnrealEngine Tools/run_tests.sh            # everything
 #   UE_ROOT=/path/to/UnrealEngine Tools/run_tests.sh ARPG.World # one subtree
 #
+# On Windows, run it from Git Bash or MSYS2 and point UE_ROOT at the install:
+#
+#   UE_ROOT="/c/Program Files/Epic Games/UE_5.8" Tools/run_tests.sh
+#
 # WHY A SCRIPT AND NOT A README LINE. The test names, the report path and the
 # "-unattended -nullrhi" set are the parts everyone gets subtly wrong, and a
 # run configured differently on a laptop and in CI is a run whose disagreements
@@ -27,17 +31,62 @@ if [[ -z "${UE_ROOT:-}" ]]; then
 	exit 2
 fi
 
+# THE BUILD ENTRY POINT IS NOT UNIFORM ACROSS PLATFORMS, which is what this
+# script had wrong. Linux and Mac keep a Build.sh in a per-platform subdirectory;
+# a Windows install has neither -- no BatchFiles/Win64/ and no Build.sh anywhere.
+# Build.bat sits directly in BatchFiles and is the only entry point shipped
+# there. One path derived from ${PLATFORM} cannot say that, so each platform
+# names its own. Windows also has to be matched explicitly rather than falling
+# out of a default branch, or an unrecognised shell silently tries Win64 paths.
 case "$(uname -s)" in
-	Linux)  PLATFORM=Linux;  EDITOR="${UE_ROOT}/Engine/Binaries/Linux/UnrealEditor-Cmd" ;;
-	Darwin) PLATFORM=Mac;    EDITOR="${UE_ROOT}/Engine/Binaries/Mac/UnrealEditor-Cmd" ;;
-	*)      PLATFORM=Win64;  EDITOR="${UE_ROOT}/Engine/Binaries/Win64/UnrealEditor-Cmd.exe" ;;
+	Linux)
+		PLATFORM=Linux
+		EDITOR="${UE_ROOT}/Engine/Binaries/Linux/UnrealEditor-Cmd"
+		BUILD="${UE_ROOT}/Engine/Build/BatchFiles/Linux/Build.sh"
+		;;
+	Darwin)
+		PLATFORM=Mac
+		EDITOR="${UE_ROOT}/Engine/Binaries/Mac/UnrealEditor-Cmd"
+		BUILD="${UE_ROOT}/Engine/Build/BatchFiles/Mac/Build.sh"
+		;;
+	MINGW*|MSYS*|CYGWIN*)
+		PLATFORM=Win64
+		EDITOR="${UE_ROOT}/Engine/Binaries/Win64/UnrealEditor-Cmd.exe"
+		BUILD="${UE_ROOT}/Engine/Build/BatchFiles/Build.bat"
+		;;
+	*)
+		echo "Unrecognised platform '$(uname -s)'. Run this from bash on Linux," >&2
+		echo "macOS, or Git Bash / MSYS2 on Windows." >&2
+		exit 2
+		;;
 esac
 
-BUILD="${UE_ROOT}/Engine/Build/BatchFiles/${PLATFORM}/Build.sh"
-[[ -x "${BUILD}" ]] || BUILD="${UE_ROOT}/Engine/Build/BatchFiles/Build.sh"
+# -f rather than -x, because a .bat carries no executable bit under MSYS and
+# bash runs it through Windows regardless. Checked at all because the bug this
+# replaces surfaced as a bare "No such file or directory" from a later line,
+# naming a path nobody had asked for.
+if [[ ! -f "${BUILD}" ]]; then
+	echo "No build script at ${BUILD}." >&2
+	echo "Is UE_ROOT (${UE_ROOT}) really an Unreal Engine 5.8 install?" >&2
+	exit 2
+fi
+
+# WINDOWS PATHS ARE THE OTHER HALF OF THIS. UnrealEditor-Cmd.exe and Build.bat
+# are native binaries and cannot read an MSYS path like /c/Users/..., while bash
+# goes on using those throughout. Everything handed to a native binary is
+# converted once, here, rather than left to the shell's guesswork.
+to_native() {
+	if [[ "${PLATFORM}" == "Win64" ]]; then
+		cygpath -w "$1"
+	else
+		printf '%s' "$1"
+	fi
+}
+
+PROJECT_NATIVE="$(to_native "${PROJECT}")"
 
 echo "==> Building arpgEditor (${PLATFORM})"
-"${BUILD}" arpgEditor "${PLATFORM}" Development -Project="${PROJECT}" -WaitMutex
+"${BUILD}" arpgEditor "${PLATFORM}" Development -Project="${PROJECT_NATIVE}" -WaitMutex
 
 echo "==> Running tests matching '${FILTER}'"
 rm -rf "${REPORT_DIR}"
@@ -45,9 +94,15 @@ mkdir -p "${REPORT_DIR}"
 
 # -nullrhi so this runs without a GPU, which is what makes CI possible at all.
 # -unattended and -nopause so a modal dialog cannot hang the run forever.
-"${EDITOR}" "${PROJECT}" \
+#
+# MSYS2_ARG_CONV_EXCL turns OFF the automatic path rewriting Git Bash applies to
+# arguments bound for a native binary. It has to be off: -ExecCmds carries a
+# semicolon, which that rewriting reads as a PATH-style separator and mangles.
+# The paths it would otherwise have fixed up are already native, via to_native.
+# Unset elsewhere, where it is simply an unread variable.
+MSYS2_ARG_CONV_EXCL='*' "${EDITOR}" "${PROJECT_NATIVE}" \
 	-ExecCmds="Automation RunTests ${FILTER}; Quit" \
-	-ReportExportPath="${REPORT_DIR}" \
+	-ReportExportPath="$(to_native "${REPORT_DIR}")" \
 	-unattended -nopause -nosplash -nullrhi -stdout -utf8output \
 	|| echo "==> Editor exited non-zero; the report below is what decides."
 
@@ -57,10 +112,17 @@ if [[ ! -f "${REPORT}" ]]; then
 	exit 1
 fi
 
-python3 - "${REPORT}" <<'PYTHON'
+# python3 is not a given on Windows, where the interpreter is usually `python`
+# and `python3` may be the Store stub that launches the Store instead.
+PYTHON_BIN="python3"
+command -v python3 >/dev/null 2>&1 || PYTHON_BIN="python"
+
+"${PYTHON_BIN}" - "$(to_native "${REPORT}")" <<'PYTHON'
 import json, sys
 
-with open(sys.argv[1]) as handle:
+# utf-8-sig: the editor writes the report with a BOM on Windows, which the
+# default decoder reads as a stray character before the opening brace.
+with open(sys.argv[1], encoding="utf-8-sig") as handle:
     report = json.load(handle)
 
 tests = report.get("tests", [])
