@@ -1,24 +1,17 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ARPGAIController.h"
-#include "ARPGBlackboardKeys.h"
+#include "ARPGGameplayTags.h"
 #include "ARPGNPCComponent.h"
 #include "ARPGNPCDefinition.h"
 #include "ARPGNoiseComponent.h"
 #include "ARPGPerceptionComponent.h"
-#include "BehaviorTree/BlackboardComponent.h"
+#include "AbilitySystemComponent.h"
+#include "AbilitySystemGlobals.h"
+#include "Components/StateTreeAIComponent.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/Pawn.h"
-
-namespace ARPGBlackboard
-{
-	const FName TargetActor(TEXT("TargetActor"));
-	const FName LastKnownLocation(TEXT("LastKnownLocation"));
-	const FName HomeLocation(TEXT("HomeLocation"));
-	const FName IsAlerted(TEXT("IsAlerted"));
-	const FName InvestigateLocation(TEXT("InvestigateLocation"));
-}
 
 // ---------------------------------------------------------------------------
 // Noise
@@ -51,7 +44,16 @@ float UARPGNoiseComponent::GetCurrentNoiseRadius() const
 
 	// A FLOOR, not a replacement: someone sprinting and swinging is at least as
 	// loud as sprinting. Taking the max is what keeps the two independent.
-	if (Owner->ActorHasTag(TEXT("Attacking")))
+	//
+	// THE GAMEPLAY TAG, not an actor tag. This read ActorHasTag("Attacking"),
+	// which nothing in the project has ever set -- so the attack floor was dead
+	// code and a swinging character was exactly as loud as a standing one. The
+	// melee ability owns State.Attacking for as long as it is active, which is
+	// the fact the port meant to consult all along.
+	const UAbilitySystemComponent* ASC =
+		UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(Owner);
+
+	if (ASC && ASC->HasMatchingGameplayTag(TAG_State_Attacking))
 	{
 		Radius = FMath::Max(Radius, AttackRadius);
 	}
@@ -67,10 +69,10 @@ AARPGAIController::AARPGAIController()
 {
 	Perception = CreateDefaultSubobject<UARPGPerceptionComponent>(TEXT("Perception"));
 
-	// The blackboard component is created here rather than lazily by RunBehaviorTree
-	// so that perception -- which writes to it from its first scan -- always has
-	// somewhere to write, even before a tree is running.
-	Blackboard = CreateDefaultSubobject<UBlackboardComponent>(TEXT("BlackboardComponent"));
+	// No blackboard is created here. Under behaviour trees one was, eagerly, so
+	// that perception had somewhere to write from its first scan; StateTree binds
+	// properties instead and the evaluator reads perception directly.
+	StateTreeAI = CreateDefaultSubobject<UStateTreeAIComponent>(TEXT("StateTreeAI"));
 }
 
 UARPGNPCDefinition* AARPGAIController::GetNPCDefinition() const
@@ -107,25 +109,41 @@ void AARPGAIController::OnPossess(APawn* InPawn)
 		if (UCharacterMovementComponent* Movement = PossessedCharacter->GetCharacterMovement())
 		{
 			Movement->MaxWalkSpeed = Definition->MoveSpeed;
+
+			// THE TWO FLAGS THE FOCUS SYSTEM NEEDS. With bUseControllerDesiredRotation
+			// the movement component walks the pawn's yaw toward the controller's
+			// desired rotation at RotationRate, and AAIController aims that rotation
+			// at whatever SetFocus was given. Orient-to-movement has to be off or the
+			// two fight: one wants the pawn facing its velocity, the other facing its
+			// target, and a fleeing NPC needs to be looking at what it is fleeing.
+			Movement->bUseControllerDesiredRotation = true;
+			Movement->bOrientRotationToMovement = false;
+			Movement->RotationRate = FRotator(0.f, Definition->TurnRateDegrees, 0.f);
 		}
 	}
 
-	if (Definition->BehaviorTree)
+	// Where it started is captured by FARPGStateTreeEvaluator_Perception on tree
+	// start rather than written here, so "home" arrives through the same binding
+	// as everything else the tree reads.
+	if (StateTreeAI && Definition->StateTreeRef.IsValid())
 	{
-		RunBehaviorTree(Definition->BehaviorTree);
-
-		// Where it started, so a leash check has something to measure against.
-		// Captured on possession rather than authored, because "home" for a
-		// placed enemy is simply where the designer put it.
-		if (UBlackboardComponent* BB = GetBlackboardComponent())
-		{
-			BB->SetValueAsVector(ARPGBlackboard::HomeLocation, InPawn->GetActorLocation());
-		}
+		// The one call to re-check against the installed engine version if this
+		// module fails to compile: assigning a tree at runtime is what makes the
+		// archetype data rather than a per-Blueprint default.
+		StateTreeAI->SetStateTreeReference(Definition->StateTreeRef);
+		StateTreeAI->StartLogic();
 	}
 }
 
 void AARPGAIController::OnUnPossess()
 {
+	// Stopped before the pawn goes: a tree left running would keep ticking tasks
+	// that reach through the controller for a body that is no longer there.
+	if (StateTreeAI)
+	{
+		StateTreeAI->StopLogic(TEXT("Unpossessed"));
+	}
+
 	// Senses belong to the mind, not the body -- an unpossessed pawn should not
 	// keep being perceived FOR. Clearing here stops a freed pawn's last target
 	// leaking into the next thing this controller possesses.

@@ -8,10 +8,13 @@
 #include "Subsystems/WorldSubsystem.h"
 #include "ARPGSpreadSubsystem.generated.h"
 
+class UARPGFuelComponent;
+
 class UARPGMagicCombinationTable;
 class UARPGSpreadDefinition;
 class UARPGSpreadFuelMap;
 class UMaterialParameterCollection;
+class UTexture2D;
 
 /**
  * Simulates every DIFFUSIVE spreadable medium -- fire, corruption, pestilence --
@@ -133,6 +136,72 @@ public:
 	UFUNCTION(BlueprintPure, Category = "ARPG|Spread")
 	float GetFieldIntensity(FVector WorldPosition, FGameplayTag ElementTag) const;
 
+	/**
+	 * How much of a cell has been burned away, 0-1.
+	 *
+	 * PARTIAL BURNING WAS ALWAYS IN THE SIMULATION and never came out of it. Fuel
+	 * is spent only while a cell is alight and never regrows, so a patch quenched
+	 * halfway keeps half its fuel forever and relighting consumes the remainder --
+	 * the same rule a burning crate lives by, at a different granularity. What was
+	 * missing is any way to ASK, which is what a scorch mask needs.
+	 *
+	 * Measured against what the cell started with, so a marsh that only ever held
+	 * a tenth of a grassland's fuel still reads fully scorched once it has given
+	 * that tenth up. Scorch is "how spent is this", not "how much burned here".
+	 */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Spread")
+	float GetScorchAt(FVector WorldPosition, FGameplayTag ElementTag) const;
+
+	// --- What it looks like ------------------------------------------------------
+	//
+	// A FIELD CANNOT LIVE IN A PARAMETER COLLECTION, which is what the plan said
+	// and why nothing was ever built: an MPC holds a handful of scalars, and this
+	// is a value per cell over a moving window of the world. It needs a texture.
+	//
+	// So: one texture covering a window that follows the viewer, written on the
+	// spread tick, plus an MPC holding that window's world bounds so a material
+	// can turn a world position into a UV. The collection does what it is good at
+	// -- four numbers every material can see -- and the field goes in the texture.
+	//
+	// AND SAMPLING IT BILINEARLY IS THE POINT, not an optimisation. The Godot
+	// version read the field per cell, so a fire's edge stepped along cell
+	// boundaries and the same fire looked different depending on where the viewer
+	// stood relative to one. A filtered texture has no cells to stand on.
+
+	/**
+	 * R is intensity -- how alight. G is scorch -- how spent. B is unused.
+	 *
+	 * Null until the first tick that has anything to draw, so a level with no
+	 * fire in it pays nothing.
+	 */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Spread")
+	UTexture2D* GetFieldMask() const { return FieldMask; }
+
+	/**
+	 * The medium the mask is drawn for. One texture, one medium.
+	 *
+	 * Fire is what anyone wants to see scorched, and a channel per medium would
+	 * be four textures for three media nobody renders.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Spread",
+		meta = (Categories = "Element"))
+	FGameplayTag MaskMedium;
+
+	/** Cells across the mask window. The window is this times the cell size. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Spread",
+		meta = (ClampMin = "16", ClampMax = "512"))
+	int32 MaskResolution = 128;
+
+	/**
+	 * Where a material reads the window's bounds from.
+	 *
+	 * Wants two scalars named MaskOrigin (X, Y) and one named MaskExtent. Without
+	 * one the texture is still produced and readable from Blueprint -- it simply
+	 * has nothing telling the ground material where it goes.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Spread")
+	TObjectPtr<UMaterialParameterCollection> MaskParameters;
+
 	/** How burnt the ground is, 0-1. Monotonic; what the char shader reads. */
 	UFUNCTION(BlueprintPure, Category = "ARPG|Spread")
 	float GetFieldResidue(FVector WorldPosition, FGameplayTag ElementTag) const;
@@ -165,6 +234,24 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "ARPG|Spread")
 	void UnregisterTarget(AActor* Actor);
+
+	// --- Objects that are fuel ---------------------------------------------------
+	//
+	// THE GROUND BURNS AND OBJECTS DID NOT. Fuel is baked per cell from the world,
+	// so a wooden crate on bare stone was scenery the fire went round. A registered
+	// fuel component is the other half: something that adds to the fire where it
+	// stands and has a finite amount of itself to add.
+	//
+	// IT KEEPS ITS OWN FUEL. Mixing an object's fuel into the field's cells would
+	// lose track of whose is whose -- quenching would refund the crate, and burning
+	// the grass would consume it. So the field says only whether a cell is alight,
+	// and the object answers with what it is prepared to give.
+
+	UFUNCTION(BlueprintCallable, Category = "ARPG|Spread")
+	void RegisterFuel(UARPGFuelComponent* Fuel);
+
+	UFUNCTION(BlueprintCallable, Category = "ARPG|Spread")
+	void UnregisterFuel(UARPGFuelComponent* Fuel);
 
 private:
 	/** One medium, resolved once from its definition. */
@@ -218,6 +305,45 @@ private:
 	};
 
 	/**
+	 * Per-chunk working state, so the sweep can run in parallel.
+	 *
+	 * ONE SLOT PER CHUNK, kept between ticks. The two things a chunk step used to
+	 * share were a scratch list of active cells and the cross-boundary deposit
+	 * queue -- both write-heavy, and both races the moment more than one chunk
+	 * runs at once. Held here rather than allocated per chunk per tick, which is
+	 * what the shared scratch existed to avoid in the first place.
+	 */
+	struct FChunkWork
+	{
+		TArray<int32> Active;
+		TArray<FCrossDeposit> Deposits;
+
+		/**
+		 * The medium pass's accumulators, one cell each.
+		 *
+		 * PER SLOT LIKE THE REST. These were shared too, and they are the write
+		 * that actually matters: a chunk step accumulates every neighbour's
+		 * contribution into them before applying, so two chunks sharing a pair
+		 * would not merely race, they would spread each other's fire.
+		 */
+		TArray<float> DeltaIntensity;
+		TArray<float> DeltaEnergy;
+
+		/**
+		 * Which cells of the pair above were actually written.
+		 *
+		 * PER SLOT FOR THE SAME REASON, and easy to miss because they are only
+		 * bookkeeping: they exist so clearing the deltas costs the number of
+		 * touched cells rather than the size of the grid, which means they are
+		 * appended to from inside the sweep exactly as often as the deltas are.
+		 * Shared, two chunks running at once would each reset and grow the same
+		 * array while the other walked it.
+		 */
+		TArray<int32> TouchedIntensity;
+		TArray<int32> TouchedEnergy;
+	};
+
+	/**
 	 * Builds the media list if the definitions have changed since last time.
 	 *
 	 * Called by EVERY entry point, including the const queries -- which is why
@@ -246,12 +372,38 @@ private:
 	void MarkNextActive(FFieldChunk& Chunk, int32 Index);
 
 	void TickField(float DeltaTime);
-	void TickFieldChunk(FIntPoint Coord, FFieldChunk& Chunk, float DeltaTime);
+	/**
+	 * One chunk's step. TOUCHES NOTHING OUTSIDE ITS OWN CHUNK AND ITS OWN SCRATCH,
+	 * which is what makes the sweep over chunks parallel: it reads shared
+	 * configuration, writes its own cells, and posts anything crossing a boundary
+	 * to the work slot for the caller to apply afterwards.
+	 */
+	void TickFieldChunk(FIntPoint Coord, FFieldChunk& Chunk, float DeltaTime,
+		FChunkWork& Work);
 	void TickAttrition(FIntPoint Coord, FFieldChunk& Chunk, float DeltaTime);
 	void TickContactDamage(float DeltaTime);
 
 	/** Deposits a cross-chunk transfer once the pass is done. */
 	void ApplyCrossDeposits();
+
+	/**
+	 * Burns whatever objects are standing in fire, and lets them feed it back.
+	 *
+	 * AFTER the field step and before contact damage. After, because whether an
+	 * object is alight is a question about the field as it now is; before, because
+	 * an object that just caught should be hurting whoever is leaning on it in the
+	 * same tick.
+	 */
+	void TickFuelSources(float DeltaTime);
+
+	/** Redraws the mask window around the viewer. */
+	void TickMask();
+
+	UPROPERTY(Transient)
+	TObjectPtr<UTexture2D> FieldMask;
+
+	/** Scratch for the upload, so a redraw does not allocate. */
+	TArray<FColor> MaskPixels;
 
 	void RebuildMedia() const;
 	void RebuildAttritionRates() const;
@@ -276,22 +428,13 @@ private:
 
 	TArray<FCrossDeposit> CrossDeposits;
 
-	/**
-	 * Scratch reused by every chunk, every medium, every tick.
-	 *
-	 * These used to be two TMaps and an array constructed inside the per-medium
-	 * loop, so a modest fire allocated and freed several heap blocks per chunk
-	 * per medium at 10Hz. Indexed by cell, sized once to the grid, and cleared by
-	 * walking only the cells actually touched -- which is why the touch lists
-	 * exist rather than a Memset over the whole grid.
-	 */
-	TArray<float> ScratchDeltaIntensity;
-	TArray<float> ScratchDeltaEnergy;
-	TArray<int32> ScratchTouchedIntensity;
-	TArray<int32> ScratchTouchedEnergy;
-	TArray<int32> ScratchActive;
 
-	/** Sizes the scratch buffers to the current grid, once. */
+	TArray<FChunkWork> ChunkWork;
+
+	/** The chunks with anything alight, flattened so the sweep can index them. */
+	TArray<TPair<FIntPoint, FFieldChunk*>> Burning;
+
+	/** Sizes the per-slot scratch buffers to the current grid, once. */
 	void EnsureScratch();
 
 	/**
@@ -308,6 +451,10 @@ private:
 
 	UPROPERTY(Transient)
 	TArray<TWeakObjectPtr<AActor>> Targets;
+
+	/** Objects that feed a medium and are consumed doing it. */
+	UPROPERTY(Transient)
+	TArray<TWeakObjectPtr<UARPGFuelComponent>> FuelSources;
 
 	mutable bool bMediaDirty = true;
 };

@@ -3,9 +3,44 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "BehaviorTree/BTTaskNode.h"
-#include "BehaviorTree/BehaviorTreeTypes.h"
-#include "ARPGBTTask_AttemptParry.generated.h"
+#include "StateTreeTaskBase.h"
+#include "StateTreeExecutionContext.h"
+#include "ARPGStateTreeTask_AttemptParry.generated.h"
+
+class AActor;
+
+/**
+ * Per-ATTEMPT state. One tree asset is shared by every NPC using it, so a
+ * threshold or a distance history stored on the node struct would be shared by
+ * every goblin in the level.
+ */
+USTRUCT()
+struct ARPGAI_API FARPGStateTreeAttemptParryInstanceData
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, Category = "Input")
+	TObjectPtr<AActor> Target = nullptr;
+
+	/** Where the threshold landed for THIS attempt, jitter included. */
+	UPROPERTY()
+	float TriggerThreshold = 0.f;
+
+	UPROPERTY()
+	float PreviousDistance = -1.f;
+
+	UPROPERTY()
+	float PreviousClosingSpeed = 0.f;
+
+	UPROPERTY()
+	float SmoothedAcceleration = 0.f;
+
+	UPROPERTY()
+	bool bTriggered = false;
+
+	UPROPERTY()
+	float HoldRemaining = 0.f;
+};
 
 /**
  * Watches the target for an incoming swing and times a block against it. Port of
@@ -32,21 +67,24 @@
  * slack for prediction error in both directions. Guard timings are therefore
  * never duplicated here as a second set of knobs that can drift.
  *
- * ONE SWING PER ATTEMPT. This does not rate-limit itself; wrap it in a cooldown
- * decorator so a target throwing a combo does not get every beat blocked. The
- * cooldown should arm on success only, so a whiff -- reacted too slowly, or the
- * swing turned out unblockable -- does not itself cost a window.
+ * ONE SWING PER ATTEMPT. This does not rate-limit itself. Put the state behind a
+ * cooldown so a target throwing a combo does not get every beat blocked, and arm
+ * that cooldown on success only -- a whiff (reacted too slowly, or the swing
+ * turned out unblockable) should not itself cost a window.
  */
-UCLASS()
-class ARPGAI_API UARPGBTTask_AttemptParry : public UBTTaskNode
+USTRUCT(meta = (DisplayName = "ARPG Attempt Parry", Category = "ARPG|Combat"))
+struct ARPGAI_API FARPGStateTreeTask_AttemptParry : public FStateTreeTaskCommonBase
 {
 	GENERATED_BODY()
 
-public:
-	UARPGBTTask_AttemptParry();
+	FARPGStateTreeTask_AttemptParry();
 
-	UPROPERTY(EditAnywhere, Category = "Blackboard")
-	FBlackboardKeySelector TargetKey;
+	using FInstanceDataType = FARPGStateTreeAttemptParryInstanceData;
+
+	virtual const UStruct* GetInstanceDataType() const override
+	{
+		return FInstanceDataType::StaticStruct();
+	}
 
 	/**
 	 * EXTRA lead on top of the derived threshold. 0 aims dead centre; positive
@@ -95,37 +133,8 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Prediction", meta = (ClampMin = "0.1"))
 	float ClosingSpeedMargin = 1.f;
 
-	virtual EBTNodeResult::Type ExecuteTask(UBehaviorTreeComponent& OwnerComp,
-		uint8* NodeMemory) override;
-	virtual void TickTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory,
-		float DeltaSeconds) override;
-
-	virtual void InitializeFromAsset(UBehaviorTree& Asset) override;
-	virtual uint16 GetInstanceMemorySize() const override { return sizeof(FMemory); }
-	virtual FString GetStaticDescription() const override;
-
-	/**
-	 * Time until the swing's hitbox reaches ContactRadius, from the current
-	 * closing speed and acceleration. Negative when no prediction is possible.
-	 *
-	 * Public and static so the arithmetic is testable without staging an
-	 * animated swing -- which is the only way to cover it at all.
-	 */
-	UFUNCTION(BlueprintPure, Category = "ARPG|AI")
-	static float PredictTimeToContact(float Distance, float ClosingSpeed, float Acceleration,
-		float InContactRadius);
-
-private:
-	struct FMemory
-	{
-		/** Where the threshold landed for THIS attempt, jitter included. */
-		float TriggerThreshold = 0.f;
-
-		float PreviousDistance = -1.f;
-		float PreviousClosingSpeed = 0.f;
-		float SmoothedAcceleration = 0.f;
-
-		bool bTriggered = false;
-		float HoldRemaining = 0.f;
-	};
+	virtual EStateTreeRunStatus EnterState(FStateTreeExecutionContext& Context,
+		const FStateTreeTransitionResult& Transition) const override;
+	virtual EStateTreeRunStatus Tick(FStateTreeExecutionContext& Context,
+		const float DeltaTime) const override;
 };

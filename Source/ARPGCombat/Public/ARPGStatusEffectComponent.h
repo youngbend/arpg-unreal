@@ -7,6 +7,8 @@
 #include "GameplayTagContainer.h"
 #include "ARPGStatusEffectComponent.generated.h"
 
+class UNiagaraSystem;
+
 class UARPGDamageTypeAsset;
 class UTexture2D;
 
@@ -102,6 +104,21 @@ public:
 	 */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Presentation")
 	TSoftClassPtr<AActor> VfxActorClass;
+
+	/**
+	 * A Niagara system to attach instead, for the ordinary case.
+	 *
+	 * MOST STATUS VISUALS ARE ONE EMITTER, and wrapping each in an actor purely so
+	 * something can be spawned is a class per status that does nothing but hold a
+	 * component. Named here, the subsystem attaches it to the target directly and
+	 * the actor path stays for the visuals that genuinely need one -- anything
+	 * with logic, several components, or its own fade-out.
+	 *
+	 * Preferred over VfxActorClass when both are set, because the cheaper one
+	 * winning by default is the behaviour that scales to a hundred statuses.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ARPG|Status|VFX")
+	TSoftObjectPtr<UNiagaraSystem> VfxSystem;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Presentation")
 	EARPGStatusVfxFit VfxFit = EARPGStatusVfxFit::Bounds;

@@ -1,0 +1,83 @@
+# Runs the ARPG automation tests on every push and pull request.
+
+# WHY A CONTAINER AND NOT A SETUP STEP. There is no "install Unreal Engine"
+# action worth relying on: the engine is tens of gigabytes and Epic's binary
+# distribution is not fetchable from an anonymous runner. Epic publish official
+# images to GitHub Container Registry instead, which is the only route that does
+# not involve building the engine from source on every run.
+#
+# ACCESS IS NOT AUTOMATIC. ghcr.io/epicgames/unreal-engine is gated behind Epic
+# Games organisation membership:
+#
+#   1. Link your GitHub account at https://www.unrealengine.com/en-US/ue-on-github
+#   2. Accept the EpicGames organisation invite that follows
+#   3. Create a classic PAT with read:packages
+#   4. Add it to this repository as the secret GHCR_TOKEN, and your GitHub
+#      username as GHCR_USER
+#
+# Without those secrets this workflow skips rather than failing, so a fork does
+# not show a permanent red X for something it cannot fix.
+#
+# THE HOSTED RUNNER IS PROBABLY TOO SMALL. A standard GitHub runner gives 14GB
+# of disk, and the engine image alone is larger than that. Expect to need a
+# larger runner or a self-hosted one; the job is written so that only the
+# runs-on line has to change.
+name: Tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  automation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Check for engine registry credentials
+        id: creds
+        run: |
+          if [[ -n "${{ secrets.GHCR_TOKEN }}" ]]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::GHCR_TOKEN is not set, so the engine image cannot be pulled. Skipping."
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.creds.outputs.available == 'true'
+
+      - name: Reclaim disk
+        if: steps.creds.outputs.available == 'true'
+        run: |
+          # The engine image dwarfs everything preinstalled on the runner, and
+          # these are the four biggest things nothing here uses.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost
+          df -h /
+
+      - name: Log in to GHCR
+        if: steps.creds.outputs.available == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ secrets.GHCR_USER }}
+          password: ${{ secrets.GHCR_TOKEN }}
+
+      - name: Build and run tests
+        if: steps.creds.outputs.available == 'true'
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/project" \
+            -w /project \
+            ghcr.io/epicgames/unreal-engine:dev-5.8 \
+            bash -c 'UE_ROOT=/home/ue4/UnrealEngine Tools/run_tests.sh ARPG'
+
+      - name: Upload the automation report
+        if: always() && steps.creds.outputs.available == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: automation-report
+          path: Saved/Automation/
+          if-no-files-found: ignore

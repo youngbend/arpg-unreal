@@ -6,14 +6,52 @@
 #include "Engine/DataAsset.h"
 #include "ARPGSpreadFuelMap.generated.h"
 
-/** One chunk's worth of baked fuel, row-major by Y then X. */
+/** One chunk's worth of baked ground, row-major by Y then X. */
 USTRUCT()
 struct ARPGWORLD_API FARPGFuelChunk
 {
 	GENERATED_BODY()
 
+	/**
+	 * WHAT KIND OF GROUND this cell is, as an EPhysicalSurface value.
+	 *
+	 * NOT HOW MUCH FUEL, which is what it used to be and was the wrong question.
+	 * A single amount is element-agnostic: a cell that carries fire well
+	 * necessarily carried every medium well, differing only by a per-medium
+	 * constant, so a marsh could not both refuse fire and carry a frost.
+	 *
+	 * The surface is a fact about the world and how much fuel it is worth is a
+	 * fact about the medium, and separating them costs nothing -- the same byte
+	 * per cell, and each spread definition brings its own table.
+	 *
+	 * AND THE ENGINE ALREADY ANSWERS THIS EVERYWHERE. Landscape layers carry a
+	 * physical material, so do meshes, and a trace returns one. The bake becomes
+	 * "rasterise the dominant surface per cell", which is both cheaper than
+	 * sampling foliage density and something a level designer already authors for
+	 * footstep sounds.
+	 */
 	UPROPERTY()
 	TArray<uint8> Cells;
+
+	/**
+	 * Per-cell variation, 0-255, mapping to a multiplier around 1.
+	 *
+	 * BECAUSE A UNIFORM GRID LOOKS LIKE A GRID. The Godot version's map was
+	 * regular, and a regular map burns in diamonds: every cell in a ring reaches
+	 * ignition on the same tick, so the fire front is a shape the grid chose
+	 * rather than a shape the fire did. Worse, it made the same fire look
+	 * different depending on where the viewer stood relative to a cell boundary,
+	 * which reads as the simulation being unreliable rather than as aliasing.
+	 *
+	 * Jitter breaks the tie. Cells reach ignition at slightly different times, so
+	 * the front is ragged and no two runs of the same fire trace the same
+	 * diamond. Baked rather than hashed at runtime, so a given patch of ground
+	 * always burns the same way -- ragged, not random.
+	 *
+	 * Empty means no variation, which is what an old bake and every test gets.
+	 */
+	UPROPERTY()
+	TArray<uint8> Jitter;
 };
 
 /**
@@ -63,18 +101,45 @@ public:
 	TMap<FIntPoint, FARPGFuelChunk> Chunks;
 
 	/**
-	 * Fuel fraction 0-1 at a normalised position within a chunk.
+	 * What kind of ground is at a normalised position within a chunk.
 	 *
-	 * Returns 1 for a chunk with no entry -- see the class comment: unbaked
-	 * ground burns, rather than a missing bake making the world fireproof.
+	 * Returns SurfaceType_Default for a chunk with no entry -- see the class
+	 * comment: unbaked ground burns, rather than a missing bake making the world
+	 * fireproof, and Default is what a definition's table falls back to.
 	 */
 	UFUNCTION(BlueprintPure, Category = "ARPG|Spread")
-	float GetFuelAt(FIntPoint ChunkCoord, float NormalisedX, float NormalisedY) const;
+	uint8 GetSurfaceAt(FIntPoint ChunkCoord, float NormalisedX, float NormalisedY) const;
+
+	/**
+	 * How much this cell varies from its surface's nominal fuel, as a multiplier.
+	 *
+	 * 1 exactly where nothing was baked, so an unjittered map behaves as it
+	 * always did and a test does not have to reason about noise.
+	 */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Spread")
+	float GetJitterAt(FIntPoint ChunkCoord, float NormalisedX, float NormalisedY) const;
+
+	/**
+	 * How far either side of nominal the jitter reaches, 0-1.
+	 *
+	 * 0.35 means a cell holds between 65% and 135% of what its surface says. Big
+	 * enough that a fire front is visibly ragged, small enough that a firebreak
+	 * is still a firebreak.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Fuel",
+		meta = (ClampMin = "0.0", ClampMax = "0.9"))
+	float JitterRange = 0.35f;
 
 	UFUNCTION(BlueprintPure, Category = "ARPG|Spread")
 	bool HasChunk(FIntPoint ChunkCoord) const { return Chunks.Contains(ChunkCoord); }
 
-	/** Writes one chunk's cells. Used by the bake commandlet. */
+	/**
+	 * Writes one chunk's surfaces, and jitters them. Used by the bake commandlet.
+	 *
+	 * JITTERED HERE rather than by the baker, so every map gets it and no bake
+	 * has to remember. Deterministic from the cell's world coordinate, so the
+	 * same ground is always the same, and two bakes of one level agree.
+	 */
 	UFUNCTION(BlueprintCallable, Category = "ARPG|Spread")
 	void SetChunkCells(FIntPoint ChunkCoord, const TArray<uint8>& Cells);
 

@@ -58,7 +58,7 @@ conceptually with the port. Keep `Content/Characters/Mannequins` and `Content/In
 | Fire spread | 2,700 | Direct port, new fuel-map + mask backing |
 | Persistent fluids (pools, solids, geometry, surface) | 3,500 | Largest rewrite — geometry backend changes |
 | Progression / weapon / armor / inventory | 2,500 | Direct port |
-| NPC AI (behavior trees, perception) | 2,000 | Retarget onto UE Behavior Trees |
+| NPC AI (behavior trees, perception) | 2,000 | Retarget onto UE StateTree |
 | `animation.gd` | 3,900 (GDScript) | Rewritten; most of it disappears |
 
 ---
@@ -78,7 +78,7 @@ ARPGWorld    reaction / conduction / spread / fluid-surface subsystems
    ↑
 arpg         game mode, player state, player controller, character, HUD   (also depends on ARPGAI)
 
-ARPGAI       perception, BT tasks, NPC definitions          (depends on ARPGCore + ARPGCombat)
+ARPGAI       perception, StateTree nodes, NPC definitions    (depends on ARPGCore + ARPGCombat)
 ```
 
 **One deliberate departure from the Godot layout.** In Godot, `ElementalReactionSystem` and
@@ -396,7 +396,7 @@ GA_HitStop            GA_Death
 | `swing_pitch.gd` spine chain | Control Rig post-process node |
 | `impact_twitch.gd` spring bones | `AnimDynamics` node or Physical Animation blend |
 | BT `Resource` tree | `UBehaviorTree` + `UBTTask_*` / `UBTDecorator_*` |
-| `Blackboard` | `UBlackboardComponent` |
+| `Blackboard` | StateTree property bindings — see §9 phase 8 |
 | Godot global shader uniform (`env_spread_mask`) | `UMaterialParameterCollection` + render target |
 | `res://` load | `TSoftObjectPtr` + `UAssetManager` |
 
@@ -528,7 +528,7 @@ manifests being dropped).
 | Damage types | 7 | Converter or hand-author |
 | Progression curves | 7 | Hand-author |
 | Magic elements + combinations | ~10 | Hand-author |
-| Behavior trees | 5 | Hand-author as UE BT assets |
+| Behavior trees | 5 | Hand-author as UE StateTree assets |
 | Status effects | 4 | Hand-author as GE assets — the GAS mapping isn't mechanical |
 
 Everything except the moveset and consumables is small enough that hand-authoring beats writing a
@@ -784,16 +784,101 @@ Two small extensions this phase required:
 - `UARPGMagicComponent` raises `OnDischargeExecuted`, the port of Godot's
   `discharge_executed` signal and the magic tracker's XP source.
 
-**Phase 8 — code complete.** Perception, behaviour-tree nodes and the reactive
-parry. 8 new cases; 71 pass in total.
+**Phase 8 — code complete.** Perception, StateTree nodes and the reactive parry.
+10 new cases; 73 pass in total.
 
 **The tree MACHINERY was deleted, not ported.** Godot hand-rolled BTNode,
 BTComposite, BTDecorator and their per-node blackboard state because Godot has no
-behaviour trees; UE has all of it, with an editor and a gameplay debugger. What
-ported is only the domain: five decorators and tasks that read this game's combat
-components, plus the parry. UE's node memory replaces the blackboard-keyed
+behaviour trees; UE has all of it, with an editor and a debugger. What ported is
+only the domain: five conditions and tasks that read this game's combat
+components, plus the parry. StateTree instance data replaces the blackboard-keyed
 per-node state trick exactly -- one tree asset shared by every goblin, with each
 instance keeping its own timers.
+
+**Corrected 2026-08-16: StateTree, not Behavior Trees.** Phase 8 originally
+landed on `UBTTaskNode`/`UBTDecorator`. UE 5.8 makes StateTree the default logic
+framework and the AI docs are written around it; Behavior Trees still ship and
+still work, but Epic has stopped iterating on them. The swap was made while there
+were **zero authored tree assets**, which is the only cheap moment it will ever
+have — the cost was six node classes, not six node classes plus five trees.
+
+Three things came out of it beyond conformance:
+
+1. **A real bug, fixed by the framework rather than by hand.** None of the four
+   BT decorators set `FlowAbortMode` or asked to be ticked, so they gated branch
+   ENTRY and never re-evaluated — "health below 30%" could not interrupt an
+   attack already swinging, despite the header claiming exactly that. A StateTree
+   transition re-tests its conditions while its state is active, so interruption
+   is the default rather than something each node opts into and can forget. The
+   bug was invisible because no tree asset existed to exhibit it.
+2. **The blackboard is gone, and with it a whole class of typo.** Perception used
+   to write five `FName` keys that every node looked up by name;
+   `ARPGBlackboardKeys.h` centralised the strings, which is not the same as
+   checking them. `FARPGStateTreeEvaluator_Perception` exposes the same five as
+   bound properties instead, resolved by the editor at author time and by the
+   compiler in C++.
+3. **`PredictTimeToContact` moved to `UARPGAILibrary`.** A StateTree node is a
+   USTRUCT and cannot carry a `UFUNCTION`, so the parry arithmetic moved off the
+   node — where it always belonged, given the test only ever wanted the maths.
+
+**Two hand-rolled behaviours were handed back to the engine at the same time.**
+
+- **Facing** was interpolating a yaw and calling `SetActorRotation` every tick,
+  writing straight past the movement component: it fought
+  `bOrientRotationToMovement`, bypassed rotation replication, and stomped root
+  motion out of attack montages. It now sets `AAIController` focus and lets
+  `RotationRate` do the turning, which is the path the engine's own
+  `UBTTask_RotateToFaceBBEntry` takes. Turn speed moved onto the definition as
+  `TurnRateDegrees`, by the same argument that puts `LeashRange` there.
+- **Backing off** was `AddMovementInput` along the away-vector with **no
+  navigation query at all** — it drove NPCs into walls and off ledges, and hit
+  the very corner case its own comment claimed a direction rather than a
+  destination avoided. It now samples reachable navmesh points and moves to the
+  one furthest from the target via `MoveToLocation`, so a cornered NPC finds the
+  sideways escape. An `EQS` hook is present but deliberately not wired: the query
+  asset can only be authored in the editor, and shipping an unreachable code path
+  would be worse than an honest gap.
+
+**Perception stayed hand-rolled, and that rejection was re-checked against 5.8.**
+`UAISenseConfig_Sight` offers `LoseSightRadius` — hysteresis on RADIUS only.
+`PeripheralVisionAngleDegrees` is applied on every update with no lose-angle
+counterpart, so "the cone gates acquisition but not retention" is still not
+expressible on top of it. `MaxAge` is a fair analogue of `MemoryDuration` and
+buys nothing else. Noise likewise stays a polled radius; `UAISense_Hearing` is
+event-based, which is right for a thrown rock and wrong for "sprinting is loud
+for as long as you sprint". Adding the event sense later for discrete sounds
+would not conflict with it.
+
+**The test NPC.** `AARPGNPCCharacter` is the body every enemy uses — one class,
+no subclass per type, because what a goblin IS lives in its definition asset.
+`Tools/generate_test_npc.py` emits the sword weapon definition (which never
+existed: the player reaches the attack tree through a hard-coded soft path, and
+an NPC cannot, because the AI's range condition reads `Reach` off a definition),
+the archetype, and a Manny Blueprint. Setup and the hand-authoring recipe for the
+tree are in `Docs/TEST_NPC_SETUP.md`.
+
+**Two dead code paths the fixture exposed**, both the same kind of mistake — a
+port that transcribed Godot's shape onto a UE fact that was never established:
+
+1. **The noise component's attack floor was gated on `ActorHasTag("Attacking")`,
+   which nothing in the project has ever set.** A swinging character was exactly
+   as loud as a standing one and `AttackRadius` did nothing at all. The melee
+   ability owns `State.Attacking` for as long as it is active, which is the fact
+   this meant to consult; `Noise.AttackingIsAFloorNotAReplacement` pins it.
+2. **The player had no noise component**, so `CanHear` treated them as silent by
+   construction and fell back to sight alone — a third of perception inert on the
+   one actor it matters most for. Its thresholds are anchored to the locomotion
+   tiers rather than left at the component defaults, whose 500 happens to equal
+   the player's *run* speed: merely running would have counted as sprinting, and
+   the loudest tier would have been the normal one.
+
+**The StateTree asset itself is not generated.** Its states hold
+`FStateTreeEditorNode`/`FInstancedStruct` and its data flow is property-path
+bindings, none of which the other `Tools/` scripts have to touch — whether the
+Python bridge reaches them is a property of the engine build.
+`Tools/generate_npc_statetree.py` probes and reports rather than guessing, and
+refuses to write a partial asset: one that opens to an empty editor looks like it
+worked, which is the outcome worth avoiding.
 
 **The reactive parry is where phase 4 pays off.** Its fallback timing reads the
 target's ACTIVE MONTAGE -- time left in Windup, at the montage's own play rate.
@@ -909,6 +994,841 @@ reaction subsystem now asks the fluid system to solidify before resolving an
 energy trade, and conduction checks whether a strike was roofed by a solid --
 NOT THROUGH THE ICE, since a floe roofs over the water beneath it and the pool's
 own collider knows nothing about that.
+
+**A LATER CORRECTION: nothing ever put a puddle in the world.** Phase 10 built
+every operation on a body -- deposit, merge, grow, erode, freeze, melt -- and
+wired the last two to the reaction and conduction subsystems, but `Deposit`
+itself had no caller outside the tests and the melt path. A water spell landed on
+dry ground and left it dry, and the same was true one layer down: the fluid
+definitions, the solid definitions and the combination table were all
+`EditAnywhere` on world subsystems, which have no editing surface, so a real
+session ran the whole thing with empty lists. Three things were missing and each
+would have been enough on its own to produce no puddles.
+
+- **A cast spell now finishes into the fluid system.** `AARPGDischargeEffect`
+  carries a `DepositRadius` and broadcasts a static `OnDischargeLanded` on
+  EndPlay(Destroyed); the fluid subsystem subscribes. A STATIC DELEGATE for the
+  same reason `OnVolumesMet` is one -- ARPGWorld depends on ARPGMagic, so an
+  effect calling the fluid system directly would close the cycle.
+- **The ground is probed, not assumed.** A spell finishes at chest height, so the
+  landing point is traced down to whatever is under it and the body forms there.
+  Past `MaxDepositDrop` the spell expired over a drop and wet nothing, which is an
+  outcome rather than a failure.
+- **Still nothing in C++ knows that water pools and fire does not.** An element
+  with no fluid definition deposits nothing, so the same radius on a fire orb is
+  simply inert. What changed is that the miss is now SAYABLE: an element nobody
+  pools logs at Verbose, and NOTHING being configured to pool -- the state this
+  project was actually in -- warns once and names the setting.
+- **The placeholders deposit, so this works with no authored content.** The same
+  number that drives a placeholder's hitbox and its drawn volume now drives what
+  it leaves, which is the rule that class already lived by. A projectile spreads
+  on impact rather than depositing at its own width -- a placeholder orb is 20 to
+  60cm and would otherwise leave a wet coin.
+- **A deposit under the minimum area no longer becomes a body.** It was spawned,
+  replicated, and destroyed by the next weather tick for being under the same
+  floor. Refused only where it would have nothing to belong to: a splash too small
+  to be a puddle still enlarges one it lands in, and the last of a melting floe
+  still returns its water to the pool it froze out of.
+
+3 new cases under `ARPG.World.Fluid.Casting`, the first of which is the gate that
+was missing -- a cast spell leaves a body on the ground under where it finished --
+plus the area floor asserted in `Pools.DepositsMergeRatherThanStack`.
+
+**A SECOND CORRECTION: a body had no appearance at all.** The phase table above
+claimed dynamic meshing and replicated outlines; neither was implemented. A pool
+was a trigger box and an elemental volume, `SurfaceMaterial` was declared on both
+definitions and read by nothing, and `Ring` was a plain `UPROPERTY` on an actor
+that replicates -- so a client received a pool with an empty outline and
+`RebuildFromRing` returned early on it.
+
+- **`UDynamicMeshComponent`, not the Water plugin.** Unreal's water bodies are
+  spline-authored level geometry served by a water zone: right for a river
+  someone placed, wrong for a puddle a spell made half a second ago whose
+  outline changes 4Hz. A body here is already a polygon, so drawing it is a
+  constrained Delaunay and an extrude -- `ARPGFluidGeometry::BuildSlabMesh`, the
+  fifth library call, sitting beside the four the design already reduced to.
+- **The mesh is the simulation's ring**, built in `RebuildFromRing` alongside the
+  bounds and the volume. There is no second representation to drift. UVs are
+  anchored to WORLD position, not the mesh's own space: a pool's centroid moves
+  every time it merges or erodes, and local UVs make the surface texture swim
+  sideways while the water sits still.
+- **The outline is all that replicates.** `Ring`, `GroundHeight`, the definition
+  and a solid's hole carry the Net flag and share one rep notify, since they
+  arrive in no guaranteed order and a rebuild driven by whichever came first
+  would size the mesh against a null definition. No mesh data goes on the wire.
+- **A floe is walked on where it is drawn.** Standable solids blocked pawns with
+  the BOUNDS BOX -- the polygon's rectangle -- so a player could stand off the
+  floe and inside the box, in mid-air over open water. Invisible while nothing
+  was drawn, and the first thing you notice once the slab is there. Collision is
+  now complex-as-simple on the mesh itself, which is also the only way to keep a
+  melted-through hole.
+- **Two ordering bugs the mesh exposed.** `TrySolidify` assigned `HoleRing` after
+  `Setup`, and the melt tick set the new outline before widening the hole. Both
+  were invisible while a hole only fed `IsStandableAt`, which reads it live; both
+  now leave a floe drawn and walkable over its own gap.
+
+The materials are placeholders on the same principle as the discharge volumes: a
+Fresnel driving opacity, which is most of what makes a flat surface read as
+liquid, and no textures at all. A real water shader is still the `M_ocean`
+rewrite the plan called for, and still presentation-only -- the waterline stays a
+flat number and nothing queries back into it.
+
+3 new cases under `ARPG.World.Fluid.Surface`.
+
+**A THIRD CORRECTION: only a pool could be frozen.** `TrySolidify` required one
+side to literally be an `AARPGFluidPool`, which quietly meant only a body this
+subsystem had spawned. An authored river -- the case the whole RESERVOIR idea
+exists for -- failed the cast and fell through to an ordinary energy trade, so an
+ice shard into a river made ice and no floe. And a pool that had grown past
+`ReservoirArea` *was* frozen, but was then shrunk by the frozen area and
+destroyed once enough had been taken: a body the code had already agreed was
+bottomless, depleted by the one path that forgot to ask.
+
+`IARPGFreezableSurface` replaces the cast with the three questions freezing
+actually asks -- what shape are you near where I hit you, how high is the surface,
+and take this much away. A puddle answers with its ring and shrinks; a reservoir
+answers with a patch around the contact and takes nothing. `bReservoir` becomes
+one implementation rather than a branch nobody wrote.
+
+**Rivers use the Water plugin, and that is the OPPOSITE call from puddles for a
+consistent reason.** The line is not water against not-water; it is AUTHORED AND
+STATIC against SPAWNED AND RESHAPED. Water bodies are spline-authored level
+geometry served by a water zone, which is exactly a river and exactly not a
+puddle. A river is therefore never an `AARPGFluidPool`: it is an
+`AWaterBodyRiver` with a `UARPGWaterBodyVolumeComponent` on it, and the fluid
+subsystem never hears about it.
+
+Two things the plugin supplies that a box has to guess:
+
+- **Containment.** The base `ContainsPoint` is axis-aligned bounds. For the
+  straight box a river was authored as that is roughly honest; for a spline that
+  bends it covers the whole valley, so everyone in it reads as standing in water
+  -- soaked, shocked, and detonating fireballs over dry ground. Both it and
+  `GetSurfaceHeightAt` are now virtual, and the water body answers from the same
+  query that drives its own buoyancy.
+- **A waterline that varies.** One authored offset cannot describe a river
+  running downhill. That was a standing note on `GetSurfaceHeightAt` saying phase
+  10 would replace it; phase 10 did not, and this does.
+
+**Freezing is written against containment, not against a shape.** The footprint
+is found by marching outward from the contact until the water stops, asking only
+`ContainsPoint` -- so `UARPGReservoirVolumeComponent` needs no knowledge of
+splines or boxes, a subclass that answers containment better gets a better patch
+for free, and the whole path is testable with a plain box and no plugin.
+
+3 new cases under `ARPG.World.Fluid.Reservoir`, including a shard wider than a
+narrow river freezing a patch that stops at the bank.
+
+**A FOURTH CORRECTION: nothing could reach the reaction solver, and a reaction
+changed nothing about a body.** Two gaps that read as one bug from outside --
+elemental collisions simply did not happen in game.
+
+- **A cast spell was not made of anything.** It carried no elemental volume and,
+  worse, no primitive collider at all: `UARPGHitboxComponent` is a scene
+  component that sweeps by hand, deliberately, because an overlap volume moving
+  fast enough passes between frames. Reactions are detected by physics overlap.
+  So the whole of phase 6 -- matched projectiles, surplus, lopsided rates, a
+  reservoir hissing rather than exploding -- was true, tested, and unreachable.
+  `AARPGDischargeEffect` now carries a sphere and a volume, driven by
+  `ReactionRadius` and energised from the context's `ComputedDamage`.
+- **A collision PRODUCT is the one thing that must not react.** It is born at
+  the contact point, inside whichever volume survived, and two different
+  elements neutralise even with no recipe -- so a steam cloud would eat the
+  fireball's surplus, which is what `SurplusSurvivesAtReducedPower` protects.
+- **A reaction now takes GROUND.** Spending a pool's energy used to change
+  nothing: the pool recomputes energy from area on the next weather tick and
+  silently discarded it, so a fireball into a puddle made steam and left the
+  puddle full size. A floe was worse -- it carried no energy at all, so the
+  solver bailed at its own zero-energy guard and fire did nothing to ice.
+  `IARPGElementalSurface` gains an energy density, and a body converts the spend
+  back into area at that rate. The combination table's consumption rates
+  therefore already decide how fast fire eats water and ice, with no second set
+  of numbers.
+- **And it takes ground rather than SCALE.** Without a hook a body fell to the
+  volume component's default projectile reaction, which scales the actor by the
+  cube root of what is left and destroys it outright at zero -- so a reacting
+  pool had its mesh, trigger box and outline disagreeing within a frame, and
+  could destroy itself behind the subsystem's back. `AARPGSurfaceBody` implements
+  `IARPGElementalReactive`, and retirement moved into one `RetireBody` that both
+  the melt tick and the reaction path go through -- which is also how a floe
+  melted by fire returns its water, something only the tick used to do.
+
+The interface is `IARPGElementalSurface` rather than the `IARPGFreezableSurface`
+it was one correction ago: a floe is not freezable, but it does have area a
+reaction can take, and both callers were asking the same three questions.
+
+4 new cases -- 2 under `ARPG.World.Reaction`, 2 under `ARPG.World.Fluid.Reaction`.
+
+**A FIFTH CORRECTION: a puddle did not conduct.** The conduction subsystem is
+sound and four cases prove the chain -- but every one of them sets
+`Conductivity` on its volumes by hand, and nothing ever set it on a deposited
+pool. The volume's own default is 0, `AARPGSurfaceBody` never touched it, and
+`UARPGFluidDefinition` had no field for it, so there was no authoring surface
+either. The conduction filter drops any neighbour at 0, so a chain of real
+puddles fell out of its own graph. That is the phase 6 gate -- *lightning floods
+a puddle chain and hurts a second player standing in it* -- failing on the half
+of itself that phase 6 deferred to phase 10 and phase 10 did not pick up.
+
+It failed in the wrong direction, too. With `Conductivity` at 0 the Conduct
+branch is skipped; amplification is correctly excluded for a Conduct row, so the
+pair lands in the ordinary energy exchange with the row's `Result` -- Lightning
+-- treated as a product. So a bolt into a puddle popped a second lightning
+effect, spent both sides, and (once a reaction took ground) boiled some of the
+puddle away, while nobody standing in it was shocked. It looked like something
+happened.
+
+- `Conductivity` moves onto the fluid definition and is applied in
+  `RebuildFromRing`. Which charges a body carries is still a Conduct row in the
+  shared table; this is only how well this substance does it.
+- A solid's is set to 0 EXPLICITLY. Ice not conducting is the point -- NOT
+  THROUGH THE ICE is a rule about the slab roofing the water, and a conductive
+  slab would carry the bolt into the pool it floats on and defeat itself.
+- **The roofing check widened from reservoirs to any medium.** It was asked only
+  when `Medium->bReservoir`, and a pool is only a reservoir past a threshold --
+  so ice on an ordinary puddle roofed nothing, which is the common case rather
+  than the rare one.
+
+2 new cases under `ARPG.World.Fluid.Conduction`, and they use REAL deposited
+pools rather than hand-built volumes, which is the whole reason this survived.
+
+**A floe now FLOATS, and this is a departure from the Godot original rather than
+a correction to the port.** It was pinned: `GroundHeight` was set to the waterline
+once at creation and never touched, so a floe did not ride waves, did not move on
+a current, and did not give under anyone standing on it.
+
+**KINEMATIC, NOT SIMULATED, AND THAT IS THE WHOLE DESIGN.** `UBuoyancyComponent`
+is the obvious reach and the wrong one: it drives a SIMULATING rigid body, which
+is right for a boat you ride and wrong for a platform you WALK ON -- a simulating
+body under a character movement component jitters and gets shoved around by the
+character it is carrying. It also requires simple collision, where a floe's whole
+value is complex-as-simple collision honouring its exact outline and its
+melted-through hole. So the integration is ours and the water state is the
+plugin's: surface height and flow velocity come from the same queries that drive
+its own buoyancy, and a kinematic movable base is what UE actually carries a
+character on.
+
+- **Archimedes, with two knobs traded for feel.** Draft is
+  `(SlabMass + LoadMass) / (WaterDensity * Area)`, so the slab's own term reduces
+  to `Thickness * Density / WaterDensity` with the area cancelling -- a big floe
+  and a small one of the same ice ride equally deep, and a wider floe takes a
+  person's weight better. Both fall out rather than being arranged. The two
+  departures are named in the definition: real ice at 92% submerged leaves 2cm of
+  freeboard on a slab you are meant to walk on, and a real person on 10m² pushes
+  it under a centimetre.
+- **Drift translates the RING, not the actor**, so the polygon stays the single
+  truth. `TranslateRing` skips the mesh rebuild, because a translation changes no
+  local geometry -- which is what makes per-frame drift affordable, and which
+  also leaves the surface texture riding with the floe instead of swimming past
+  it.
+- **A floe spanning its water is ANCHORED.** A spell that freezes the whole width
+  of a river makes a plug, not a raft: it is braced on both banks. Detected by
+  probing for open water past the outline in opposing directions, and recomputed
+  as it melts, so one that narrows enough comes free.
+- **It reports its velocity**, so based movement carries whoever is standing on
+  it. A drifting floe that slid out from under the player would be worse than a
+  static one.
+- **And it goes when its water goes** -- the mid-air-ice defect that boiling a
+  pool away had just made reachable.
+
+4 new cases under `ARPG.World.Fluid.Floating`.
+
+**A SLAB BECAME A SOLID.** A floe was an outline with a thickness, and that is a
+fluid's model wearing a hat: a puddle genuinely is two-dimensional -- pour more in
+and it gets wider, not deeper -- so a polygon is honest for water and a lie for
+ice. Everything interesting that happens to a floe happens in the third
+dimension. `FARPGIceField` replaces the outline with a heightfield: a top and a
+bottom per cell, in slab-local millimetres.
+
+- **A fireball melts a BOWL where it hit**, deepest at the centre and tapering to
+  the rim. At the edge the bowl runs off the side and leaves an angled cut; in
+  the middle, deep enough, it opens a hole. One expression, no case for either.
+- **Refreezing records a STEP.** New ice forms at the surface of the water, so a
+  floe pushed down by a load gains ice BELOW the ice that froze when it was
+  riding light -- and the difference stays in the slab when the load comes off.
+  Cells already proud of the waterline gain nothing, which is what makes that
+  fall out rather than being written.
+- **THREE PROBLEMS DISAPPEARED RATHER THAN BEING SOLVED.** A hole is a cell whose
+  top has met its bottom. It is not a ring, so it cannot be bridged into an
+  outline, cannot leave a zero-width slit for the offsetter to round into arcs,
+  and cannot be culled for not being the largest. The Godot version's fifty
+  vertices becoming 7193 over eighteen melt ticks was that bridging; the holes
+  that vanished mid-melt were that culling. Neither has anywhere to happen.
+- **Cost became a constant.** Melting is a write to the cells under the impact --
+  no boolean, no offsetter, no outline to retriangulate -- and triangle count is
+  bounded by the grid forever. `CellSize` is the one knob, and it is the only
+  thing that decides what a floe costs.
+- **Buoyancy reads the field's real volume**, so a floe a fireball has thinned
+  rides higher than one it has not. Same equation, now told the truth.
+
+The honest cost is the wire: a ten-metre floe at 20cm cells is 2500 cells, and
+even at two int16s each that is the heaviest thing this system replicates.
+Dirty-region updates are the obvious next economy.
+
+3 new cases under `ARPG.World.Fluid.Ice`, one of which reproduces the Godot
+pathology -- forty melt ticks with holes opening -- and asserts the mesh never
+grows.
+
+**AND NONE OF IT IS ABOUT ICE.** `FARPGSolidField` rather than an ice field: the
+same slab model serves anything frozen, crusted or congealed out of a fluid, and
+which of them behaves how is data.
+
+- **Whether a slab floats is two densities compared**, one on the fluid
+  definition and one on the solid. Ice on water floats; a crust denser than the
+  lava it formed on does not, and a slab that does not float RESTS ON THE BED
+  rather than sitting awash -- one branch on the same Archimedes, reached through
+  `GetSurfaceBedAt` rather than anything knowing what it is standing in.
+- **Permanence is two independent questions, now stated as such.** `MeltRate` is
+  "does time take it" and `EnergyPerArea` is "can a reaction take it". Obsidian
+  answers no to both; ice answers yes to both; a ward could sit unchanged forever
+  and still be broken by a big enough spell. They were already separate fields
+  and one of them was undocumented, which is how a permanent crust would have
+  been quietly edible by fire.
+
+1 new case under `ARPG.World.Fluid.Floating`.
+
+**A SIXTH CORRECTION: nothing bounded what any of this cost.** Asked how culling
+was handled, the honest answer was that it was not -- no tick interval, no draw
+distance, no cap on how many bodies a session could accumulate. But the missing
+culling was the smaller half of it. The bigger half was a per-frame cost nobody
+had put there on purpose.
+
+- **A floe was sweeping its whole grid four times a frame.** `Tick` asked the
+  field for its cell count, its centroid, its volume and its area, and every one
+  of those walked all the cells. A ten-metre floe at 20cm cells is 2500 cells, so
+  that is 10,000 cell visits per floe per frame plus a physics box overlap --
+  paid whether or not anything had changed, which for a floe nobody is standing
+  on is always. The totals are now cached on the field and recomputed in ONE
+  sweep on write. `Translate` moves the cached centroid rather than invalidating
+  it, because sliding a floe cannot change what is iced.
+- **The caches are `Transient`, so a client gets them empty**, which is why
+  `RebuildFromRing` refreshes before it reads. A replicated field arriving with
+  four zeroed totals would have put every floe on the client at the origin with
+  no buoyancy -- the precise failure mode of caching a derived value across the
+  wire.
+- **Distance now decides what a body presents, not whether it exists.** A body
+  beyond `SignificanceDistance` of every viewer keeps SIMULATING -- it still
+  melts and evaporates on the weather tick, because walking back to a pool that
+  should have dried up an hour ago is a bug you cannot watch happen. What stops
+  is everything that exists for the player: the buoyancy settle, and above all
+  the collision cook, which is the single most expensive thing in the system and
+  was being run on floes over the horizon.
+- **Viewers are gathered once per weather tick**, not once per body per frame,
+  and the pawn is preferred over the view target so a floe you are standing on
+  keeps its collision while the camera is elsewhere. **No viewer means everything
+  is significant** -- a dedicated server and every fixture in the test file would
+  otherwise switch the whole system off, which is an optimisation that shows up
+  as tests passing for the wrong reason.
+- **`MaxBodiesOfEachKind` is the backstop.** A deposit that merges into a nearby
+  pool is free, but one that lands clear of every pool spawns another actor with
+  a mesh, a collider and a replicated outline -- so a player crossing a field
+  casting water makes one per cast, forever. Past the cap the smallest goes:
+  cheapest to lose, least likely to be the one someone is standing in. Applied on
+  the simulation step rather than at the moment of depositing, so a burst of
+  casts is never refused mid-fight; it settles.
+- **A cull is not a retirement**, and keeping them separate mattered twice.
+  Retiring a solid returns its water, which under a budget cull would answer "too
+  many bodies" by making another one -- so a cull simply drops it. But a culled
+  POOL still has to take its floe with it, exactly as a retired one does: ice
+  left hanging over dry ground is the one visible artefact this economy could
+  produce, and that rider-shedding is now a shared step rather than living inside
+  the one path that used to be the only way a pool could go.
+
+What is still owed is the wire. A floe's field is the heaviest thing this system
+replicates and it still goes across whole; dirty-region updates remain the
+obvious next economy, and no amount of culling changes that, because
+significance is about presentation and replication is about relevance.
+
+4 new cases under `ARPG.World.Fluid.Ice` and `ARPG.World.Fluid.Pools`, one of
+which hand-sweeps a grid and compares it against the cache after every kind of
+write, because a cache that agrees with its source only when freshly built is
+the failure worth testing for.
+
+**A SEVENTH CORRECTION: a melting slab put its fluid nowhere.** Both melt paths
+computed the volume they had removed and both callers threw the return value
+away, so a floe's entire mass simply left the world. The only thing that ever
+put water back was a one-shot deposit at retirement, sized by whatever sliver of
+ice was left -- which, being under `MinimumArea` by definition, the deposit path
+refused anyway.
+
+- **MELTING IS NOT ONE EVENT, and that is the whole of the fix.** Ambient melting
+  returns NOTHING, deliberately: a floe thinning in the sun over a minute, then a
+  puddle appearing at the instant its last sliver goes, is water arriving out of
+  nowhere -- and it would turn every slab the world ever froze into a puddle it
+  has to keep. A reaction is the opposite case. Fire through ice is a thing the
+  player did, somewhere they were looking, and the water is the visible result of
+  it, so the reaction path deposits as it melts rather than at the end.
+- **The deposit at retirement is gone**, because it could not tell those two
+  apart and got both wrong.
+- **Mass is what is conserved, not volume.** Ice is lighter than the water it came
+  from, so a cubic metre of it melts into the volume of water that WEIGHS the
+  same. The same two densities that decide whether the slab floats decide how
+  much water it is worth -- which is what they are for, and is why nothing here
+  names ice or water.
+- **A LAKE TAKES IT BACK AND NOTHING APPEARS.** The floe hands the water to the
+  surface it is riding and never learns which kind of thing that is:
+  `AbsorbSurfaceVolume` on a reservoir is bottomless in the giving direction
+  exactly as `ConsumeSurfaceArea` is in the taking direction. The obvious
+  implementation -- deposit wherever the ice was -- would have put a puddle mesh
+  coplanar with the lake surface, z-fighting with it, in the one place on the map
+  a puddle is least wanted.
+- **AND THE TRAP THAT LOOKS FINE AND CONSERVES NOTHING.** Returning fluid by
+  merging a disc in is silently a no-op in the common case: fluid comes back
+  where it left, so the disc lands INSIDE the outline it is joining, and a union
+  with a polygon that already contains you is that polygon. A puddle has no
+  volume of its own to accumulate into, so the volume has nowhere to go but the
+  ring -- `GrowToArea`, which is `ShrinkToArea` run backwards, and the two now
+  share a solver and keep one-way contracts so a caller cannot quietly get the
+  opposite of what it asked for.
+- **A slab left on dry land is the remaining case**, and the only one that makes
+  a body of its own: its pool evaporated out from under it, there is nothing to
+  absorb into, and fire melting it should leave a puddle. It does.
+
+Also fixed while tracing it: a floe's `FloatsOn` was null-checked rather than
+IsValid-checked, so a pool destroyed earlier in the same frame -- not yet
+collected, so the interface still pointed at it -- would have been queried for a
+waterline, a density and a bed on the buoyancy tick.
+
+4 new cases under `ARPG.World.Fluid.Ice`, `.Pools` and `.Reservoir`. The ambient
+one asserts against a POOL rather than a lake on purpose: a lake absorbs whatever
+the rule is, so it cannot tell the two behaviours apart, while a pool is where
+returned water would show as a body that grew.
+
+**AN EIGHTH CORRECTION: the same water, twice, and a puddle on top of the ice.**
+Returning meltwater gave a reaction a SECOND way to put fluid on the ground, and
+nothing stopped both running.
+
+- **A reaction has two mouths.** Melting a slab returns the material that melted,
+  at the contact. Separately, the row's `Result` spawns a Collision discharge,
+  and a discharge that lands deposits whatever its element pools as. For
+  `fire + ice -> water` those are one body of water described twice, and the floe
+  left more water than there was ice. The product's deposit is still right when no
+  body was consumed -- two spells meeting in mid-air to make water genuinely leave
+  water, with nothing else accounting for it -- so the fix is not to switch it off
+  but to know whether it was already covered. The solver opens a ledger before it
+  consumes, a body that hands its fluid back writes to it, and the product reads
+  it before spawning. Scoped to one `Resolve` rather than timed, because a window
+  in seconds would have to guess how long a discharge lives.
+- **Absorbed counts as returned.** A lake taking the water is the material being
+  accounted for; that nothing is visible does not make it unaccounted, and the
+  product would otherwise deposit a puddle on the lake -- the exact artefact the
+  seventh correction removed.
+- **A SLAB IS NOT GROUND.** The deposit probe traces on Visibility and a slab
+  blocks every channel, because you stand on it. So a spell finishing over a floe
+  hit the ICE and left its puddle on top: at the wrong height, and as a separate
+  actor that does not drift with the floe, so it hung over open water the moment
+  the floe moved on. The probe now ignores every body this system owns -- pools
+  as well, where the milder version was stacking a second body a couple of
+  centimetres above the first instead of merging with it.
+
+**And the slab vocabulary stopped being about ice.** The type was generalised two
+commits ago and its language was not, which is the half of a rename that actually
+misleads: `IsIced`, `IcedArea`, `IceVolume`, `IcedCentroid`, `IcedCellCount`,
+`Refreeze`, `WaterlineZ`, `ReturnMeltwater`, `IsWaterAt` and the doc comments
+around them all read as if ice were the only thing a slab could be. They are now
+`IsSolid`, `SolidArea`, `SolidVolume`, `SolidCentroid`, `SolidCellCount`,
+`Resolidify`, `SurfaceZ`, `ReturnMeltedFluid` and `IsFluidAt`, with ice kept only
+as the worked example. `Melt*` stays: melting is what happens to any solid, and
+`MeltRate` / `MeltsInto` were already general. Water plugin names stay too --
+`UARPGWaterBodyVolumeComponent` really is about Unreal's water bodies.
+
+2 new cases under `ARPG.World.Fluid.Casting` and `.Reaction`, the second of which
+walks the world for the spawned product and asserts its deposit radius is zero --
+the double deposit is invisible from the pool count alone, since both deposits
+merge into one body.
+
+**A SLAB STOPPED BEING SOMETHING A FLUID BECAME.** Everything above is about ice
+on water, and freezing was the only way to make a slab at all -- `ActiveSolids`
+had exactly one writer. Earth raises a wall out of the ground: the same object,
+for a completely different reason, and the last place the fluid system's
+assumptions were still baked into the general one.
+
+- **The types moved out of the fluid headers.** `AARPGFluidSolid` is
+  `AARPGSolidBody` in `ARPGSolidBody.h`, the shared base is `AARPGSurfaceBody` in
+  `ARPGSurfaceBody.h` -- it always was "anything that IS an outline lying on the
+  ground" rather than anything fluid -- and `UARPGSolidDefinition` has its own
+  header instead of riding along in the fluid one. A pillar of earth that was
+  never a liquid should not be described by a file named for fluids.
+- **ROOTED IS THE ABSENCE OF SOMETHING**, not a new mode. A slab with no
+  `FloatsOn` has nothing to settle against, so the buoyancy tick stops before it
+  starts -- and that same null was already the guard for a floe whose pool had
+  just gone. One branch, two right answers.
+- **`Draft` already meant "how far under its resting height this is sitting"**,
+  so burying a slab to its own thickness and letting the number come back to zero
+  IS the rise, with no animation track and no second concept. It snaps home
+  rather than approaching forever, because FInterpTo is asymptotic and a slab a
+  fraction of a millimetre short would tick, move and dirty its replicated draft
+  for the rest of the level's life.
+- **`IsPermanent` is `MeltRate == 0` read back** -- the same zero the weather tick
+  already skips on. It now also exempts a body from the budget, because that
+  economy is for litter: puddles left crossing a field, floes that were going to
+  melt anyway. A wall someone raised for cover vanishing mid-fight because the
+  level accumulated puddles elsewhere is the worst thing it could do.
+- **`RegisterSolid` closes the hole that made all of this possible to get wrong.**
+  An unregistered slab still draws, collides and reacts, so it looks like it
+  works -- but `IsCoveredBySolid` never sees it, and a bolt striking the water it
+  stands in conducts as though the wall were not there.
+- **`FindSolidNear` measures to the SLAB, not to its origin**, via the field's own
+  `SupportDistance`. A wall is long and a caster at one end of one is not far from
+  it; the actor's location is its centroid, which would say they were.
+
+**Earth is authored, and it is the first element whose discharge types are
+different spells.** Fire is a fireball, a cone and a nova -- one idea aimed three
+ways. Earth throws a rock, raises a pillar and raises a ring, and only the first
+is a projectile. That took no new dispatch: `DischargeEffects` is a map keyed by
+discharge type and authoring three entries is authoring three spells.
+
+- **Two solid definitions for one element**, because Burst and Emanate want
+  opposite shapes: a thick pillar at 40cm cells, and a wide low ring at 60cm --
+  cell count goes with AREA, and an emanation is metres across in every
+  direction.
+- **`MeltRate` 0 and `EnergyPerArea` high** is the pair that makes it cover worth
+  having. Time cannot take it; a sustained assault can. Cover that cannot be
+  broken is a wall the encounter is now behind.
+- **Denser than any fluid here**, so a slab raised in water rests on the bed
+  rather than bobbing -- one comparison in the same Archimedes the floes use,
+  reached without anything knowing it is rock.
+- **Project reads the world rather than the input.** `AARPGLaunchSlabProjectile`
+  looks a short way ahead for a slab of its own element and throws it instead of
+  conjuring a boulder, sized from the volume of rock that actually went. In the
+  effect and not the ability, because Project is one ability shared by every
+  element and only earth cares. Short reach on purpose: the point is "throw the
+  wall you just raised", not "the spell hunts for ammunition", and a caster whose
+  cover is thrown away from across the room has been robbed by their own spell.
+
+4 new cases under `ARPG.World.Fluid.Slabs`.
+
+**LAVA AND OBSIDIAN, which is the example this system kept citing.** Every
+comment about a solid that is permanent, that melts into nothing, and that is
+compared by density against the fluid it formed on has said "obsidian" and meant
+a thing that did not exist. It exists now and none of those comments needed
+changing, which is the real test of whether the slab model came off ice.
+
+- **Fire + earth is lava in HAND AND IN THE WORLD**, and that is the unusual
+  part. Scope exists because most pairs mean different things in a caster's hands
+  and out in the world -- air and water is ice in the hand and merely weather over
+  a lake. This pair does not care: fusing fire and earth is molten rock, and
+  throwing fire at rock is molten rock. Scope `Hand | Collision`, and NOT Field,
+  because a grass fire crossing stony ground is a grass fire.
+- **The consumption ratio is the Melt row inverted.** Fire + ice spends the ice
+  fast, because a fireball melts a lot of it cheaply. Fire + earth spends the
+  FIRE fast, because rock is not ice -- which is what makes lava expensive rather
+  than the obvious opener.
+- **OBSIDIAN IS KEPT OUT OF THE HAND BY SCOPING, AND NOTHING ELSE.** There is no
+  mechanism that forbids holding an element, and none was added: what an element
+  can be in a caster's hands is exactly what some row produces in the Hand scope,
+  so a Quench row scoped to Surface is the entire restriction. No flag, no list of
+  forbidden results, nothing to keep in sync with the table.
+- **And the same pair still means something in the air.** Water crossing lava
+  mid-flight is steam, on a second row in the Collision scope -- the exact shape
+  of the ice-shard-versus-jet-versus-puddle split this codebase already lives by.
+  Without it a Surface-only row would have left the pair silently neutralising,
+  which is the quiet hole that scoping one row narrowly leaves behind.
+- **Obsidian answers no to both permanence questions**, the pair `MeltRate` and
+  `EnergyPerArea` were split apart to express: time does not take it and neither
+  does a spell. It is the one thing in the game that, once made, is simply part
+  of the level -- and a reaction against a zero-energy surface is refused before
+  anything is computed, so that is cheap as well as absolute.
+- **A crust floats, barely, and the numbers do the talking.** Real obsidian is
+  2.4 against basalt magma's 2.7, so at 89% of the flow's density a 25cm slab
+  rides 22cm under and 3cm proud -- awash, scabbing the surface, nothing like the
+  12cm of freeboard ice gets from being tuned to 60%. Same Archimedes, same code
+  path, two numbers apart. (My first pass had obsidian heavier than lava, which
+  would have sunk the crust to the bed and left molten rock on top of the thing
+  the player just quenched. It is also backwards: obsidian is the lighter of the
+  two. A slab heavier than what it formed on is still supported -- it rests on
+  the bed -- it just is not this one.)
+- **Lava's conductivity is 0.05**, which the water definition's own comment
+  predicted verbatim ("lava would be near zero") long before there was any lava.
+  A bolt does not flood across a flow, and the conduction solver learned nothing.
+- **The placeholder surface grew an emissive term**, because molten rock that
+  does not glow reads as mud and the whole job of a placeholder is that you can
+  tell at a glance what you are looking at. Zero for every surface that came
+  before it.
+
+3 new cases under `ARPG.World.Fluid.Lava`.
+
+**MELTWATER LEARNED TO GET DOWN -- a film on the slab, not a fluid simulation of
+the world.** Melting the top of an ice tower used to put a puddle at its foot in
+the same instant: the right destination reached by no route at all. What was
+missing was the whole journey.
+
+- **THE GRID WAS ALREADY THERE**, which is the entire reason this is cheap rather
+  than a rewrite. A shallow-water solver IS a heightfield with a depth per cell
+  and an exchange rule between neighbours -- the same object a slab has been since
+  it stopped being an outline. So the film is a third array over the two that
+  exist, and a step is one sweep: no booleans, no offsetter, no outline to
+  retriangulate, cost bounded by cell count exactly as melting is.
+- **The pipe model, half the head, double buffered.** A cell compares its surface
+  against its four neighbours and gives volume to whichever are lower, in
+  proportion. Half the difference, or two cells trading across a step swap
+  heights forever and a flat slab shimmers. Double buffered, or a raster-order
+  sweep runs downhill faster east than west and the film visibly drifts.
+- **The rim and every hole are a CLIFF, not a neighbour.** There is nothing over
+  there to hold water at any height, so the whole of a cell's surface is the drop
+  -- which is what makes a film pour off the edge instead of pooling against it,
+  with no boundary case written anywhere.
+- **The film is floats and is NOT replicated**, and both halves are deliberate.
+  Not replicated because what a film DOES that matters is arrive at the bottom,
+  and what arrives is a pool, which replicates already -- and because tripling
+  the heaviest thing on the wire to send presentation would be indefensible while
+  dirty-region updates are still owed. Floats because the integer millimetres
+  that make `Top` affordable would quantise a two-millimetre film to nothing and
+  the water would round its way out of existence on the way down.
+- **A BOWL HOLDS ITS OWN MELTWATER**, and this fell out rather than being written.
+  A fireball into the middle of a two-metre slab cuts a dish, and a dish keeps
+  what it melts; only a melt that breaches the rim runs off. That is the right
+  behaviour and it is also why the runoff test pours directly instead of melting
+  -- a melt is the wrong question to ask about arrival.
+- **Runoff is batched and flushed on drying.** Every deposit is a polygon merge or
+  an actor spawn, so a melting tower putting each dribble down as it came would
+  charge itself a boolean op per frame for a teaspoon. The flush matters more than
+  the batch: the last of a film is always under the threshold, and water lost
+  because it was the remainder is the kind of leak nobody watches happen.
+- **Melting reports to the reaction ledger BEFORE it pours**, above every early
+  return. That the water has not arrived yet does not mean nobody is bringing it,
+  and the product must not deposit the same water again while the film is still
+  on its way down.
+
+**WHAT IS DELIBERATELY NOT HERE.** The film is not drawn. `BuildFieldMesh` builds
+from `Top` and `Bottom`, and putting a wet sheet on the surface is a second mesh
+section or a material parameter -- editor work, not something to write blind. The
+runoff arriving over a second or two instead of instantly is a visible change
+without it, but the wet slab is not. Clients do not run the film either: it is
+server-side, so the pool arrives correctly everywhere and the sheet on the way
+down is currently a server-only fact. Both are named gaps rather than oversights.
+
+Fluid crossing open terrain would still need pools to become heightfields, which
+is a rewrite under a working system rather than an addition -- and it needs
+dirty-region replication in front of it, not after.
+
+5 new cases under `ARPG.World.Fluid.Runoff`, four of them pure grid arithmetic
+with no world at all.
+
+**THREE LIMITS OF A HEIGHTFIELD, told apart and answered separately.** Asked
+whether a mesh would be the better representation, the honest answer turned out
+to be that "the heightfield cannot do X" was three different X's wearing one
+coat, and only one of them wanted a mesh.
+
+- **No overhangs** -- z = f(x,y) has one height per column, so a bowl cut into a
+  SIDE, an arch, or a hole through a wall are unrepresentable. Only spans (a list
+  of intervals per column) fix this, and it is deferred: it justifies itself on
+  breaching cover, not on fluids, and at 40-60cm cells a chest-height window is
+  two cells and reads as a slot.
+- **No surface on a vertical face**, so a film cannot flow down one. Answered by
+  admitting it: what happens off a rim is a FALL, and a fall is a delay. Runoff
+  now waits `sqrt(2h/g)` before it lands, so a five-metre tower puddles about a
+  second after the water leaves the edge -- which is the part the eye was reading
+  all along, at three orders of magnitude less than a face solver.
+- **No rotation**, and this one turned out to be two questions. **Yaw is fine**:
+  columns run along world Z, so spinning about the up axis leaves every one of
+  them vertical. Only pitch and roll break the shape -- and a floe spins on the
+  water rather than tumbling.
+
+**So the field got its own frame, and a floe turns.** The field was addressed by
+world XY, which worked only because the actor's rotation was always identity: a
+latent coupling, not a decision. `FieldOrigin` and `FieldYaw` on the body now
+carry where the cells are and which way round, every world-facing call converts
+at the boundary, and the mesh needed no change at all -- it was already built in
+field space relative to the centroid, so the component's transform carries the
+yaw. Drift moves the frame instead of translating the field, which is cheaper,
+and spin comes from the shear in the current: sample the flow at both flanks and
+the difference along it is what puts a couple on anything floating there.
+
+**And a thrown slab is a mesh for exactly as long as it is in the air.** This is
+where the argument against meshes stops applying, and the difference is one word:
+EDITED. Unbounded vertex growth, sliver accumulation, a cook that worsens every
+time, an object you cannot replicate -- every one of those is about REPEATED
+boolean editing, which is the failure the heightfield replaced. A mesh baked
+once, carried, and discarded has none of them, and it is the only thing that can
+tumble.
+
+- **The field goes with it, whole.** What lands is what was thrown, melt scars
+  and all -- `AdoptField` is the other door into a slab, next to the `Setup` that
+  seeds one from an outline.
+- **It lands upright.** Only the yaw survives the flight, because putting a
+  heightfield down on its side means resampling the grid through an arbitrary
+  rotation: lossy, expensive, and precisely what makes tumbling hard for this
+  shape. It slams down flat, which is the readable outcome anyway.
+- **Which makes Project a way of MOVING your cover** rather than only spending
+  it, and that is a better spell than the generic boulder it replaced.
+
+**Viscosity moved onto the fluid**, where it belonged: with the knob on the slab
+you would tune "how thick is lava" inside the earth asset. And a rate was only
+half of it -- a slower rate makes a fluid arrive later, it never makes it STOP.
+`YieldSlope` is head per cell below which nothing moves, so lava sits on a
+gradient water sheets off, and the piling-up comes free because a fluid that
+needs more head necessarily stands deeper. An edge is exempt: nothing holds a
+fluid back over a cliff however thick it is.
+
+**Earth melts into lava now**, so a pillar sheds down its own face through the
+film instead of the reaction's product appearing at its foot -- and the ledger
+stops the two of them both depositing.
+
+5 new cases under `ARPG.World.Fluid.Runoff` and `.Slabs`, including the same ramp
+run twice differing only in the two viscosity numbers, and a rotation test on a
+long bar because a disc would pass by symmetry and tell you nothing.
+
+**A REVIEW PASS: six findings, and one of them changed shape under inspection.**
+
+- **`Transient` does not mean "not replicated", and I had assumed it did.** It
+  governs saving to DISK; a `UPROPERTY` inside a replicated struct is in the
+  network layout regardless. So the film and the five cached totals -- all
+  documented as never sent -- were being sent, the film being a float per cell,
+  which DOUBLED the heaviest payload in the project to transmit something the
+  comment above it denied existed. `NotReplicated` is the specifier that does it,
+  and it appeared nowhere in the codebase, which is how this survived.
+- **`CountOccupants` was the last per-frame scan.** A physics overlap feeding a
+  draft that settles over a third of a second; now polled at 4Hz, which puts the
+  load inside lag the settle already has.
+- **StateTree and GameplayStateTree were enabled and used by nothing.** The AI
+  runs on AIModule behaviour trees, which are fully supported in 5.8. Dropped
+  rather than adopted: rewriting working AI for no stated benefit is not a
+  cleanup.
+- **Niagara enabled, and made load-bearing rather than a checkbox** -- the exact
+  sin the previous point punishes. A status can now name a `UNiagaraSystem`
+  directly instead of every status needing an actor whose only job is to hold one
+  component; the actor path stays for visuals with logic or their own fade-out.
+  That forced a good split: fitting is a MEASUREMENT of the target and was
+  tangled up with attaching an actor, so `SolveVfxFit` does the sum and two
+  callers apply it.
+- **`USignificanceManager` replaces a worse copy of itself.** The hand-rolled
+  viewer scan sampled positions on a 4Hz weather tick; the engine's is updated
+  where the engine knows they moved and is shared with anything else that asks.
+  The player-list fallback stays, because a manager exists only where a game mode
+  spawned one and no automation fixture does.
+- **The spread sweep runs in parallel**, which it was already written for without
+  anyone intending it: a chunk reads shared configuration, writes its own cells,
+  and queues anything crossing a boundary. Three things were shared -- the active
+  scratch, the deposit queue, and the two delta accumulators -- and the last pair
+  was the dangerous one, since chunks sharing them would not merely race but
+  spread each other's fire. All now per-slot, gathered in chunk order rather than
+  completion order so a listen server and its client agree.
+
+**AND THE DELTA I SET OUT TO WRITE CANNOT BE MADE CORRECT.** The plan was a dirty
+span on the field: mark what changed, send only that. `NetSerialize` runs once
+per connection and is told nothing about which connection it is serving, so it
+cannot know whether this client has prior state to patch -- a span would be right
+for whoever was already watching and would quietly corrupt anyone who joined, or
+relevanced in, since the last change. Per-connection baselines are what
+`NetDeltaSerialize` exists for, and that wants an array of identified items
+rather than a dense grid.
+
+So: **compress instead of diffing**, which needs no baseline and is therefore
+correct for every client by construction. Run-length encoding suits this data
+almost exactly, because the property that makes a heightfield cheap to melt is
+the property that makes it compressible -- most of a slab is at one height. A
+fresh slab is a handful of runs; a melted one is the bowl plus a run either side
+of each affected row; `Bottom` is one run for anything never melted from
+underneath, which is nearly everything.
+
+1 new case under `ARPG.World.Fluid.Ice`, asserting every cell survives the round
+trip rather than just the totals -- a codec that agreed on the sums while
+scrambling the grid would pass a laxer test and produce a floe with the right
+volume in the wrong shape.
+
+**OBJECTS BECAME FUEL, and it is not a negative resistance.** The spread field
+carried fuel per cell, baked from the world, so a wooden crate standing on bare
+stone was scenery the fire went round.
+
+- **The Godot answer was to reuse resistance with the sign flipped**, and it is
+  the wrong axis twice over. Resistance is what a body suffers; fuel is what a
+  medium is carried by, and a wet crate takes normal fire damage while
+  propagating nothing, a powder keg takes almost none while propagating
+  enormously. And resistance is keyed by DAMAGE TYPE while spread is keyed by
+  MEDIUM -- steam does fire damage and is not a fire medium, so keying fuel off
+  the damage type would make steam flammable. One field doing two jobs is the bug
+  class this branch has spent its length finding.
+- **So it is a component, which is the pattern everything else here already
+  uses.** An element pools because a fluid definition names it; it is a slab
+  because a solid definition names it; a thing is fuel because a fuel component
+  says which medium and how much.
+- **FUEL IS NOT HEALTH.** Health is what the fire takes from the object, and the
+  hurtbox already does it. Fuel is what the object gives to the fire. Keeping the
+  two apart is what lets a powder keg, a stone brazier and an oak beam be three
+  different things rather than one number at three values.
+- **IT KEEPS ITS OWN FUEL rather than pushing it into the field.** The cells under
+  a crate already hold the ground's fuel, and once the two are mixed there is no
+  telling whose is whose: quenching would refund the crate and burning the grass
+  would consume it. The field says only whether the cell is alight; the object
+  answers with what it is prepared to give.
+- **AND THE HALF-BURNT CRATE FALLS OUT.** Fuel is spent only while the cells are
+  alight, so water quenching the fire stops the burn where it stopped -- nothing
+  restores it, resets a timer or decays it. Relight the crate and it consumes the
+  remainder. Neither behaviour is implemented; both are what "spend only while
+  alight" means.
+- **Spent is not destroyed.** A log becomes charcoal, a rope parts, a barricade
+  collapses, a crate spills what was inside -- the object decides, on a delegate,
+  and spent sources stay registered so a repaired barricade burns again without
+  anyone re-registering it.
+- **Char rides on custom primitive data**, not a dynamic material instance. One
+  float per object, and a level of crates each with its own MID is an allocation
+  and a broken batch apiece for a number the shader could read off the instance.
+
+3 new cases under `ARPG.World.Spread.Fuel`.
+
+**Still owed on this: the AREA half.** The fuel map is one scalar per cell and is
+element-agnostic, so a cell that carries fire well necessarily carries every
+medium well, differing only by a per-medium constant. The right shape is to bake
+a SURFACE TYPE instead of an amount and let each spread definition carry a
+surface-to-fuel table -- same memory, strictly more expressive, and it turns the
+bake into something a level designer knows. And the surface type should be
+`EPhysicalSurface`, which landscape layers and meshes already carry and traces
+already return: the engine answers "what kind of thing is this" everywhere, for
+free, and the codebase uses it in exactly one place, disabled.
+
+**THE GROUND GREW A KIND, A GRAIN, AND A FACE.** Three findings from the spread
+review, and the third was that the visual half never existed at all.
+
+- **A cell names a SURFACE now, not an amount.** One byte per cell as before, but
+  it says what kind of ground this is rather than how much fuel it holds, and each
+  spread definition brings a surface-to-fuel table. A single amount was
+  element-agnostic: a cell that carried fire well necessarily carried every medium
+  well, differing only by FuelSeconds, so a marsh could not refuse fire and carry
+  a frost. The ground says WHAT it is and the medium says what that is WORTH,
+  which is the same split as everywhere else here.
+- **And the surface is `EPhysicalSurface`**, which the engine already answers
+  everywhere: landscape layers carry a physical material, so do meshes, and a
+  trace returns one. The bake becomes "rasterise the dominant surface per cell",
+  cheaper than sampling foliage density and already authored for footstep sounds.
+  The fallback is generous on purpose -- a missing bake, an unlisted surface and a
+  test world all read as ordinary, because "burns when it should not" is far
+  easier to notice than "silently fireproof".
+- **A UNIFORM GRID BURNS IN DIAMONDS**, and that was the Godot version's real
+  complaint. Every cell in a ring reaches ignition on the same tick, so the front
+  is a shape the grid chose rather than one the fire did -- and the regularity
+  made the same fire look different depending on where the viewer stood relative
+  to a cell boundary, which reads as the simulation being unreliable rather than
+  as aliasing. Baked jitter breaks the tie: cells reach ignition at slightly
+  different times and the front is ragged. Hashed from the cell's coordinate, so a
+  patch of ground always burns the same way and two bakes of one level agree --
+  ragged, not random.
+- **PARTIAL BURNING WAS ALWAYS IN THE SIMULATION and never came out of it.** Fuel
+  is spent only while a cell is alight and never regrows, so a patch quenched
+  halfway keeps half its fuel forever and relighting consumes the remainder --
+  the same rule a burning crate lives by, at a different granularity, which is
+  why grass belongs in the map and a crate does not. What was missing was any way
+  to ASK, so `GetScorchAt` measures against what the cell STARTED with: a marsh
+  that only ever held a tenth of a grassland's fuel still reads fully scorched
+  once it has given that tenth up.
+
+**And the mask, which the plan promised and nobody built.** `UMaterialParameterCollection`
+was a dangling forward declaration in the header, used nowhere -- because a field
+cannot live in a parameter collection. An MPC holds a handful of scalars and this
+is a value per cell over a moving window of the world.
+
+So: a transient texture covering a window that follows the viewer, R alight and G
+spent, written on the spread tick, plus an MPC holding that window's world bounds
+so a material can turn a position into a UV. The collection does what it is
+actually good at -- four numbers every material can see -- and the field goes in
+the texture where it belongs.
+
+**Sampling it bilinearly is the point, not a nicety.** Read per cell, a fire's
+edge steps along cell boundaries and the viewer's position relative to one changes
+what they see. A filtered texture has no cells to stand on, which fixes the half
+of the Godot complaint that jitter does not.
+
+4 new cases under `ARPG.World.Spread.Fuel`, and the existing fuel map case
+migrated from amounts to surfaces.
 
 **Phase 11 -- code complete. Not in the original ten: this is the layer that
 makes the other ten reachable from a controller.** The modal control scheme, the
@@ -1112,7 +2032,7 @@ that introduces them is far cheaper than auditing later.
 | 5 ✅ | Magic: elements, loadout pages, combination table, complexity gating, all discharge types, imbue, elemental dodge, cloak | fire+water→steam; cast, imbue, dodge all work; charge drain is server-clamped |
 | 6 ✅ | `ElementalVolume`, reaction subsystem, conduction subsystem | Fireball into water jet produces steam at the right contact point; lightning floods a puddle chain and hurts a *second player* standing in it |
 | 7 ✅ | Progression trackers, inventory, quick slots, consumables | Mastery multiplies discharge damage; quick-slot potions work |
-| 8 ✅ | NPC AI — perception, behavior trees, reactive parry | NPC engages, parries a telegraphed swing, flees and heals |
+| 8 ✅ | NPC AI — perception, StateTree, reactive parry | NPC engages, parries a telegraphed swing, flees and heals |
 | 9 ✅ | Fire spread subsystem (+ landscape fuel bake, MPC mask, replicated mask) | Grass fire crosses a clearing, burns a second player, rain quenches it |
 | 10 ✅ | Fluid surface subsystem (+ Clipper2 backend, dynamic meshing, replicated outlines) | Water pools; ice shard freezes a floe both players can stand on |
 | 11 ✅ | Modal input scheme, speed tiers and sprint stamina, input buffering, element-consumption routing, auto-sheathe | Controller in hand: LT+face readies, RT+face discharges, a swing imbues, steel sheathes itself |
@@ -1138,7 +2058,7 @@ can slip without blocking anything else.
    changes visibly lag.
 5. **Meta attributes** must be consumed *and reset to zero* in `PostGameplayEffectExecute`.
    Reading them anywhere else gives stale values.
-6. **Instanced UObject trees** (`ComboAttackNode`, BT nodes) need `UCLASS(EditInlineNew,
+6. **Instanced UObject trees** (`ComboAttackNode`) need `UCLASS(EditInlineNew,
    DefaultToInstanced)` **and** `UPROPERTY(Instanced)`. Miss either and the editor gives you an
    unassignable null.
 7. **Decide early whether GEs are C++ classes or Blueprint assets.** Recommendation: C++ base

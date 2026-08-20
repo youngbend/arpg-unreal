@@ -45,6 +45,16 @@ struct FARPGPlaceholderShape
 	float Hold = 0.25f;
 
 	/**
+	 * Whether this stand-in is MADE OF its element, and so meets other spells.
+	 *
+	 * False only for a collision product -- see GetShapeFor. Everything a caster
+	 * throws should react; the thing a reaction produced should not, because it
+	 * spawns inside whatever survived making it.
+	 */
+	UPROPERTY()
+	bool bReacts = true;
+
+	/**
 	 * Someone else owns how long this lasts.
 	 *
 	 * True for a cloak, whose duration comes from the element and whose end is
@@ -155,6 +165,18 @@ public:
 
 	UPROPERTY(EditDefaultsOnly, Category = "ARPG|Placeholder", meta = (ClampMin = "0.0"))
 	float MaxRadius = 60.f;
+
+	/**
+	 * How much wider than the orb the mark it leaves is.
+	 *
+	 * A thrown volume of liquid spreads on impact instead of staying its own
+	 * width, and a projectile placeholder is DELIBERATELY small -- 20 to 60cm --
+	 * so depositing at its own radius would leave a wet coin below the area at
+	 * which the fluid system keeps a body at all. Only matters for elements that
+	 * pool; the rest deposit nothing whatever this says.
+	 */
+	UPROPERTY(EditDefaultsOnly, Category = "ARPG|Placeholder", meta = (ClampMin = "0.0"))
+	float DepositSpread = 3.f;
 
 	UFUNCTION(BlueprintPure, Category = "ARPG|Magic")
 	float GetVolumeRadius() const { return Radius; }

@@ -128,9 +128,9 @@ float UARPGElementalVolumeComponent::GetSurfaceHeightAt(FVector WorldPoint) cons
 	const FBoxSphereBounds ShapeBounds = OverlapSource->Bounds;
 	const float Top = ShapeBounds.Origin.Z + ShapeBounds.BoxExtent.Z;
 
-	// Phase 10 replaces the reservoir branch with a query into the fluid body's
-	// own surface. Until then the waterline is an authored offset from the top
-	// of the collider, which is the same shape of answer.
+	// An AUTHORED waterline, which is all a box can carry. Anything with a real
+	// surface to report -- a water body with a spline that runs downhill --
+	// overrides this rather than pretending one number covers its length.
 	return bReservoir ? GetVolumeLocation().Z + SurfaceHeightOffset : Top;
 }
 

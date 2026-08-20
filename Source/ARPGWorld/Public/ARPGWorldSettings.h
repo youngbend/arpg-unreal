@@ -10,6 +10,7 @@ class UARPGMagicCombinationTable;
 class UARPGSpreadDefinition;
 class UARPGSpreadFuelMap;
 class UARPGFluidDefinition;
+class UARPGSolidDefinition;
 
 /**
  * Authoring surface for the four elemental solvers.
@@ -66,6 +67,16 @@ public:
 
 	// --- Fluids ---------------------------------------------------------------
 
+	/** What each element is like as a body lying on the ground. No entry, no pool. */
 	UPROPERTY(EditAnywhere, Config, Category = "Fluids")
 	TArray<TSoftObjectPtr<UARPGFluidDefinition>> FluidDefinitions;
+
+	/**
+	 * What each element is like frozen out of one of those bodies.
+	 *
+	 * Separate from the fluids because a Solidify row names its PRODUCT, and ice
+	 * is not a thing that pools -- an unlisted product warns and freezes nothing.
+	 */
+	UPROPERTY(EditAnywhere, Config, Category = "Fluids")
+	TArray<TSoftObjectPtr<UARPGSolidDefinition>> SolidDefinitions;
 };

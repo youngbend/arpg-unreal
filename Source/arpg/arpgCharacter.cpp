@@ -27,6 +27,7 @@
 #include "ARPGWeaponComponent.h"
 #include "ARPGWeaponDefinition.h"
 #include "ARPGLocomotionComponent.h"
+#include "ARPGNoiseComponent.h"
 #include "ARPGVitalRegenComponent.h"
 #include "ARPGModalInputComponent.h"
 #include "ARPGPlayerActionComponent.h"
@@ -120,12 +121,25 @@ AarpgCharacter::AarpgCharacter()
 	InventoryComponent = CreateDefaultSubobject<UARPGInventoryComponent>(TEXT("InventoryComponent"));
 	QuickSlotComponent = CreateDefaultSubobject<UARPGQuickSlotComponent>(TEXT("QuickSlotComponent"));
 
+	// What NPCs hear. Without it the player is silent by construction and the
+	// hearing channel does nothing on the one actor it matters most for -- see
+	// the header.
+	NoiseComponent = CreateDefaultSubobject<UARPGNoiseComponent>(TEXT("NoiseComponent"));
+
 	// The movement component's own default is what the character runs at, so the
 	// tiers are anchored to it rather than to a second set of numbers that could
 	// silently disagree with the Blueprint's.
 	Locomotion->RunSpeed = GetCharacterMovement()->MaxWalkSpeed;
 	Locomotion->WalkSpeed = Locomotion->RunSpeed * 0.4f;
 	Locomotion->SprintSpeed = Locomotion->RunSpeed * 1.5f;
+
+	// Anchored to the locomotion tiers for the same reason those are anchored to
+	// the movement component: the noise component's own default threshold is 500,
+	// which happens to equal RunSpeed here -- so merely running would have counted
+	// as sprinting and the loudest tier would have been the normal one. Just under
+	// the sprint tier means only an actual sprint is sprint-loud.
+	NoiseComponent->SprintSpeedThreshold = Locomotion->SprintSpeed * 0.95f;
+	NoiseComponent->IdleSpeedThreshold = Locomotion->WalkSpeed * 0.5f;
 
 	// The melee ability is the one thing without which the whole attack path is
 	// silently inert, so it is defaulted here rather than left to per-Blueprint

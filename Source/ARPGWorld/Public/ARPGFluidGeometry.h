@@ -3,6 +3,9 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "ARPGSolidField.h"
+
+class UDynamicMeshComponent;
 
 /**
  * Ground-plane polygon maths shared by every part of the fluid system. Port of
@@ -113,4 +116,62 @@ namespace ARPGFluidGeometry
 	 * iteration.
 	 */
 	ARPGWORLD_API TArray<FVector2D> ShrinkToArea(const TArray<FVector2D>& Ring, double TargetArea);
+
+	/**
+	 * The same scale outward, for fluid ADDED to a body rather than taken from it.
+	 *
+	 * WHY NOT JUST MERGE A CIRCLE IN. Because a puddle is a polygon with no volume
+	 * of its own, and a circle that lands inside the outline unions to exactly the
+	 * outline it landed in -- so water poured into the middle of a puddle would
+	 * vanish. Growing the whole ring is the only way the volume survives, and it
+	 * is the same arithmetic as consumption run backwards.
+	 *
+	 * Refuses to shrink, so the pair keep one-way contracts and a caller cannot
+	 * quietly get the opposite of what it asked for.
+	 */
+	ARPGWORLD_API TArray<FVector2D> GrowToArea(const TArray<FVector2D>& Ring, double TargetArea);
+
+	/**
+	 * The fifth call: turns an outline into something you can SEE.
+	 *
+	 * A slab -- a triangulated cap at TopZ, another at BottomZ, and walls joining
+	 * them -- written straight onto a dynamic mesh component. Give it the same
+	 * ring the body already stores and the drawn shape is the simulated shape by
+	 * construction, with no second representation to fall out of step.
+	 *
+	 * The component takes it in LOCAL space, so Origin is the body's own XY
+	 * centre; everything is emitted relative to that. UVs are still anchored to
+	 * WORLD position, which matters: a pool's centroid moves every time it merges
+	 * or erodes, and local UVs would make the whole surface texture swim sideways
+	 * each tick while the water itself sat still.
+	 *
+	 * A hole is optional and is what a solid keeps -- see IntersectWithHoles. Pass
+	 * an empty ring for a fluid, which never has one.
+	 *
+	 * TopZ == BottomZ is legal and gives a flat cap with no walls, which is what a
+	 * body with no depth is.
+	 */
+	ARPGWORLD_API void BuildSlabMesh(UDynamicMeshComponent* Component,
+		const TArray<FVector2D>& Ring, const TArray<FVector2D>& Hole,
+		const FVector2D& Origin, double BottomZ, double TopZ);
+
+	/**
+	 * The sixth call, and the one with a CEILING: a heightfield as a mesh.
+	 *
+	 * Where BuildSlabMesh draws a polygon extruded to a flat thickness, this draws
+	 * a field whose top and bottom vary per cell -- a floe with a bowl melted into
+	 * it, a step where new ice froze at a lower waterline, a hole where the two
+	 * surfaces met.
+	 *
+	 * WHY IT MATTERS FOR COST, and this is the whole reason a floe stopped being a
+	 * polygon. A slab mesh is retriangulated from an outline that gains vertices
+	 * every time it is clipped or offset, so a long-lived floe grows without
+	 * bound -- the Godot version measured fifty vertices becoming seven thousand
+	 * over eighteen melt ticks. A field cannot: its triangle count is at most a
+	 * fixed few per cell, forever, no matter how many fireballs land on it.
+	 *
+	 * Emitted in the component's LOCAL space; the field's own heights already are.
+	 */
+	ARPGWORLD_API void BuildFieldMesh(UDynamicMeshComponent* Component,
+		const FARPGSolidField& Field, const FVector2D& Origin);
 }

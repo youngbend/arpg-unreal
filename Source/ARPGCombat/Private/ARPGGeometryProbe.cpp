@@ -66,6 +66,97 @@ namespace ARPGGeometryProbe
 		return FMath::Max(Size.X, Size.Y);
 	}
 
+	bool SolveVfxFit(AActor* Target, EARPGStatusVfxFit FitMode, float ExtraScale,
+		FVector& OutRelativeLocation, double& OutScale, FBox& OutBounds)
+	{
+		OutRelativeLocation = FVector::ZeroVector;
+		OutScale = ExtraScale;
+		OutBounds = FBox(ForceInit);
+
+		if (!Target)
+		{
+			return false;
+		}
+
+		bool bMeasured = MeasureLocalBounds(Target, OutBounds);
+
+		// Top means "sitting on the surface", and for anything with a mesh that
+		// is the MESH's top, not the union's. Water forces the distinction: its
+		// collider deliberately stands above the waterline so a spell arriving
+		// at the river enters it, and an arc placed on the union would float in
+		// that headroom. A collider-only prop finds no mesh and keeps the union.
+		if (FitMode == EARPGStatusVfxFit::Top)
+		{
+			FBox VisualBounds(ForceInit);
+			if (MeasureLocalBounds(Target, VisualBounds, /*bVisualOnly=*/true))
+			{
+				OutBounds = VisualBounds;
+				bMeasured = true;
+			}
+		}
+
+		if (!bMeasured)
+		{
+			// Nothing to measure -- an actor made of nothing but a scene root. The
+			// authored size stands, adjusted only by the effect's own multiplier,
+			// rather than collapsing to the minimum.
+			return false;
+		}
+
+		const FVector Size = OutBounds.GetSize();
+		const FVector Centre = OutBounds.GetCenter();
+
+		OutRelativeLocation = Centre;
+		double Uniform = FMath::Max3(Size.X, Size.Y, Size.Z);
+
+		switch (FitMode)
+		{
+		case EARPGStatusVfxFit::Base:
+			OutRelativeLocation = FVector(Centre.X, Centre.Y, OutBounds.Min.Z);
+			Uniform = BoundsFootprint(OutBounds);
+			break;
+
+		case EARPGStatusVfxFit::Top:
+			OutRelativeLocation = FVector(Centre.X, Centre.Y, OutBounds.Max.Z);
+			Uniform = BoundsFootprint(OutBounds);
+			break;
+
+		case EARPGStatusVfxFit::None:
+			OutRelativeLocation = FVector::ZeroVector;
+			Uniform = 1.0;
+			break;
+
+		case EARPGStatusVfxFit::Bounds:
+		default:
+			break;
+		}
+
+		OutScale = FMath::Max(static_cast<double>(MinFitScale), Uniform * ExtraScale);
+		return true;
+	}
+
+	void FitVfxComponent(USceneComponent* Instance, AActor* Target,
+		EARPGStatusVfxFit FitMode, float ExtraScale)
+	{
+		if (!Instance || !Target)
+		{
+			return;
+		}
+
+		// ALREADY ATTACHED, which is the one thing this does not have to arrange --
+		// and it is also why the measure-before-attach ordering the actor path
+		// worries about does not apply. A Niagara component's own bounds are not
+		// part of its owner's until it is registered, and by then the sum is done.
+		FVector Position;
+		double Scale = ExtraScale;
+		FBox Bounds(ForceInit);
+
+		SolveVfxFit(Target, FitMode, ExtraScale, Position, Scale, Bounds);
+
+		Instance->SetRelativeLocation(Position);
+		Instance->SetRelativeScale3D(FVector(Scale));
+	}
+
 	void FitVfxToTarget(AActor* Instance, AActor* Target, EARPGStatusVfxFit FitMode,
 		float ExtraScale, int32 Stacks)
 	{
@@ -88,23 +179,11 @@ namespace ARPGGeometryProbe
 		}
 
 		// Measured BEFORE attaching -- see the header.
+		FVector Position;
+		double Scale = ExtraScale;
 		FBox Bounds(ForceInit);
-		bool bMeasured = MeasureLocalBounds(Target, Bounds);
 
-		// Top means "sitting on the surface", and for anything with a mesh that
-		// is the MESH's top, not the union's. Water forces the distinction: its
-		// collider deliberately stands above the waterline so a spell arriving
-		// at the river enters it, and an arc placed on the union would float in
-		// that headroom. A collider-only prop finds no mesh and keeps the union.
-		if (FitMode == EARPGStatusVfxFit::Top)
-		{
-			FBox VisualBounds(ForceInit);
-			if (MeasureLocalBounds(Target, VisualBounds, /*bVisualOnly=*/true))
-			{
-				Bounds = VisualBounds;
-				bMeasured = true;
-			}
-		}
+		const bool bMeasured = SolveVfxFit(Target, FitMode, ExtraScale, Position, Scale, Bounds);
 
 		Instance->AttachToActor(Target, FAttachmentTransformRules::KeepRelativeTransform);
 
@@ -112,49 +191,12 @@ namespace ARPGGeometryProbe
 
 		if (bMeasured)
 		{
-			const FVector Size = Bounds.GetSize();
-			const FVector Centre = Bounds.GetCenter();
-
-			FVector Position = Centre;
-			double Uniform = FMath::Max3(Size.X, Size.Y, Size.Z);
-
-			switch (FitMode)
-			{
-			case EARPGStatusVfxFit::Base:
-				Position = FVector(Centre.X, Centre.Y, Bounds.Min.Z);
-				Uniform = BoundsFootprint(Bounds);
-				break;
-
-			case EARPGStatusVfxFit::Top:
-				Position = FVector(Centre.X, Centre.Y, Bounds.Max.Z);
-				Uniform = BoundsFootprint(Bounds);
-				break;
-
-			case EARPGStatusVfxFit::None:
-				Position = FVector::ZeroVector;
-				Uniform = 1.0;
-				break;
-
-			case EARPGStatusVfxFit::Bounds:
-			default:
-				break;
-			}
-
 			Instance->SetActorRelativeLocation(Position);
-
-			if (!bSizesItself)
-			{
-				const double Scale = FMath::Max(
-					static_cast<double>(MinFitScale), Uniform * ExtraScale);
-				Instance->SetActorRelativeScale3D(FVector(Scale));
-			}
 		}
-		else if (!bSizesItself)
+
+		if (!bSizesItself)
 		{
-			// Nothing to measure -- an actor made of nothing but a scene root.
-			// The authored size stands, adjusted only by the effect's own
-			// multiplier, rather than collapsing to the minimum.
-			Instance->SetActorRelativeScale3D(FVector(ExtraScale));
+			Instance->SetActorRelativeScale3D(FVector(Scale));
 		}
 
 		if (bSizesItself)

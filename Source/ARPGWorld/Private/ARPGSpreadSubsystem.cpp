@@ -9,9 +9,14 @@
 #include "ARPGMagicCombinationTable.h"
 #include "ARPGMagicElement.h"
 #include "ARPGSpreadDefinition.h"
+#include "ARPGFuelComponent.h"
 #include "ARPGSpreadFuelMap.h"
 #include "ARPGWorld.h"
 #include "ARPGWorldSettings.h"
+#include "Engine/Texture2D.h"
+#include "GameFramework/PlayerController.h"
+#include "Kismet/KismetMaterialLibrary.h"
+#include "Materials/MaterialParameterCollection.h"
 #include "AbilitySystemComponent.h"
 #include "AbilitySystemGlobals.h"
 #include "Engine/World.h"
@@ -293,11 +298,29 @@ void UARPGSpreadSubsystem::EnsureSlot(FFieldChunk& Chunk, int32 Slot, FIntPoint 
 	{
 		for (int32 X = 0; X < FieldResolution; ++X)
 		{
-			const float Fraction = FuelMap
-				? FuelMap->GetFuelAt(Coord, (X + 0.5f) / FieldResolution, (Y + 0.5f) / FieldResolution)
-				: 1.f;
+			const float NormalX = (X + 0.5f) / FieldResolution;
+			const float NormalY = (Y + 0.5f) / FieldResolution;
 
-			Chunk.Fuel[Slot][Y * FieldResolution + X] = Fraction * FuelSeconds;
+			// THE GROUND SAYS WHAT IT IS AND THE MEDIUM SAYS WHAT THAT IS WORTH.
+			// One byte per cell as before, but it now names a surface rather than
+			// an amount -- so a marsh can refuse fire and carry a frost, which one
+			// element-agnostic number could never express.
+			float Fraction = 1.f;
+
+			if (FuelMap && Definition)
+			{
+				const uint8 Surface = FuelMap->GetSurfaceAt(Coord, NormalX, NormalY);
+
+				// And jittered, because a uniform grid burns in diamonds: every
+				// cell in a ring reaches ignition on the same tick, so the front is
+				// a shape the grid chose. Baked, so a patch of ground always burns
+				// the same way -- ragged, not random.
+				Fraction = Definition->GetSurfaceFuel(Surface)
+					* FuelMap->GetJitterAt(Coord, NormalX, NormalY);
+			}
+
+			Chunk.Fuel[Slot][Y * FieldResolution + X] =
+				FMath::Max(0.f, Fraction) * FuelSeconds;
 		}
 	}
 
@@ -535,6 +558,70 @@ float UARPGSpreadSubsystem::GetFieldIntensity(FVector WorldPosition, FGameplayTa
 	return (Chunk && Chunk->bSlotUsed[Slot]) ? Chunk->Intensity[Slot][Index] : 0.f;
 }
 
+float UARPGSpreadSubsystem::GetScorchAt(FVector WorldPosition, FGameplayTag ElementTag) const
+{
+	const int32 MediumIndex = FindMedium(ElementTag);
+	if (MediumIndex == INDEX_NONE || Media[MediumIndex].FieldSlot == INDEX_NONE)
+	{
+		return 0.f;
+	}
+
+	const UARPGSpreadDefinition* Definition = Media[MediumIndex].Definition;
+
+	// Nothing that ignores fuel can be scorched by spending it.
+	if (!Definition || Definition->bPermanent || Definition->FuelSeconds <= 0.f)
+	{
+		return 0.f;
+	}
+
+	FIntPoint Coord;
+	int32 Index = 0;
+	if (!ResolveCell(WorldPosition, Coord, Index))
+	{
+		return 0.f;
+	}
+
+	const FFieldChunk* Chunk = FindChunk(Coord);
+	const int32 Slot = Media[MediumIndex].FieldSlot;
+
+	// A chunk that has never been allocated has never burned.
+	if (!Chunk || !Chunk->bSlotUsed[Slot])
+	{
+		return 0.f;
+	}
+
+	// AGAINST WHAT THE CELL STARTED WITH, not against a global maximum. A marsh
+	// that only ever held a tenth of a grassland's fuel still reads fully scorched
+	// once it has given that tenth up -- scorch is "how spent is this", and a
+	// marsh burned out is as burned out as anything gets.
+	//
+	// Recomputed from the map rather than stored. The bake is static, so the
+	// starting amount is a pure function of surface and jitter, and keeping a
+	// second float per cell per medium to hold a number that cannot change would
+	// be paying memory for arithmetic.
+	float Started = Definition->FuelSeconds;
+
+	if (FuelMap && FieldResolution > 0)
+	{
+		const int32 X = Index % FieldResolution;
+		const int32 Y = Index / FieldResolution;
+
+		const float NormalX = (X + 0.5f) / FieldResolution;
+		const float NormalY = (Y + 0.5f) / FieldResolution;
+
+		Started *= Definition->GetSurfaceFuel(FuelMap->GetSurfaceAt(Coord, NormalX, NormalY))
+			* FuelMap->GetJitterAt(Coord, NormalX, NormalY);
+	}
+
+	// Ground that never had any fuel is not scorched, it is stone.
+	if (Started <= KINDA_SMALL_NUMBER)
+	{
+		return 0.f;
+	}
+
+	return FMath::Clamp(1.f - Chunk->Fuel[Slot][Index] / Started, 0.f, 1.f);
+}
+
 float UARPGSpreadSubsystem::GetFieldResidue(FVector WorldPosition, FGameplayTag ElementTag) const
 {
 	const int32 MediumIndex = FindMedium(ElementTag);
@@ -676,7 +763,11 @@ void UARPGSpreadSubsystem::StepSimulation(float DeltaTime)
 	EnsureMedia();
 
 	TickField(DeltaTime);
+	TickFuelSources(DeltaTime);
 	TickContactDamage(DeltaTime);
+
+	// LAST, so it draws the field as it now is rather than as it was.
+	TickMask();
 }
 
 void UARPGSpreadSubsystem::Tick(float DeltaTime)
@@ -708,25 +799,70 @@ void UARPGSpreadSubsystem::Tick(float DeltaTime)
 
 void UARPGSpreadSubsystem::EnsureScratch()
 {
+	// SIZED FOR EVERY SLOT, once. Growing one inside the parallel sweep would be
+	// an allocation on a worker and, worse, a resize of a member array while
+	// another worker holds a reference into it.
 	const int32 CellCount = FieldResolution * FieldResolution;
-	if (ScratchDeltaIntensity.Num() != CellCount)
+
+	for (FChunkWork& Work : ChunkWork)
 	{
-		ScratchDeltaIntensity.SetNumZeroed(CellCount);
-		ScratchDeltaEnergy.SetNumZeroed(CellCount);
+		if (Work.DeltaIntensity.Num() != CellCount)
+		{
+			Work.DeltaIntensity.SetNumZeroed(CellCount);
+			Work.DeltaEnergy.SetNumZeroed(CellCount);
+		}
 	}
 }
 
 void UARPGSpreadSubsystem::TickField(float DeltaTime)
 {
 	CrossDeposits.Reset();
-	EnsureScratch();
+
+	// FLATTENED FIRST, because a TMap cannot be indexed and the sweep needs to be.
+	// Only the chunks with something alight: an inert chunk's step is a no-op, and
+	// handing one to a worker costs more than skipping it here.
+	Burning.Reset();
 
 	for (TPair<FIntPoint, FFieldChunk>& Pair : Chunks)
 	{
 		if (Pair.Value.Active.Num() > 0)
 		{
-			TickFieldChunk(Pair.Key, Pair.Value, DeltaTime);
+			Burning.Emplace(Pair.Key, &Pair.Value);
 		}
+	}
+
+	if (Burning.Num() > ChunkWork.Num())
+	{
+		ChunkWork.SetNum(Burning.Num());
+	}
+
+	// After the slots exist, and never from inside the sweep.
+	EnsureScratch();
+
+	// EMBARRASSINGLY PARALLEL, and it was already written that way without anyone
+	// intending it: a chunk step reads shared configuration, writes its own cells,
+	// and posts anything crossing a boundary to a queue for afterwards. The only
+	// two things it shared were the scratch list and that queue, and both are now
+	// per-slot.
+	//
+	// ForceSingleThread below a handful of chunks, because the dispatch costs more
+	// than the work when a single campfire is burning -- which is most of the time.
+	ParallelFor(Burning.Num(),
+		[this, DeltaTime](int32 Index)
+		{
+			ChunkWork[Index].Deposits.Reset();
+			TickFieldChunk(Burning[Index].Key, *Burning[Index].Value, DeltaTime,
+				ChunkWork[Index]);
+		},
+		/*bForceSingleThread=*/Burning.Num() < 4);
+
+	// GATHERED IN ORDER, not as they finished. Two chunks depositing into the same
+	// cell must land in the same sequence on every machine, or a listen server and
+	// its client disagree about where a fire spread -- and thread completion order
+	// is the least reproducible thing available.
+	for (int32 Index = 0; Index < Burning.Num(); ++Index)
+	{
+		CrossDeposits.Append(ChunkWork[Index].Deposits);
 	}
 
 	ApplyCrossDeposits();
@@ -768,7 +904,8 @@ void UARPGSpreadSubsystem::TickField(float DeltaTime)
 	}
 }
 
-void UARPGSpreadSubsystem::TickFieldChunk(FIntPoint Coord, FFieldChunk& Chunk, float DeltaTime)
+void UARPGSpreadSubsystem::TickFieldChunk(FIntPoint Coord, FFieldChunk& Chunk, float DeltaTime,
+	FChunkWork& Work)
 {
 	const int32 Resolution = FieldResolution;
 
@@ -780,9 +917,9 @@ void UARPGSpreadSubsystem::TickFieldChunk(FIntPoint Coord, FFieldChunk& Chunk, f
 	// appended to would visit this tick's newly lit cells as though they had
 	// been burning all along. Into a reused member buffer rather than a fresh
 	// TArray per chunk per tick.
-	ScratchActive.Reset(Chunk.Active.Num());
-	ScratchActive.Append(Chunk.Active);
-	const TArray<int32>& Active = ScratchActive;
+	Work.Active.Reset(Chunk.Active.Num());
+	Work.Active.Append(Chunk.Active);
+	const TArray<int32>& Active = Work.Active;
 
 	for (int32 MediumIndex = 0; MediumIndex < Media.Num(); ++MediumIndex)
 	{
@@ -810,13 +947,15 @@ void UARPGSpreadSubsystem::TickFieldChunk(FIntPoint Coord, FFieldChunk& Chunk, f
 		// Deltas accumulate across the whole pass, so every sender contributes
 		// to a cell before it decides whether it caught -- order-independent.
 		//
-		// Flat arrays indexed by cell, reused across chunks and media, with a
+		// Flat arrays indexed by cell, reused across media and ticks, with a
 		// list of the cells actually written so the reset costs the number of
 		// touched cells rather than the size of the grid. This was two TMaps
 		// constructed and destroyed inside this loop -- so per chunk, per medium,
 		// per simulation tick.
-		TArray<float>& DeltaIntensity = ScratchDeltaIntensity;
-		TArray<float>& DeltaEnergy = ScratchDeltaEnergy;
+		TArray<float>& DeltaIntensity = Work.DeltaIntensity;
+		TArray<float>& DeltaEnergy = Work.DeltaEnergy;
+		TArray<int32>& ScratchTouchedIntensity = Work.TouchedIntensity;
+		TArray<int32>& ScratchTouchedEnergy = Work.TouchedEnergy;
 		ScratchTouchedIntensity.Reset();
 		ScratchTouchedEnergy.Reset();
 
@@ -982,7 +1121,7 @@ void UARPGSpreadSubsystem::TickFieldChunk(FIntPoint Coord, FFieldChunk& Chunk, f
 							Deposit.Medium = MediumIndex;
 							Deposit.Amount = Amount;
 							Deposit.Energy = Amount * Definition->TransferKeep;
-							CrossDeposits.Add(Deposit);
+							Work.Deposits.Add(Deposit);
 						}
 					}
 
@@ -1121,6 +1260,168 @@ void UARPGSpreadSubsystem::TickAttrition(FIntPoint Coord, FFieldChunk& Chunk, fl
 // ---------------------------------------------------------------------------
 // Targets and contact damage
 // ---------------------------------------------------------------------------
+
+void UARPGSpreadSubsystem::TickMask()
+{
+	UWorld* World = GetWorld();
+
+	if (!World || !MaskMedium.IsValid() || MaskResolution < 16)
+	{
+		return;
+	}
+
+	// WHERE THE PLAYER IS, because a mask covering the whole world would be a
+	// texture nobody can afford and mostly black. A window that follows the
+	// viewer is the same trick the significance pass uses, for the same reason.
+	FVector Centre = FVector::ZeroVector;
+	bool bFound = false;
+
+	for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
+	{
+		if (const APlayerController* Controller = It->Get())
+		{
+			if (const AActor* View = Controller->GetPawn()
+				? Cast<AActor>(Controller->GetPawn())
+				: Controller->GetViewTarget())
+			{
+				Centre = View->GetActorLocation();
+				bFound = true;
+				break;
+			}
+		}
+	}
+
+	// A dedicated server has nobody to draw for, and neither does a test.
+	if (!bFound)
+	{
+		return;
+	}
+
+	const float Cell = GetCellSize();
+	const float Extent = Cell * MaskResolution;
+	const FVector2D Origin(Centre.X - Extent * 0.5f, Centre.Y - Extent * 0.5f);
+
+	const int32 Pixels = MaskResolution * MaskResolution;
+
+	if (!FieldMask || FieldMask->GetSizeX() != MaskResolution)
+	{
+		FieldMask = UTexture2D::CreateTransient(MaskResolution, MaskResolution, PF_B8G8R8A8);
+
+		if (!FieldMask)
+		{
+			return;
+		}
+
+		// BILINEAR IS THE WHOLE POINT, not a nicety. Read per cell, a fire's edge
+		// steps along cell boundaries and the same fire looks different depending
+		// on where the viewer is standing relative to one -- which reads as the
+		// simulation being unreliable rather than as aliasing. A filtered texture
+		// has no cells to stand on. Clamped, because the window ends and wrapping
+		// would put the far side of the fire under your feet.
+		FieldMask->Filter = TF_Bilinear;
+		FieldMask->AddressX = TA_Clamp;
+		FieldMask->AddressY = TA_Clamp;
+		FieldMask->SRGB = false;
+		FieldMask->NeverStream = true;
+		FieldMask->AddToRoot();
+		FieldMask->UpdateResource();
+	}
+
+	MaskPixels.SetNumUninitialized(Pixels);
+
+	for (int32 Y = 0; Y < MaskResolution; ++Y)
+	{
+		for (int32 X = 0; X < MaskResolution; ++X)
+		{
+			const FVector At(
+				Origin.X + (X + 0.5f) * Cell,
+				Origin.Y + (Y + 0.5f) * Cell,
+				Centre.Z);
+
+			const float Intensity = FMath::Clamp(GetFieldIntensity(At, MaskMedium), 0.f, 1.f);
+			const float Scorch = GetScorchAt(At, MaskMedium);
+
+			// R alight, G spent. Scorch is the one that persists: a fire passes
+			// and the ground stays black, which is the entire reason the fuel map
+			// is the right home for grass rather than a component per tuft.
+			MaskPixels[Y * MaskResolution + X] = FColor(
+				static_cast<uint8>(Intensity * 255.f),
+				static_cast<uint8>(Scorch * 255.f),
+				0, 255);
+		}
+	}
+
+	if (FTexture2DMipMap* Mip = &FieldMask->GetPlatformData()->Mips[0])
+	{
+		void* Data = Mip->BulkData.Lock(LOCK_READ_WRITE);
+		FMemory::Memcpy(Data, MaskPixels.GetData(), Pixels * sizeof(FColor));
+		Mip->BulkData.Unlock();
+		FieldMask->UpdateResource();
+	}
+
+	// AND WHERE IT GOES. Four numbers is exactly what a parameter collection is
+	// for, and exactly what it can hold -- the field itself was never going to fit
+	// in one, which is why the plan's "MPC mask" stayed a forward declaration.
+	if (MaskParameters)
+	{
+		UKismetMaterialLibrary::SetScalarParameterValue(
+			World, MaskParameters, TEXT("MaskOriginX"), Origin.X);
+		UKismetMaterialLibrary::SetScalarParameterValue(
+			World, MaskParameters, TEXT("MaskOriginY"), Origin.Y);
+		UKismetMaterialLibrary::SetScalarParameterValue(
+			World, MaskParameters, TEXT("MaskExtent"), Extent);
+	}
+}
+
+void UARPGSpreadSubsystem::RegisterFuel(UARPGFuelComponent* Fuel)
+{
+	if (Fuel)
+	{
+		FuelSources.AddUnique(Fuel);
+	}
+}
+
+void UARPGSpreadSubsystem::UnregisterFuel(UARPGFuelComponent* Fuel)
+{
+	FuelSources.Remove(Fuel);
+}
+
+void UARPGSpreadSubsystem::TickFuelSources(float DeltaTime)
+{
+	for (int32 Index = FuelSources.Num() - 1; Index >= 0; --Index)
+	{
+		UARPGFuelComponent* Fuel = FuelSources[Index].Get();
+
+		if (!Fuel || !Fuel->GetOwner())
+		{
+			FuelSources.RemoveAt(Index);
+			continue;
+		}
+
+		// SPENT ONES STAY REGISTERED. An object with nothing left to give is still
+		// a thing the world contains, and it can be repaired -- a barricade rebuilt
+		// mid-fight goes straight back to burning without anyone re-registering it.
+		// Burn answers zero for them, which costs one comparison.
+		const FVector Where = Fuel->GetOwner()->GetActorLocation();
+		const float Intensity = GetFieldIntensity(Where, Fuel->MediumTag);
+
+		const float Output = Fuel->Burn(DeltaTime, Intensity);
+
+		if (Output <= 0.f)
+		{
+			continue;
+		}
+
+		// AND IT FEEDS THE FIRE BACK. This is what makes a woodpile worth setting
+		// alight rather than merely flammable: the object sustains a fire the
+		// ground around it could not, so where the burnable things are is a fact
+		// about the map rather than a detail.
+		//
+		// Through AddExposure like anything else, so an object's contribution is
+		// bounded by the same fuel the ground has and cannot light bare stone.
+		AddExposure(Where, Fuel->Radius, Output * DeltaTime, Fuel->MediumTag);
+	}
+}
 
 void UARPGSpreadSubsystem::RegisterTarget(AActor* Actor)
 {

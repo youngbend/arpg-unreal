@@ -8,6 +8,8 @@
 #include "UObject/ObjectKey.h"
 #include "ARPGStatusVfxSubsystem.generated.h"
 
+class UNiagaraComponent;
+
 struct FGameplayEffectQuery;
 
 class UAbilitySystemComponent;
@@ -35,6 +37,10 @@ struct FARPGStatusVfxRequest
 
 	UPROPERTY(Transient)
 	TWeakObjectPtr<AActor> Instance;
+
+	/** The attached system, when the status named one instead of an actor. */
+	UPROPERTY(Transient)
+	TWeakObjectPtr<UNiagaraComponent> Attached;
 
 	int32 Stacks = 1;
 
