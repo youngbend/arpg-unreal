@@ -22,12 +22,12 @@ struct FARPGAttackTreeSchemaAction_NewNode : public FEdGraphSchemaAction
 	}
 
 	// The Location parameter changed type in UE 5.6, when Slate moved to float
-	// vectors: FVector2D before, this shim after. It converts to and from both,
-	// so the body does not care -- but the SIGNATURE has to match the engine's
-	// exactly or this silently stops overriding anything and the menu item does
-	// nothing when clicked.
+	// vectors: FVector2D before, FVector2f after. The FVector2D overload still
+	// exists but is deprecated and no longer the one the menu calls, so the
+	// SIGNATURE has to match the float one exactly -- otherwise this overrides
+	// nothing and the menu item does nothing when clicked.
 	virtual UEdGraphNode* PerformAction(UEdGraph* ParentGraph, UEdGraphPin* FromPin,
-		const UE::Slate::FDeprecateVector2DParameter& Location, bool bSelectNewNode = true) override;
+		const FVector2f& Location, bool bSelectNewNode = true) override;
 };
 
 /**

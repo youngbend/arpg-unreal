@@ -122,8 +122,14 @@ namespace ARPGComboTestUtils
 	}
 }
 
+// NAMED AS A LEAF UNDER "Combo", not as "ARPG.Combat.Combo" itself. The
+// automation controller builds its tree by splitting these names on dots, so a
+// test whose name is a strict prefix of another's becomes a PARENT node and
+// stops being run -- silently, and still reported as a pass because it never
+// reported anything. Adding NodeRegistry below is what would have done that to
+// this test.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGComboTest,
-	"ARPG.Combat.Combo",
+	"ARPG.Combat.Combo.StateMachine",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FARPGComboTest::RunTest(const FString& Parameters)

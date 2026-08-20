@@ -10,7 +10,7 @@
 #define LOCTEXT_NAMESPACE "ARPGAttackTreeGraphSchema"
 
 UEdGraphNode* FARPGAttackTreeSchemaAction_NewNode::PerformAction(UEdGraph* ParentGraph,
-	UEdGraphPin* FromPin, const UE::Slate::FDeprecateVector2DParameter& Location, bool bSelectNewNode)
+	UEdGraphPin* FromPin, const FVector2f& Location, bool bSelectNewNode)
 {
 	if (!ParentGraph)
 	{

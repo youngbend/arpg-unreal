@@ -105,6 +105,13 @@ namespace ARPGEquipmentTestUtils
 		Rig.ArmorComp = NewObject<UARPGArmorComponent>(Rig.Actor);
 		Rig.ArmorComp->RegisterComponent();
 
+		// EXPLICITLY, and only once every component is registered. UWorld::BeginPlay
+		// sets bBegunPlay from the game mode's StartPlay, and a bare test world has
+		// no game mode -- so nothing here begins play on its own, and a component
+		// that does its setup in BeginPlay would never do it. Dispatching after
+		// registration is also the real ordering: components exist, then play starts.
+		Rig.Actor->DispatchBeginPlay();
+
 		return Rig;
 	}
 
