@@ -284,12 +284,22 @@ COMBINATIONS = [
 
 # Page 0 is the four a new character starts with; lightning sits on page 1 so
 # the D-pad paging has something to page to.
+#
+# EARTH APPEARS TWICE, AND HAS TO. A hand-scope recipe is resolved from the
+# elements readied on the CURRENT page, and paging clears the selection
+# (UARPGMagicComponent::SetCurrentPage) because the mask indexes slots rather
+# than elements. So a pair split across two pages can never be held at once, and
+# magnetism -- earth + lightning, hand only -- would be unreachable in game with
+# earth on page 0 and lightning on page 1. Putting earth beside lightning is what
+# makes the recipe castable at all. Slotting the same element on two pages is
+# free: the loadout stores element references per slot, not ownership.
 LOADOUT = [
     (0, "North", "Fire"),
     (0, "West", "Water"),
     (0, "South", "Air"),
     (0, "East", "Earth"),
     (1, "North", "Lightning"),
+    (1, "West", "Earth"),
 ]
 
 SLOT_INDEX = {"North": 0, "West": 1, "South": 2, "East": 3}
