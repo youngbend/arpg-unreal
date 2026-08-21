@@ -2171,6 +2171,8 @@ bool FARPGSolidFieldBoundedTest::RunTest(const FString& Parameters)
 	const int32 Fresh = Floe->GetSurfaceTriangleCount();
 	TestTrue(TEXT("A fresh floe has a surface"), Fresh > 0);
 
+	const int32 Cells = Floe->Field.CountX * Floe->Field.CountY;
+
 	// THE GODOT PATHOLOGY, REPRODUCED AND REFUSED. Eighteen melt ticks with holes
 	// in the slab took fifty vertices to seven thousand there, because every
 	// erosion offset a ring that had a bridged hole in it and the offsetter
@@ -2185,7 +2187,28 @@ bool FARPGSolidFieldBoundedTest::RunTest(const FString& Parameters)
 	const int32 After = Floe->GetSurfaceTriangleCount();
 
 	TestTrue(TEXT("Forty melt ticks later there is still ice"), After > 0);
-	TestTrue(TEXT("And the mesh never grew past what the grid allows"), After <= Fresh);
+
+	// BOUNDED BY THE GRID, which is the claim -- not "never larger than it
+	// started", which this used to assert instead.
+	//
+	// That proxy held only while a melted slab was drawn WRONG. A flat floe has
+	// faces at its silhouette and nowhere else, so melting it could only ever
+	// remove triangles; the moment terraces got the risers they were always
+	// missing, a cut floe legitimately gained faces and the proxy failed. The
+	// pathology this test exists for was UNBOUNDED growth from re-offsetting a
+	// polygon, and the answer to it is that a cell can only ever be worth a fixed
+	// few triangles: four for its caps, and at most two bands of two on each of
+	// its four sides.
+	const int32 PerCell = 4 + 4 * 2 * 2;
+	const int32 Ceiling = PerCell * Floe->Field.SolidCellCount();
+
+	TestTrue(FString::Printf(TEXT("And the mesh stayed inside what the grid allows (%d of %d)"),
+		After, Ceiling), After <= Ceiling);
+
+	// The cell count is the thing that cannot grow, and it is what makes the
+	// ceiling above a ceiling rather than a number that moves with the damage.
+	TestTrue(TEXT("On a grid that never grew"),
+		Floe->Field.CountX * Floe->Field.CountY == Cells);
 
 	return true;
 }
@@ -2803,11 +2826,24 @@ bool FARPGFluidConductChainTest::RunTest(const FString& Parameters)
 	Conduction->CombinationTable = Table;
 	Conduction->DistanceLoss = 0.f;   // isolate the per-hop conductivity term
 
-	// Three puddles in a row, each overlapping the next. Nothing authors the
-	// connection -- touching IS the connection.
+	// Three puddles in a row, each near enough to the next to carry a charge into
+	// it. Nothing authors the connection -- being close IS the connection.
+	//
+	// SET DIAGONALLY, AND THAT IS NOT COSMETIC. This chain used to be collinear
+	// and spaced so the discs plainly OVERLAPPED, which only stayed three bodies
+	// because merging was decided by whether one centroid fell inside another's
+	// bounding box -- and at this spacing it did not. Two overlapping puddles of
+	// the same water are one puddle, and now that they merge, a chain has to be
+	// built out of puddles that genuinely do not overlap.
+	//
+	// Offset on both axes because conduction connects through the volumes' BOXES
+	// while merging asks about the outlines: for two circles side by side those
+	// are the same question, and on a diagonal they are not. 212 apart with a
+	// radius of 100 each is a gap between the discs and an overlap between the
+	// squares around them.
 	AARPGFluidPool* Near = Fluids->Deposit(FVector(0, 0, 0), 100.f, TAG_Element_Water);
-	AARPGFluidPool* Middle = Fluids->Deposit(FVector(150, 0, 0), 100.f, TAG_Element_Water);
-	AARPGFluidPool* Far = Fluids->Deposit(FVector(300, 0, 0), 100.f, TAG_Element_Water);
+	AARPGFluidPool* Middle = Fluids->Deposit(FVector(150, 150, 0), 100.f, TAG_Element_Water);
+	AARPGFluidPool* Far = Fluids->Deposit(FVector(300, 300, 0), 100.f, TAG_Element_Water);
 
 	if (Fluids->GetPools().Num() != 3)
 	{
@@ -2834,7 +2870,8 @@ bool FARPGFluidConductChainTest::RunTest(const FString& Parameters)
 	Reactions->Resolve(Bolt, Near->Volume);
 
 	// The gate: the charge runs the WHOLE chain, from the puddle it struck to the
-	// one two hops away.
+	// one two hops away -- which it can only do by hopping, since the far puddle
+	// is four metres from the near one and nothing reaches that directly.
 	TestEqual(TEXT("The charge floods every touching puddle"),
 		Conduction->GetLastReachedCount(), 3);
 
@@ -3625,6 +3662,1307 @@ bool FARPGFluidNoRowTest::RunTest(const FString& Parameters)
 		Fluids->TrySolidify(Pool->Volume, Volume));
 	TestEqual(TEXT("So no slab is made"), Fluids->GetSolids().Num(), 0);
 	TestEqual(TEXT("And the fireball is untouched"), Volume->GetEnergy(), 50.f);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGSlabFacesOutwardTest,
+	"ARPG.World.Fluid.Slabs.ARaisedSlabIsSolidFromTheOutside",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGSlabFacesOutwardTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+	UARPGMagicElement* Earth = MakeElement(GetTransientPackage(), TAG_Element_Earth);
+	UARPGSolidDefinition* EarthDefinition = MakeEarth(Earth);
+	Fluids->Solids = { EarthDefinition };
+
+	AARPGSolidBody* Slab = RaiseSlab(Scope.World, Fluids, EarthDefinition,
+		FVector2D::ZeroVector, 200.0);
+
+	// WHICH WAY THE FACES POINT, ASKED THE WAY THE GAME ASKS IT. A slab's drawn
+	// surface IS its collision, so a trace is the same question as "can you see
+	// this" and "can you stand on this" at once -- and both had the same wrong
+	// answer while the mesh was wound inside out. Unreal is left-handed and
+	// FDynamicMesh3 takes a normal as (C - A) x (B - A), so the winding that
+	// reads as upward-facing in every other library points a face at the floor.
+	const float Top = EarthDefinition->Thickness;
+
+	// The middle, off-centre, and out near the rim: a cap wound backwards is
+	// backwards everywhere, but so is a single cell, and only sampling the
+	// centre would miss a rim built from a different branch.
+	const FVector2D Spots[] = { FVector2D(0, 0), FVector2D(60, 0), FVector2D(-100, -100) };
+
+	for (const FVector2D& Spot : Spots)
+	{
+		const FVector Above(Spot.X, Spot.Y, Top + 400.f);
+		const FVector Below(Spot.X, Spot.Y, -400.f);
+
+		FHitResult Hit;
+		const bool bHit = Scope.World->LineTraceSingleByChannel(Hit, Above, Below,
+			ECC_Visibility, FCollisionQueryParams(SCENE_QUERY_STAT(SlabFaces), false));
+
+		// LANDING ON IT, not falling into it. Wound the other way the first thing
+		// a downward trace met was the UNDERSIDE at Z=0 -- which is exactly what
+		// jumping onto the slab and ending up inside it looks like.
+		TestTrue(TEXT("A trace from above is stopped"), bHit);
+		TestEqual(TEXT("At the top of the slab"),
+			static_cast<float>(Hit.ImpactPoint.Z), Top, 0.5f);
+		TestTrue(TEXT("By a surface facing up at it"), Hit.ImpactNormal.Z > 0.9);
+	}
+
+	// The underside is the same test from the other side: a closed body is solid
+	// from every direction, and a mesh flipped wholesale still passes a test that
+	// only ever looks down.
+	FHitResult FromBelow;
+	TestTrue(TEXT("A trace from underneath is stopped"),
+		Scope.World->LineTraceSingleByChannel(FromBelow, FVector(0, 0, -400), FVector(0, 0, Top + 400),
+			ECC_Visibility, FCollisionQueryParams(SCENE_QUERY_STAT(SlabFaces), false)));
+	TestEqual(TEXT("At the underside"),
+		static_cast<float>(FromBelow.ImpactPoint.Z), 0.f, 0.5f);
+	TestTrue(TEXT("By a surface facing down at it"), FromBelow.ImpactNormal.Z < -0.9);
+
+	// And the walls, which is where being inside out is invisible from directly
+	// above: a trace across the slab used to pass through the near wall and stop
+	// on the far one from the inside.
+	FHitResult Across;
+	TestTrue(TEXT("A trace across it is stopped"),
+		Scope.World->LineTraceSingleByChannel(Across, FVector(-800, 0, Top * 0.5f),
+			FVector(800, 0, Top * 0.5f), ECC_Visibility,
+			FCollisionQueryParams(SCENE_QUERY_STAT(SlabFaces), false)));
+	TestTrue(TEXT("On the near wall rather than the far one"), Across.ImpactPoint.X < 0.0);
+	TestTrue(TEXT("By a surface facing back the way the trace came"),
+		Across.ImpactNormal.X < -0.9);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGSlabMeltedStaysClosedTest,
+	"ARPG.World.Fluid.Slabs.AMeltedSlabIsStillClosed",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGSlabMeltedStaysClosedTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+	UARPGMagicElement* Earth = MakeElement(GetTransientPackage(), TAG_Element_Earth);
+	UARPGSolidDefinition* EarthDefinition = MakeEarth(Earth);
+	Fluids->Solids = { EarthDefinition };
+
+	AARPGSolidBody* Slab = RaiseSlab(Scope.World, Fluids, EarthDefinition,
+		FVector2D::ZeroVector, 200.0);
+
+	const float Top = EarthDefinition->Thickness;
+
+	// A BOWL CUT INTO THE MIDDLE, which is what a fireball landing on a pillar
+	// does. The rim of that bowl is a step between two cells that are BOTH solid
+	// -- the one case the mesh used to draw no face for, because it asked whether
+	// the neighbour existed rather than whether it stood as high.
+	Slab->NoteContactAt(FVector2D::ZeroVector);
+	Slab->ConsumeSurfaceArea(6000.0);
+
+	TestTrue(TEXT("The fireball cut into it"), Slab->Field.TopAt(FVector2D::ZeroVector) < Top);
+	TestTrue(TEXT("Without punching through"), Slab->Field.TopAt(FVector2D::ZeroVector) > 0.f);
+
+	// STILL SOLID FROM ABOVE, everywhere. A missing riser is a hole you can see
+	// and walk through, so the trace that proves the slab is closed is the same
+	// trace that proves you cannot get inside it.
+	//
+	// CELL CENTRES, not a grid of round numbers. A sample sitting exactly on the
+	// boundary between two terraced cells can legitimately land on either one's
+	// cap, so a height comparison there tests floating point rather than
+	// geometry -- which is what a first draft of this did, failing on every
+	// second sample while the mesh was correct.
+	int32 Checked = 0;
+
+	for (int32 CellY = 0; CellY < Slab->Field.CountY; ++CellY)
+	{
+		for (int32 CellX = 0; CellX < Slab->Field.CountX; ++CellX)
+		{
+			if (!Slab->Field.IsSolid(CellX, CellY))
+			{
+				continue;
+			}
+
+			const FVector2D At = Slab->ToWorld(Slab->Field.CentreOf(CellX, CellY));
+			const float Here = Slab->Field.TopAt(At);
+
+			if (Here <= 0.f)
+			{
+				// Melted clean through: a genuine hole, and nothing to stand on.
+				continue;
+			}
+
+			FHitResult Hit;
+			const bool bHit = Scope.World->LineTraceSingleByChannel(Hit,
+				FVector(At.X, At.Y, Top + 400.f), FVector(At.X, At.Y, -400.f),
+				ECC_Visibility, FCollisionQueryParams(SCENE_QUERY_STAT(MeltedSlab), false));
+
+			if (!bHit || Hit.ImpactNormal.Z < 0.5)
+			{
+				AddError(FString::Printf(
+					TEXT("Nothing solid facing up at (%.0f, %.0f), where the field says %.1f"),
+					At.X, At.Y, Here));
+				return false;
+			}
+
+			// LANDING ON THE SURFACE THE FIELD DESCRIBES, not somewhere inside it.
+			// A missing riser lets the trace slip past the cut cell and stop on a
+			// neighbour lower down, which reads as standing in the rock.
+			TestEqual(FString::Printf(TEXT("Standing on the surface at (%.0f, %.0f)"), At.X, At.Y),
+				static_cast<float>(Hit.ImpactPoint.Z), Here, 0.5f);
+
+			++Checked;
+		}
+	}
+
+	// So a mesh that quietly stopped being built cannot pass this by having
+	// nothing to disagree with.
+	TestTrue(TEXT("And there was a slab to walk on at all"), Checked > 20);
+
+	// AND NOW THE RISER ITSELF, which none of the above can see. A trace straight
+	// down at a cell centre lands on that cell's own cap whether or not the step
+	// to its neighbour was ever drawn -- the gap is in the SIDE. So this looks
+	// outward from inside the bowl, along the floor the fireball cut, and asks
+	// what stops it.
+	const float BowlFloor = Slab->Field.TopAt(FVector2D::ZeroVector);
+	const float RayZ = BowlFloor + 2.f;
+
+	// The first cell going out that stands higher than the ray IS the step, and
+	// the face of that step is the only thing that should stop it. Read off the
+	// field rather than assumed, so the test does not encode a particular bowl.
+	float Step = -1.f;
+	for (float X = 0.f; X <= 180.f; X += 1.f)
+	{
+		if (Slab->Field.TopAt(FVector2D(X, 0.f)) > RayZ)
+		{
+			Step = X;
+			break;
+		}
+	}
+
+	TestTrue(TEXT("The bowl has a wall to it at all"), Step > 0.f);
+
+	FHitResult Riser;
+	const bool bRiser = Scope.World->LineTraceSingleByChannel(Riser,
+		FVector(0, 0, RayZ), FVector(600, 0, RayZ), ECC_Visibility,
+		FCollisionQueryParams(SCENE_QUERY_STAT(MeltedSlab), false));
+
+	TestTrue(TEXT("Looking out of the bowl meets rock"), bRiser);
+
+	// WITHIN A CELL OF THE STEP. Undrawn, the ray sails through every terrace and
+	// stops on the far rim from the inside -- a hit, at completely the wrong
+	// place, which is exactly the "you can see right into the material" the
+	// screenshot showed.
+	TestEqual(TEXT("At the step, not at the far rim"),
+		static_cast<float>(Riser.ImpactPoint.X), Step, EarthDefinition->CellSize);
+
+	// Facing back down the ray, because a riser is a wall like any other.
+	TestTrue(TEXT("By a face pointing back at it"), Riser.ImpactNormal.X < -0.5);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGSlabFilmIsDrawnTest,
+	"ARPG.World.Fluid.Slabs.MeltedLavaIsDrawnOnTheSlab",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGSlabFilmIsDrawnTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	UARPGMagicElement* Earth = MakeElement(GetTransientPackage(), TAG_Element_Earth);
+	UARPGMagicElement* Lava = MakeElement(GetTransientPackage(), TAG_Element_Lava);
+
+	UARPGFluidDefinition* LavaDefinition = MakeWater(GetTransientPackage(), Lava);
+	LavaDefinition->Density = 0.0027f;
+	LavaDefinition->MinimumFilm = 0.4f;
+
+	UARPGSolidDefinition* EarthDefinition = MakeEarth(Earth);
+	EarthDefinition->MeltsInto = LavaDefinition;
+
+	Fluids->Definitions = { LavaDefinition };
+	Fluids->Solids = { EarthDefinition };
+
+	AARPGSolidBody* Slab = RaiseSlab(Scope.World, Fluids, EarthDefinition,
+		FVector2D::ZeroVector, 200.0);
+
+	// NOTHING TO SEE ON DRY ROCK. Stated first so the count below is a change
+	// rather than a number that might always have been there.
+	TestEqual(TEXT("A slab nobody has hit draws no film"), Slab->GetFilmTriangleCount(), 0);
+
+	// A FIREBALL INTO THE MIDDLE, which is the case the player reported and the
+	// hardest one: a bowl in the centre KEEPS its melt rather than shedding it, so
+	// nothing ever reaches the ground and the film on the slab is the only thing
+	// there will ever be to look at.
+	Slab->NoteContactAt(FVector2D::ZeroVector);
+	Slab->ConsumeSurfaceArea(6000.0);
+
+	TestTrue(TEXT("Melting leaves lava on the slab"), Slab->GetFilmVolume() > 0.0);
+	TestEqual(TEXT("Rather than under it"), Fluids->GetPools().Num(), 0);
+
+	// THE POINT OF ALL OF IT. The volume above was already true before any of this
+	// was drawn -- the lava existed as a number on a heightfield and appeared
+	// nowhere, which is precisely what "it removes the earth but no lava spawns"
+	// looks like from behind the character.
+	TestTrue(TEXT("And that lava is actually drawn"), Slab->GetFilmTriangleCount() > 0);
+
+	// AND IT LIES ON THE ROCK, not through it. The film's own floor is the cell
+	// top the flow solver reads, so a bowl holds its lava at the bottom of the
+	// bowl rather than at the height the slab used to be.
+	const float RockTop = Slab->Field.TopAt(FVector2D::ZeroVector);
+	const float FilmTop = RockTop + Slab->Field.WetAt(FVector2D::ZeroVector);
+
+	TestTrue(TEXT("The bowl is below the original top"), RockTop < EarthDefinition->Thickness);
+	TestTrue(TEXT("And the lava sits above the bowl's floor"), FilmTop > RockTop);
+
+	// DRAINED AWAY IS DRAWN AWAY. A film that finished running off but left its
+	// mesh behind is lava lying on dry rock for the rest of the level -- the same
+	// class of bug as a puddle that evaporated and stayed visible.
+	Slab->Field.Wet.Init(0.f, Slab->Field.Wet.Num());
+	Slab->Field.RefreshWet();
+	Slab->RebuildFilm();
+
+	TestEqual(TEXT("A film that has drained draws nothing"), Slab->GetFilmTriangleCount(), 0);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGPoolStopsAtALedgeTest,
+	"ARPG.World.Fluid.Deposit.APoolStopsAtTheEdgeOfWhatHoldsIt",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGPoolStopsAtALedgeTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+	UARPGFluidDefinition* WaterDefinition = MakeWater(GetTransientPackage(), Water);
+	WaterDefinition->MinimumArea = 100.f;
+	Fluids->Definitions = { WaterDefinition };
+
+	// A PLATFORM WITH ONE EDGE, which is the stage this came from reduced to the
+	// part that matters: floor out to X = 0 and a drop past it. An emanation cast
+	// near that lip covers ground on one side and thin air on the other.
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+	AActor* Platform = Scope.World->SpawnActor<AActor>(
+		AActor::StaticClass(), FTransform::Identity, Params);
+
+	UBoxComponent* Floor = NewObject<UBoxComponent>(Platform);
+	Floor->SetupAttachment(Platform->GetRootComponent());
+	Floor->RegisterComponent();
+	Floor->SetBoxExtent(FVector(500.f, 500.f, 50.f));
+
+	// Top face at Z = 0, and its far edge at X = 0.
+	Floor->SetWorldLocation(FVector(-500.f, 0.f, -50.f));
+	Floor->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+	Floor->SetCollisionObjectType(ECC_WorldStatic);
+	Floor->SetCollisionResponseToAllChannels(ECR_Block);
+
+	// Cast ON the platform, one radius back from the lip, so half the disc would
+	// reach out over the drop.
+	const float Radius = 200.f;
+	AARPGFluidPool* Pool = Fluids->Deposit(FVector(-100.f, 0.f, 0.f), Radius, TAG_Element_Water);
+
+	if (!Pool)
+	{
+		AddError(TEXT("Nothing pooled on the platform at all"));
+		return false;
+	}
+
+	// NOT OUT OVER THE DROP. This is the whole report: the far half of the disc
+	// used to be a flat surface with nothing underneath it, because the deposit
+	// sampled the ground ONCE, at the middle, and laid the entire footprint at
+	// that one height.
+	const FBox2D Bounds = ARPGFluidGeometry::PolygonBounds(Pool->GetRing());
+
+	TestTrue(FString::Printf(TEXT("It stops at the lip rather than hanging past it (reached %.0f)"),
+		Bounds.Max.X), Bounds.Max.X <= 30.f);
+
+	// AND IS STILL A PUDDLE. Trimming that ate the whole body would "fix" this by
+	// making water stop working near anything interesting.
+	TestTrue(TEXT("And is still a body worth having"),
+		ARPGFluidGeometry::PolygonArea(Pool->GetRing()) > 10000.0);
+
+	// The half that IS on the platform keeps its reach, so the trim took the
+	// unsupported side and not the outline generally.
+	TestTrue(FString::Printf(TEXT("Keeping its reach back onto the floor (%.0f)"), Bounds.Min.X),
+		Bounds.Min.X < -250.f);
+
+	// EVERY POINT OF IT ON SOMETHING. Bounds are a summary; this is the claim.
+	for (const FVector2D& Point : Pool->GetRing())
+	{
+		FHitResult Hit;
+		const bool bGround = Scope.World->LineTraceSingleByChannel(Hit,
+			FVector(Point.X, Point.Y, 50.f), FVector(Point.X, Point.Y, -400.f),
+			ECC_Visibility, FCollisionQueryParams(SCENE_QUERY_STAT(PoolLedge), false));
+
+		if (!bGround)
+		{
+			AddError(FString::Printf(TEXT("The pool reaches (%.0f, %.0f), where there is no floor"),
+				Point.X, Point.Y));
+			return false;
+		}
+	}
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGPoolOnFlatGroundTest,
+	"ARPG.World.Fluid.Deposit.FlatGroundTakesTheWholeFootprint",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGPoolOnFlatGroundTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+	UARPGFluidDefinition* WaterDefinition = MakeWater(GetTransientPackage(), Water);
+	WaterDefinition->MinimumArea = 100.f;
+	Fluids->Definitions = { WaterDefinition };
+
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+	AActor* Ground = Scope.World->SpawnActor<AActor>(
+		AActor::StaticClass(), FTransform::Identity, Params);
+
+	UBoxComponent* Floor = NewObject<UBoxComponent>(Ground);
+	Floor->SetupAttachment(Ground->GetRootComponent());
+	Floor->RegisterComponent();
+	Floor->SetBoxExtent(FVector(2000.f, 2000.f, 50.f));
+	Floor->SetWorldLocation(FVector(0.f, 0.f, -50.f));
+	Floor->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+	Floor->SetCollisionObjectType(ECC_WorldStatic);
+	Floor->SetCollisionResponseToAllChannels(ECR_Block);
+
+	const float Radius = 200.f;
+	AARPGFluidPool* Pool = Fluids->Deposit(FVector::ZeroVector, Radius, TAG_Element_Water);
+
+	if (!Pool)
+	{
+		AddError(TEXT("Nothing pooled on open ground"));
+		return false;
+	}
+
+	// THE OTHER HALF OF THE LEDGE CASE, and the one that would go unnoticed: a
+	// trim that quietly shaved every puddle in the game would still pass the test
+	// above. On a floor with nothing to stop it, the footprint is untouched.
+	const double Asked = ARPGFluidGeometry::PolygonArea(
+		ARPGFluidGeometry::MakeCircle(FVector2D::ZeroVector, Radius));
+
+	TestEqual(TEXT("An unobstructed puddle is exactly what was asked for"),
+		ARPGFluidGeometry::PolygonArea(Pool->GetRing()), Asked, Asked * 0.01);
+
+	return true;
+}
+
+namespace ARPGFluidTestUtils
+{
+	/**
+	 * A ramp, built out of steps small enough that the trim treats it as one
+	 * continuous floor.
+	 *
+	 * A rotated box would be a truer ramp, but a stack of thin treads is exactly
+	 * as good for the question being asked -- does the body follow the floor down
+	 * -- and it lets a test say where the floor is at a given X without doing
+	 * trigonometry to work out what it just built.
+	 */
+	inline AActor* BuildRamp(UWorld* World, float FromX, float ToX, float Fall, int32 Treads)
+	{
+		FActorSpawnParameters Params;
+		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+		AActor* Ramp = World->SpawnActor<AActor>(
+			AActor::StaticClass(), FTransform::Identity, Params);
+
+		const float Width = (ToX - FromX) / Treads;
+
+		for (int32 Tread = 0; Tread < Treads; ++Tread)
+		{
+			const float MidX = FromX + Width * (Tread + 0.5f);
+			const float TopZ = -Fall * (Tread + 0.5f) / Treads;
+
+			UBoxComponent* Step = NewObject<UBoxComponent>(Ramp);
+			Step->SetupAttachment(Ramp->GetRootComponent());
+			Step->RegisterComponent();
+			Step->SetBoxExtent(FVector(Width * 0.5f, 600.f, 400.f));
+			Step->SetWorldLocation(FVector(MidX, 0.f, TopZ - 400.f));
+			Step->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+			Step->SetCollisionObjectType(ECC_WorldStatic);
+			Step->SetCollisionResponseToAllChannels(ECR_Block);
+		}
+
+		return Ramp;
+	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGPoolFollowsASlopeTest,
+	"ARPG.World.Fluid.Deposit.APoolFollowsTheSlopeItLiesOn",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGPoolFollowsASlopeTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+	UARPGFluidDefinition* WaterDefinition = MakeWater(GetTransientPackage(), Water);
+	WaterDefinition->MinimumArea = 100.f;
+	WaterDefinition->Depth = 20.f;
+	Fluids->Definitions = { WaterDefinition };
+
+	// A METRE OF FALL over four metres of run, which is the kind of ramp a stage
+	// has between an upper platform and the floor below it.
+	const float Fall = 100.f;
+	BuildRamp(Scope.World, -400.f, 400.f, Fall, 40);
+
+	// Cast in the middle, so the disc reaches well up the ramp and well down it.
+	const float Radius = 250.f;
+	AARPGFluidPool* Pool = Fluids->Deposit(FVector(0.f, 0.f, -Fall * 0.5f), Radius,
+		TAG_Element_Water);
+
+	if (!Pool)
+	{
+		AddError(TEXT("Nothing pooled on the ramp"));
+		return false;
+	}
+
+	// IT DID NOT GET TRIMMED AWAY. The first thing a slope-blind body does on a
+	// ramp is refuse to exist: every point of it is at a different height from
+	// the middle, so a trim measured against the middle eats the whole outline.
+	const FBox2D Bounds = ARPGFluidGeometry::PolygonBounds(Pool->GetRing());
+
+	TestTrue(FString::Printf(TEXT("It kept its reach up the ramp (%.0f)"), Bounds.Min.X),
+		Bounds.Min.X < -200.f);
+	TestTrue(FString::Printf(TEXT("And down it (%.0f)"), Bounds.Max.X),
+		Bounds.Max.X > 200.f);
+
+	// AND IT LIES ON THE RAMP. The floor drops 12.5cm per metre, so two points two
+	// metres apart along the fall line differ by about 25cm -- and the pool's
+	// surface has to differ by the same, or it is a flat lid over a slope.
+	const float Uphill = Pool->GetSurfaceLevelAt(FVector2D(-200.f, 0.f));
+	const float Downhill = Pool->GetSurfaceLevelAt(FVector2D(200.f, 0.f));
+
+	TestTrue(FString::Printf(TEXT("The uphill end is higher than the downhill end (%.1f vs %.1f)"),
+		Uphill, Downhill), Uphill > Downhill + 30.f);
+
+	// EVERYWHERE, not just at the ends: the surface tracks the floor at a constant
+	// depth rather than tilting by some amount of its own.
+	for (float X = -200.f; X <= 200.f; X += 50.f)
+	{
+		const FVector2D At(X, 0.f);
+
+		float Floor = 0.f;
+		if (!Fluids->FindGroundAt(At, 200.f, Floor, Pool))
+		{
+			AddError(FString::Printf(TEXT("No ramp under (%.0f, 0)"), X));
+			return false;
+		}
+
+		TestEqual(FString::Printf(TEXT("The bed follows the floor at (%.0f, 0)"), X),
+			Pool->GetSurfaceBedAt(At), Floor, 8.f);
+
+		TestEqual(FString::Printf(TEXT("And the surface rides its own depth above it at (%.0f, 0)"), X),
+			Pool->GetSurfaceLevelAt(At) - Pool->GetSurfaceBedAt(At), WaterDefinition->Depth, 0.1f);
+	}
+
+	// THE DRAWN MESH FOLLOWS IT TOO, which is the part the player sees and the
+	// only part none of the above can speak for -- the height queries answer from
+	// the bed directly, so they read correctly even while the mesh is a flat lid.
+	//
+	// Asked as the mesh's own Z extent: a flat pool is exactly its own depth
+	// thick, and one laid down this ramp spans the fall as well.
+	TestTrue(TEXT("And there is a mesh with enough detail to bend"),
+		Pool->GetSurfaceTriangleCount() > 40);
+
+	UPrimitiveComponent* Drawn = Pool->GetSurfaceComponent();
+	const float Thickness = Drawn
+		? static_cast<float>(Drawn->CalcBounds(Drawn->GetComponentTransform()).BoxExtent.Z * 2.0)
+		: 0.f;
+
+	TestTrue(FString::Printf(TEXT("And the drawn surface spans the fall, not just its depth (%.1f)"),
+		Thickness), Thickness > WaterDefinition->Depth + 40.f);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGPoolStillStopsAtACliffTest,
+	"ARPG.World.Fluid.Deposit.FollowingASlopeDoesNotMeanCrossingACliff",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGPoolStillStopsAtACliffTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+	UARPGFluidDefinition* WaterDefinition = MakeWater(GetTransientPackage(), Water);
+	WaterDefinition->MinimumArea = 100.f;
+	Fluids->Definitions = { WaterDefinition };
+
+	// THE SAME FALL AS THE RAMP ABOVE, taken all at once. This is the pair that
+	// makes the rule meaningful: following the floor has to mean following it
+	// down a slope WITHOUT meaning bridging a drop of the same size.
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+	AActor* Stage = Scope.World->SpawnActor<AActor>(
+		AActor::StaticClass(), FTransform::Identity, Params);
+
+	UBoxComponent* Upper = NewObject<UBoxComponent>(Stage);
+	Upper->SetupAttachment(Stage->GetRootComponent());
+	Upper->RegisterComponent();
+	Upper->SetBoxExtent(FVector(400.f, 600.f, 50.f));
+	Upper->SetWorldLocation(FVector(-400.f, 0.f, -50.f));
+	Upper->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+	Upper->SetCollisionObjectType(ECC_WorldStatic);
+	Upper->SetCollisionResponseToAllChannels(ECR_Block);
+
+	UBoxComponent* Lower = NewObject<UBoxComponent>(Stage);
+	Lower->SetupAttachment(Stage->GetRootComponent());
+	Lower->RegisterComponent();
+	Lower->SetBoxExtent(FVector(400.f, 600.f, 50.f));
+	Lower->SetWorldLocation(FVector(400.f, 0.f, -150.f));
+	Lower->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+	Lower->SetCollisionObjectType(ECC_WorldStatic);
+	Lower->SetCollisionResponseToAllChannels(ECR_Block);
+
+	const float Radius = 250.f;
+	AARPGFluidPool* Pool = Fluids->Deposit(FVector(-100.f, 0.f, 0.f), Radius, TAG_Element_Water);
+
+	if (!Pool)
+	{
+		AddError(TEXT("Nothing pooled on the upper step"));
+		return false;
+	}
+
+	const FBox2D Bounds = ARPGFluidGeometry::PolygonBounds(Pool->GetRing());
+
+	// A metre of drop in one step is a ledge, and the water stops on top of it.
+	TestTrue(FString::Printf(TEXT("It stops at the lip (%.0f)"), Bounds.Max.X),
+		Bounds.Max.X <= 60.f);
+
+	TestTrue(TEXT("And is still a body worth having"),
+		ARPGFluidGeometry::PolygonArea(Pool->GetRing()) > 10000.0);
+
+	return true;
+}
+
+namespace ARPGFluidTestUtils
+{
+	/**
+	 * A slab of floor, top face at TopZ, centred on (X, 0).
+	 *
+	 * THIN BY DEFAULT, which matters more than it looks: a balcony modelled as a
+	 * block thick enough to reach the floor below is not a balcony, it is a
+	 * plinth -- and a ground probe under it starts inside solid geometry and
+	 * finds nothing, which is a fault in the stage and not in the fluid.
+	 */
+	inline void AddFloor(AActor* Owner, float X, float TopZ, float HalfX,
+		float HalfY = 600.f, float HalfZ = 50.f)
+	{
+		UBoxComponent* Box = NewObject<UBoxComponent>(Owner);
+		Box->SetupAttachment(Owner->GetRootComponent());
+		Box->RegisterComponent();
+		Box->SetBoxExtent(FVector(HalfX, HalfY, HalfZ));
+		Box->SetWorldLocation(FVector(X, 0.f, TopZ - HalfZ));
+		Box->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+		Box->SetCollisionObjectType(ECC_WorldStatic);
+		Box->SetCollisionResponseToAllChannels(ECR_Block);
+	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGPoolsOnTwoFloorsTest,
+	"ARPG.World.Fluid.Deposit.APuddleUnderABalconyIsNotThePuddleOnIt",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGPoolsOnTwoFloorsTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+	UARPGFluidDefinition* WaterDefinition = MakeWater(GetTransientPackage(), Water);
+	WaterDefinition->MinimumArea = 100.f;
+	WaterDefinition->MergeDistance = 200.f;
+	Fluids->Definitions = { WaterDefinition };
+
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	AActor* Stage = Scope.World->SpawnActor<AActor>(
+		AActor::StaticClass(), FTransform::Identity, Params);
+
+	// TWO FLOORS, ONE ABOVE THE OTHER, overlapping in plan -- the elevated middle
+	// section of a stage and the lower area it looks down on. The upper one is a
+	// balcony over the left half; the ground floor runs the whole width.
+	AddFloor(Stage, 0.f, -400.f, 800.f);   // the lower level
+	AddFloor(Stage, -400.f, 0.f, 400.f);   // the platform above its left half
+
+	// A puddle on the platform first, so there is something for the next cast to
+	// be wrongly swallowed by.
+	AARPGFluidPool* Upstairs = Fluids->Deposit(FVector(-300.f, 0.f, 0.f), 150.f, TAG_Element_Water);
+
+	if (!Upstairs)
+	{
+		AddError(TEXT("Nothing pooled on the platform"));
+		return false;
+	}
+
+	TestEqual(TEXT("The platform puddle is on the platform"),
+		static_cast<float>(Upstairs->GetActorLocation().Z), 0.f, 20.f);
+
+	// NOW CAST DOWNSTAIRS, under the balcony. In plan this lands right beside the
+	// puddle above -- inside its bounds plus the merge distance -- which used to
+	// be the entire test for "these are the same puddle".
+	const int32 Before = Fluids->GetPools().Num();
+	AARPGFluidPool* Downstairs = Fluids->Deposit(FVector(-300.f, 0.f, -400.f), 150.f,
+		TAG_Element_Water);
+
+	if (!Downstairs)
+	{
+		AddError(TEXT("Nothing pooled on the lower level"));
+		return false;
+	}
+
+	// A SECOND BODY, not a bigger first one.
+	TestEqual(TEXT("The lower level gets a puddle of its own"),
+		Fluids->GetPools().Num(), Before + 1);
+	TestTrue(TEXT("Which is not the one upstairs"), Downstairs != Upstairs);
+
+	// AND IT IS WHERE THE SPELL WAS. This is the report: the water appeared at the
+	// elevated section instead of at the cast, because the merge grew the balcony's
+	// outline to swallow a footprint four metres below it.
+	TestEqual(TEXT("At the height it was cast at"),
+		static_cast<float>(Downstairs->GetActorLocation().Z), -400.f, 20.f);
+
+	TestEqual(TEXT("And under the point it was cast at"),
+		static_cast<float>(Downstairs->GetActorLocation().X), -300.f, 60.f);
+
+	// The one upstairs is untouched -- it did not grow a limb down the stairwell.
+	TestTrue(TEXT("And the platform puddle kept its own size"),
+		ARPGFluidGeometry::PolygonBounds(Upstairs->GetRing()).GetExtent().X < 200.f);
+
+	// Two puddles on the SAME floor still merge, which is the behaviour the height
+	// test must not have broken.
+	const int32 Now = Fluids->GetPools().Num();
+	Fluids->Deposit(FVector(-200.f, 0.f, -400.f), 150.f, TAG_Element_Water);
+
+	TestEqual(TEXT("But a second puddle beside it on the same floor still merges"),
+		Fluids->GetPools().Num(), Now);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGPoolUndersideBuriedTest,
+	"ARPG.World.Fluid.Deposit.TheUndersideOfAPuddleStaysUnderTheFloor",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGPoolUndersideBuriedTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+	UARPGFluidDefinition* WaterDefinition = MakeWater(GetTransientPackage(), Water);
+	WaterDefinition->MinimumArea = 100.f;
+	WaterDefinition->Depth = 20.f;
+	Fluids->Definitions = { WaterDefinition };
+
+	// A ramp, so the bed is sampled and interpolated rather than being one plane
+	// the mesh can sit exactly on.
+	BuildRamp(Scope.World, -400.f, 400.f, 100.f, 40);
+
+	AARPGFluidPool* Pool = Fluids->Deposit(FVector(0.f, 0.f, -50.f), 250.f, TAG_Element_Water);
+
+	if (!Pool)
+	{
+		AddError(TEXT("Nothing pooled on the ramp"));
+		return false;
+	}
+
+	// COINCIDENT SURFACES ARE THE SHIMMER. The floor is opaque and the water is
+	// not, so where the puddle's underside lands in the same plane as the floor
+	// the depth test has no answer -- and picks a different one per pixel and per
+	// frame as the camera moves. The fix is that the underside is never in that
+	// plane: it is below it, everywhere.
+	const float Sink = 4.f;
+
+	for (float X = -200.f; X <= 200.f; X += 25.f)
+	{
+		const FVector2D At(X, 0.f);
+
+		float Floor = 0.f;
+		if (!Fluids->FindGroundAt(At, 200.f, Floor, Pool))
+		{
+			continue;
+		}
+
+		// The drawn underside is the bed less the sink -- see GetUndersideSink.
+		const float Underside = Pool->GetSurfaceBedAt(At) - Sink;
+
+		TestTrue(FString::Printf(
+			TEXT("The underside is buried at (%.0f, 0): %.2f against a floor at %.2f"),
+			X, Underside, Floor), Underside < Floor);
+
+		// AND NOT BURIED SO DEEP IT SHOWS. A sink big enough to clear the error is
+		// also big enough to swallow the puddle if nobody bounds it, and the
+		// waterline is what the player actually reads.
+		TestTrue(FString::Printf(TEXT("But not sunk out of sight at (%.0f, 0)"), X),
+			Pool->GetSurfaceLevelAt(At) > Floor);
+	}
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGPoolIsDrawnWhereItIsTest,
+	"ARPG.World.Fluid.Deposit.APoolIsDrawnWhereItWasCast",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGPoolIsDrawnWhereItIsTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+	UARPGFluidDefinition* WaterDefinition = MakeWater(GetTransientPackage(), Water);
+	WaterDefinition->MinimumArea = 100.f;
+	Fluids->Definitions = { WaterDefinition };
+
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	AActor* Stage = Scope.World->SpawnActor<AActor>(
+		AActor::StaticClass(), FTransform::Identity, Params);
+
+	// WELL AWAY FROM THE ORIGIN, which is the entire point of this case. A body
+	// whose mesh is built in world coordinates but drawn as an actor's LOCAL ones
+	// is displaced by however far from the origin it is -- so it looks fine in the
+	// middle of a stage and flies off the map at the edges. Testing at the origin
+	// is testing the one place the bug cannot show.
+	const FVector2D Far(3000.f, -2000.f);
+
+	UBoxComponent* Floor = NewObject<UBoxComponent>(Stage);
+	Floor->SetupAttachment(Stage->GetRootComponent());
+	Floor->RegisterComponent();
+	Floor->SetBoxExtent(FVector(800.f, 800.f, 50.f));
+	Floor->SetWorldLocation(FVector(Far.X, Far.Y, -50.f));
+	Floor->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+	Floor->SetCollisionObjectType(ECC_WorldStatic);
+	Floor->SetCollisionResponseToAllChannels(ECR_Block);
+
+	AARPGFluidPool* Pool = Fluids->Deposit(FVector(Far.X, Far.Y, 0.f), 200.f, TAG_Element_Water);
+
+	if (!Pool)
+	{
+		AddError(TEXT("Nothing pooled out at the edge of the stage"));
+		return false;
+	}
+
+	// The outline is right -- it always was. The simulation knows exactly where
+	// the puddle is; this is only ever about where it is DRAWN.
+	const FVector2D RingCentre = ARPGFluidGeometry::PolygonCentroid(Pool->GetRing());
+	TestEqual(TEXT("The outline is where it was cast, in X"),
+		static_cast<float>(RingCentre.X), static_cast<float>(Far.X), 20.f);
+	TestEqual(TEXT("And in Y"),
+		static_cast<float>(RingCentre.Y), static_cast<float>(Far.Y), 20.f);
+
+	// AND SO IS THE MESH. Taken in world space, through the component's own
+	// transform, so it is the same question the player is asking: is the water
+	// where the spell went off.
+	UPrimitiveComponent* Drawn = Pool->GetSurfaceComponent();
+
+	if (!Drawn)
+	{
+		AddError(TEXT("The pool has nothing drawn"));
+		return false;
+	}
+
+	const FBoxSphereBounds Bounds = Drawn->CalcBounds(Drawn->GetComponentTransform());
+
+	TestEqual(TEXT("The drawn water is where the outline is, in X"),
+		static_cast<float>(Bounds.Origin.X), static_cast<float>(Far.X), 30.f);
+	TestEqual(TEXT("And in Y"),
+		static_cast<float>(Bounds.Origin.Y), static_cast<float>(Far.Y), 30.f);
+
+	// And it is still the size it should be, so a mesh collapsed to nothing
+	// cannot pass the two checks above by having no extent to be wrong about.
+	TestTrue(FString::Printf(TEXT("And is the size of the puddle (%.0f)"), Bounds.BoxExtent.X),
+		Bounds.BoxExtent.X > 100.0 && Bounds.BoxExtent.X < 400.0);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGPoolsMergeWhenTheyMeetTest,
+	"ARPG.World.Fluid.Deposit.OverlappingPuddlesAlwaysBecomeOne",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGPoolsMergeWhenTheyMeetTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+	UARPGFluidDefinition* WaterDefinition = MakeWater(GetTransientPackage(), Water);
+	WaterDefinition->MinimumArea = 100.f;
+	WaterDefinition->EvaporationRate = 0.f;
+	WaterDefinition->MergeDistance = 0.f;
+	Fluids->Definitions = { WaterDefinition };
+
+	// A FRESH PAIR EACH TIME. Depositing into a pool that is already growing hides
+	// the bug being tested: the outline gets wider every round, so its bounding
+	// box swallows the next centroid whatever the rule is. Each case has to start
+	// from one puddle.
+	auto Clear = [&]()
+	{
+		TArray<AARPGFluidPool*> Existing = Fluids->GetPools();
+		for (AARPGFluidPool* Pool : Existing)
+		{
+			Fluids->RetireBody(Pool);
+		}
+	};
+
+	// THE SHAPE OF THE OLD BUG, stated first because it is the one from the
+	// screenshot: a SMALL puddle landing on the RIM of a big one. Its centre is
+	// well outside the big one's bounding box -- so the old rule saw no merge --
+	// while a third of it is lying on top. Two outlines crossing, each drawing
+	// its own edge through the middle of the other.
+	Clear();
+	Fluids->Deposit(FVector::ZeroVector, 300.f, TAG_Element_Water);
+	Fluids->Deposit(FVector(360.f, 0.f, 0.f), 80.f, TAG_Element_Water);
+
+	TestEqual(TEXT("A small puddle on the rim of a big one joins it"),
+		Fluids->GetPools().Num(), 1);
+
+	// AND ACROSS THE WHOLE RANGE OF OVERLAPS, because the old rule was not wrong
+	// everywhere -- it was wrong in a band, which is what made it look like
+	// puddles merged sometimes and not others.
+	const float Radius = 200.f;
+
+	for (float Offset = 40.f; Offset < Radius * 2.f; Offset += 40.f)
+	{
+		Clear();
+		Fluids->Deposit(FVector::ZeroVector, Radius, TAG_Element_Water);
+		Fluids->Deposit(FVector(Offset, 0.f, 0.f), Radius, TAG_Element_Water);
+
+		TestEqual(FString::Printf(
+			TEXT("A puddle overlapping by %.0f is the same puddle"), Radius * 2.f - Offset),
+			Fluids->GetPools().Num(), 1);
+	}
+
+	// AND ONE CLEAR OF IT IS NOT. A merge rule that swallowed everything would
+	// pass every case above and be just as wrong.
+	Clear();
+	Fluids->Deposit(FVector::ZeroVector, Radius, TAG_Element_Water);
+	Fluids->Deposit(FVector(Radius * 2.f + 100.f, 0.f, 0.f), Radius, TAG_Element_Water);
+
+	TestEqual(TEXT("But a puddle well clear of it is its own"), Fluids->GetPools().Num(), 2);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGPoolBridgesTwoTest,
+	"ARPG.World.Fluid.Deposit.APuddleCastBetweenTwoJoinsBoth",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGPoolBridgesTwoTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+	UARPGFluidDefinition* WaterDefinition = MakeWater(GetTransientPackage(), Water);
+	WaterDefinition->MinimumArea = 100.f;
+	WaterDefinition->EvaporationRate = 0.f;
+	WaterDefinition->MergeDistance = 0.f;
+	Fluids->Definitions = { WaterDefinition };
+
+	// Two puddles with a gap between them, so neither knows about the other.
+	Fluids->Deposit(FVector(-300.f, 0.f, 0.f), 150.f, TAG_Element_Water);
+	Fluids->Deposit(FVector(300.f, 0.f, 0.f), 150.f, TAG_Element_Water);
+
+	TestEqual(TEXT("Two puddles to start with"), Fluids->GetPools().Num(), 2);
+
+	// A THIRD ACROSS THE GAP, touching both. Joining only the first left the
+	// second lying across the result as a separate body -- two outlines crossing,
+	// each drawing its own rim through the middle of the other, which is the seam
+	// running through the water in the report.
+	Fluids->Deposit(FVector::ZeroVector, 250.f, TAG_Element_Water);
+
+	TestEqual(TEXT("The one cast between them makes all three one"),
+		Fluids->GetPools().Num(), 1);
+
+	// AND IT IS THE WHOLE SHAPE, not the bridge with the ends dropped.
+	const FBox2D Bounds = ARPGFluidGeometry::PolygonBounds(Fluids->GetPools()[0]->GetRing());
+
+	TestTrue(FString::Printf(TEXT("Reaching the far end of the left one (%.0f)"), Bounds.Min.X),
+		Bounds.Min.X < -400.f);
+	TestTrue(FString::Printf(TEXT("And of the right one (%.0f)"), Bounds.Max.X),
+		Bounds.Max.X > 400.f);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGPoolIgnoresTheCasterTest,
+	"ARPG.World.Fluid.Deposit.TheCasterStandingInItIsNotItsFloor",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGPoolIgnoresTheCasterTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+	UARPGFluidDefinition* WaterDefinition = MakeWater(GetTransientPackage(), Water);
+	WaterDefinition->MinimumArea = 100.f;
+	Fluids->Definitions = { WaterDefinition };
+
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+	AActor* Stage = Scope.World->SpawnActor<AActor>(
+		AActor::StaticClass(), FTransform::Identity, Params);
+	AddFloor(Stage, 0.f, 0.f, 800.f);
+
+	// THE CASTER, STANDING WHERE THE SPELL GOES OFF. An emanation is cast AROUND
+	// its caster, so this is not an edge case -- it is every single emanation.
+	APawn* Caster = Scope.World->SpawnActor<APawn>(
+		APawn::StaticClass(), FTransform(FVector(0.f, 0.f, 90.f)), Params);
+
+	UCapsuleComponent* Body = NewObject<UCapsuleComponent>(Caster);
+	Body->SetupAttachment(Caster->GetRootComponent());
+	Body->RegisterComponent();
+	Body->SetCapsuleSize(40.f, 90.f);
+	Body->SetWorldLocation(FVector(0.f, 0.f, 90.f));
+	Body->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+	Body->SetCollisionObjectType(ECC_Pawn);
+	Body->SetCollisionResponseToAllChannels(ECR_Block);
+
+	AARPGFluidPool* Pool = Fluids->Deposit(FVector::ZeroVector, 250.f, TAG_Element_Water);
+
+	if (!Pool)
+	{
+		AddError(TEXT("Nothing pooled at the caster's feet"));
+		return false;
+	}
+
+	// THE FLOOR IS THE FLOOR. A probe that stopped on the caster's capsule read
+	// the ground as being at their shoulders, so the body was built to that
+	// height -- its underside standing well proud of the real floor, and shifting
+	// every time they moved. Which is the water thrashing about as it is placed.
+	for (float X = -100.f; X <= 100.f; X += 50.f)
+	{
+		const FVector2D At(X, 0.f);
+
+		TestEqual(FString::Printf(TEXT("The bed is the floor at (%.0f, 0)"), X),
+			Pool->GetSurfaceBedAt(At), 0.f, 5.f);
+	}
+
+	TestEqual(TEXT("And the body sits on the floor, not on the caster"),
+		static_cast<float>(Pool->GetActorLocation().Z), 0.f, 5.f);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGSlabMeltsWhereItWasHitTest,
+	"ARPG.World.Fluid.Slabs.AFireballMeltsWhereItLanded",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGSlabMeltsWhereItWasHitTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+	UARPGElementalReactionSubsystem* Reactions =
+		Scope.World->GetSubsystem<UARPGElementalReactionSubsystem>();
+
+	UARPGMagicElement* Earth = MakeElement(GetTransientPackage(), TAG_Element_Earth);
+	UARPGMagicElement* Fire = MakeElement(GetTransientPackage(), TAG_Element_Fire);
+	UARPGMagicElement* Lava = MakeElement(GetTransientPackage(), TAG_Element_Lava);
+
+	UARPGFluidDefinition* LavaDefinition = MakeWater(GetTransientPackage(), Lava);
+	LavaDefinition->Density = 0.0027f;
+
+	UARPGSolidDefinition* EarthDefinition = MakeEarth(Earth);
+	EarthDefinition->MeltsInto = LavaDefinition;
+
+	Fluids->Definitions = { LavaDefinition };
+	Fluids->Solids = { EarthDefinition };
+
+	// A WIDE SLAB, because the bug is a function of how big the thing being hit
+	// is: the contact was the midpoint of the two volumes' centres, so the
+	// further the rim is from the middle the further the melt landed from the
+	// spell. Three metres across is an ordinary wall.
+	AARPGSolidBody* Slab = RaiseSlab(Scope.World, Fluids, EarthDefinition,
+		FVector2D::ZeroVector, 300.0);
+
+	UARPGMagicCombinationTable* Table = NewObject<UARPGMagicCombinationTable>();
+	UARPGMagicCombinationEntry* Entry = NewObject<UARPGMagicCombinationEntry>(Table);
+	Entry->RequiredElements.AddTag(TAG_Element_Fire);
+	Entry->RequiredElements.AddTag(TAG_Element_Earth);
+	Entry->Result = Lava;
+	Entry->Scope = static_cast<int32>(EARPGCombinationScope::Collision);
+	Table->Entries.Add(Entry);
+	Reactions->CombinationTable = Table;
+
+	// ON THE RIM, not over the middle. A small fireball, where the slab is metres
+	// wide -- which is the mismatch the contact point has to notice.
+	const FVector2D Rim(260.f, 0.f);
+	const float Before = Slab->Field.TopAt(Rim);
+	const float Middle = Slab->Field.TopAt(FVector2D::ZeroVector);
+
+	UARPGElementalVolumeComponent* Bolt = MakeShard(Scope.World, Fire,
+		FVector(Rim.X, Rim.Y, EarthDefinition->Thickness), 60.f);
+	Bolt->SetEnergy(400.f);
+
+	Reactions->Resolve(Bolt, Slab->Volume);
+
+	// WHERE IT LANDED. The rim is what the fireball touched, so the rim is what
+	// melts -- and it used to be the point half way to the centre that did.
+	TestTrue(FString::Printf(TEXT("The rim it hit was melted (%.1f from %.1f)"),
+		Slab->Field.TopAt(Rim), Before), Slab->Field.TopAt(Rim) < Before - 1.f);
+
+	TestEqual(FString::Printf(TEXT("And the middle it did not hit was left alone (%.1f)"),
+		Slab->Field.TopAt(FVector2D::ZeroVector)),
+		Slab->Field.TopAt(FVector2D::ZeroVector), Middle, 1.f);
+
+	// AND IT LEFT LAVA THERE, which is the point of melting the rim rather than
+	// the middle: the stuff has to end up somewhere it can run off from.
+	TestTrue(TEXT("Leaving lava on the slab"), Slab->GetFilmVolume() > 0.0);
+	// OUT AT THE RIM, on the new edge the fireball left behind. Not at the point
+	// of impact itself: a bolt with this much behind it takes the corner off the
+	// wall outright -- the outermost cells are melted clean through and have no
+	// top left to hold anything -- and the lava pools on the first cell still
+	// standing. Which is a rim cell with open air beside it, and therefore the
+	// one that pours down the face.
+	TestTrue(TEXT("Leaving lava out at the rim"),
+		Slab->Field.WetAt(FVector2D(200.f, 0.f)) > 0.f);
+
+	TestEqual(TEXT("And none of it over the middle"),
+		Slab->Field.WetAt(FVector2D::ZeroVector), 0.f);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGSlabFilmRunsDownTheSideTest,
+	"ARPG.World.Fluid.Slabs.LavaTakesItsTimeRunningDownTheSide",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGSlabFilmRunsDownTheSideTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	UARPGMagicElement* Earth = MakeElement(GetTransientPackage(), TAG_Element_Earth);
+	UARPGMagicElement* Lava = MakeElement(GetTransientPackage(), TAG_Element_Lava);
+
+	UARPGFluidDefinition* LavaDefinition = MakeWater(GetTransientPackage(), Lava);
+	LavaDefinition->Density = 0.0027f;
+	LavaDefinition->MinimumFilm = 0.4f;
+	LavaDefinition->MinimumArea = 100.f;
+	LavaDefinition->EvaporationRate = 0.f;
+
+	// A SLOW CRAWL, which is the whole point: this is the viscosity, expressed as
+	// the one thing that separates water from lava on a vertical face. Thirty
+	// centimetres a second down a chest-high wall is about four seconds.
+	LavaDefinition->WallSpeed = 30.f;
+
+	UARPGSolidDefinition* EarthDefinition = MakeEarth(Earth);
+	EarthDefinition->MeltsInto = LavaDefinition;
+
+	Fluids->Definitions = { LavaDefinition };
+	Fluids->Solids = { EarthDefinition };
+
+	AARPGSolidBody* Slab = RaiseSlab(Scope.World, Fluids, EarthDefinition,
+		FVector2D::ZeroVector, 200.0);
+
+	const float Top = EarthDefinition->Thickness;
+
+	// Melt at the RIM, so the lava is on cells whose side is open to the air.
+	Slab->NoteContactAt(FVector2D(160.f, 0.f));
+	Slab->ConsumeSurfaceArea(6000.0);
+
+	const double Melted = Slab->GetFilmVolume();
+	TestTrue(TEXT("There is lava on the slab"), Melted > 0.0);
+
+	// One tick to get it over the lip and onto the face.
+	Slab->Tick(1.f / 60.f);
+
+	TestTrue(TEXT("Some of it is on the wall"), Slab->GetWallRuns().Num() > 0);
+
+	UPrimitiveComponent* Drawn = Slab->GetFilmComponent();
+	if (!Drawn)
+	{
+		AddError(TEXT("The slab has no film to draw"));
+		return false;
+	}
+
+	auto LowestDrawn = [&]()
+	{
+		const FBoxSphereBounds Film = Drawn->CalcBounds(Drawn->GetComponentTransform());
+		return static_cast<float>(Film.Origin.Z - Film.BoxExtent.Z);
+	};
+
+	// STILL UP AT THE TOP. This is the report: the whole journey used to happen in
+	// the frame the lava reached the rim -- a full-height sheet appeared at once,
+	// and what reached the floor did so after the half second a STONE takes to
+	// fall, which off a wall this high is no time at all.
+	//
+	// MEASURED ON THE SHEET, not on whether a pool exists. Some of the melt never
+	// gets onto the slab in the first place: a bowl holds what it can and the
+	// excess is handed straight to the ground, so there is a puddle at the foot
+	// from the moment of the cast. What is being timed here is the part that DID
+	// land on top and has to travel.
+	TestTrue(FString::Printf(TEXT("A moment after it goes over, it has barely started (%.1f)"),
+		LowestDrawn()), LowestDrawn() > Top * 0.5f);
+
+	// NOW LET IT RUN. Four seconds of wall at thirty centimetres a second, plus
+	// slack for the film still working its way to the edge.
+	int32 Ticks = 0;
+	while (LowestDrawn() > Top * 0.25f && Ticks < 60 * 30)
+	{
+		Slab->Tick(1.f / 60.f);
+		++Ticks;
+	}
+
+	TestTrue(FString::Printf(TEXT("The sheet gets all the way down (%.1f)"), LowestDrawn()),
+		LowestDrawn() < Top * 0.25f);
+
+	// AND TOOK THE TIME THE VISCOSITY SAYS. Ninety centimetres of face at thirty a
+	// second is three seconds; anything under one means it is not really running
+	// down the wall at all.
+	TestTrue(FString::Printf(TEXT("Taking seconds, not frames (%.2fs)"), Ticks / 60.f),
+		Ticks > 60);
+
+	// AND THE SAME WALL, FASTER, TAKES LESS TIME -- which is what makes the number
+	// a viscosity rather than a constant with a knob beside it.
+	const float Slow = Ticks / 60.f;
+
+	AddInfo(FString::Printf(TEXT("Ran the face in %.2fs at %.0f cm/s"),
+		Slow, LavaDefinition->WallSpeed));
+
+	TestTrue(TEXT("Which is about what the speed says it should be"),
+		Slow > 1.f && Slow < 12.f);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGSlabRunoffConservesVolumeTest,
+	"ARPG.World.Fluid.Slabs.WhatMeltsOffTheTopArrivesAtTheBottom",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGSlabRunoffConservesVolumeTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	UARPGMagicElement* Earth = MakeElement(GetTransientPackage(), TAG_Element_Earth);
+	UARPGMagicElement* Lava = MakeElement(GetTransientPackage(), TAG_Element_Lava);
+
+	UARPGFluidDefinition* LavaDefinition = MakeWater(GetTransientPackage(), Lava);
+	LavaDefinition->Density = 0.0027f;
+	LavaDefinition->MinimumFilm = 0.4f;
+	LavaDefinition->MinimumArea = 100.f;
+	LavaDefinition->EvaporationRate = 0.f;
+	LavaDefinition->RunoffBatch = 0.f;
+	LavaDefinition->WallSpeed = 60.f;
+
+	UARPGSolidDefinition* EarthDefinition = MakeEarth(Earth);
+	EarthDefinition->MeltsInto = LavaDefinition;
+
+	Fluids->Definitions = { LavaDefinition };
+	Fluids->Solids = { EarthDefinition };
+
+	AARPGSolidBody* Slab = RaiseSlab(Scope.World, Fluids, EarthDefinition,
+		FVector2D::ZeroVector, 200.0);
+
+	Slab->NoteContactAt(FVector2D(160.f, 0.f));
+	Slab->ConsumeSurfaceArea(6000.0);
+
+	TestTrue(TEXT("The spell melted something"), Slab->GetFilmVolume() > 0.0);
+
+	// NOTHING IS LOST ON THE WAY DOWN, at any point in the journey. Volume held in
+	// a run creeping down the face is neither on the slab nor on the ground, and
+	// a model that dropped it there would lose most of a spell's output without
+	// anything looking obviously wrong.
+	auto Everywhere = [&]()
+	{
+		// ON THE SLAB, ON THE WALL, IN THE BATCH, OR ON THE FLOOR. Those are the
+		// only four places melt can be, and GetPendingRunoff covers the middle two
+		// -- volume creeping down the face is exactly as undelivered as volume
+		// waiting to be worth a deposit.
+		double Total = Slab->GetFilmVolume() + Slab->GetPendingRunoff();
+
+		for (const AARPGFluidPool* Pool : Fluids->GetPools())
+		{
+			Total += Pool->GetArea() * LavaDefinition->Depth;
+		}
+
+		return Total;
+	};
+
+	// THE BASELINE IS EVERYTHING, TAKEN AT ONCE. Not the film alone: a bowl holds
+	// only what fits and the excess goes straight to the ground, so some of this
+	// spell's lava is already in a pool before the first tick.
+	const double Melted = Everywhere();
+
+	for (int32 Tick = 0; Tick < 60 * 30; ++Tick)
+	{
+		Slab->Tick(1.f / 60.f);
+
+		// Checked THROUGHOUT rather than at the end, because the interesting
+		// moment is mid-flight: that is when the volume is somewhere the old model
+		// had no room to put it.
+		if (Tick % 60 == 0)
+		{
+			TestEqual(FString::Printf(TEXT("All of it is still somewhere at %.0fs"), Tick / 60.f),
+				Everywhere(), Melted, Melted * 0.15);
+		}
+	}
+
+	// AND IT ENDS UP ON THE FLOOR. A drain that conserved volume by never
+	// delivering it would pass the loop above and be useless.
+	TestTrue(TEXT("It ended up in a pool"), Fluids->GetPools().Num() >= 1);
+	TestTrue(TEXT("With the slab drained"), Slab->GetFilmVolume() < Melted * 0.5);
+	TestEqual(TEXT("And all of it accounted for at the end"),
+		Everywhere(), Melted, Melted * 0.15);
+	TestEqual(TEXT("And nothing left hanging on the wall"), Slab->GetWallVolume(), 0.0, 1.0);
 
 	return true;
 }

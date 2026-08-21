@@ -298,10 +298,14 @@ void AARPGSurfaceBody::RebuildFromRing()
 	// Generous headroom above the surface, so a spell arriving from above enters
 	// the broadphase well before it reaches the waterline -- which is what lets
 	// the reaction subsystem wait until it has actually arrived.
+	// PLUS HOWEVER FAR THE FLOOR FALLS under a body that follows it. A puddle
+	// down a ramp reaches metres below the height its outline was laid at, and a
+	// box that only knew about the outline would leave the bottom of it outside
+	// the broadphase -- so a spell landing there would never be noticed.
 	Bounds->SetBoxExtent(FVector(
 		FMath::Max(1.f, Extent.X),
 		FMath::Max(1.f, Extent.Y),
-		FMath::Max(1.f, SurfaceOffset * 4.f + 100.f)));
+		FMath::Max(1.f, SurfaceOffset * 4.f + 100.f + GetBedSpan())));
 
 	Volume->SurfaceHeightOffset = SurfaceOffset;
 
@@ -309,7 +313,8 @@ void AARPGSurfaceBody::RebuildFromRing()
 	// drawn shape cannot drift from the simulated one -- there is only one shape.
 	// Local space, because the actor sits at the centroid at ground height.
 	ARPGFluidGeometry::BuildSlabMesh(Surface, Ring, GetMeshHole(), Centre,
-		/*BottomZ=*/0.f, /*TopZ=*/SurfaceOffset);
+		/*BottomZ=*/-GetUndersideSink(), /*TopZ=*/SurfaceOffset,
+		GetBedSampler(), GetBedDetailSpacing());
 
 	// Re-applied on every rebuild rather than once at setup: on a client the
 	// definition arrives by replication and may land after the first ring, so
@@ -409,8 +414,229 @@ double AARPGFluidPool::GetMinimumArea() const
 	return Definition ? Definition->MinimumArea : 0.0;
 }
 
+void AARPGFluidPool::SampleBed()
+{
+	const UWorld* World = GetWorld();
+	UARPGFluidSurfaceSubsystem* Fluids = World ? World->GetSubsystem<UARPGFluidSurfaceSubsystem>() : nullptr;
+
+	if (!Fluids || Ring.Num() < 3)
+	{
+		return;
+	}
+
+	const float Spacing = FMath::Max(10.f, Fluids->BedSampleSpacing);
+
+	// ONE CELL OF MARGIN, so the interpolation at the very rim of the pool has a
+	// sample on both sides of it rather than clamping to the last one.
+	const FBox2D Box = ARPGFluidGeometry::PolygonBounds(Ring).ExpandBy(Spacing);
+
+	const bool bCovers = BedSpacing > 0.f
+		&& BedOrigin.X <= Box.Min.X && BedOrigin.Y <= Box.Min.Y
+		&& BedOrigin.X + BedSpacing * (BedCountX - 1) >= Box.Max.X
+		&& BedOrigin.Y + BedSpacing * (BedCountY - 1) >= Box.Max.Y;
+
+	if (!bCovers)
+	{
+		// STARTED OVER rather than grown in place. A pool spends its life
+		// SHRINKING -- weather erodes it every tick -- so this is the first build
+		// and the occasional rain, not a path worth an index remap for.
+		BedOrigin = Box.Min;
+		BedSpacing = Spacing;
+		BedCountX = FMath::CeilToInt32(Box.GetSize().X / Spacing) + 1;
+		BedCountY = FMath::CeilToInt32(Box.GetSize().Y / Spacing) + 1;
+
+		BedSamples.Init(0.f, BedCountX * BedCountY);
+		BedKnown.Init(0, BedCountX * BedCountY);
+	}
+
+	float Deepest = 0.f;
+
+	for (int32 Y = 0; Y < BedCountY; ++Y)
+	{
+		for (int32 X = 0; X < BedCountX; ++X)
+		{
+			const int32 At = Y * BedCountX + X;
+			const FVector2D Where = BedOrigin + FVector2D(X * BedSpacing, Y * BedSpacing);
+
+			if (!BedKnown[At])
+			{
+				// FROM THE HEIGHT THE POOL WAS LAID AT, so the probe starts above
+				// the floor it is looking for wherever on the slope this is.
+				float Height = GroundHeight;
+
+				if (Fluids->FindGroundAt(Where, GroundHeight, Height, this))
+				{
+					BedSamples[At] = Height - GroundHeight;
+					BedKnown[At] = 1;
+				}
+				else
+				{
+					// LEFT UNKNOWN rather than called flat. These are the margin
+					// samples just outside the body, over the drop past a ledge --
+					// and answering "the height this pool was laid at" drags the
+					// interpolation at the rim back up to level, lifting the last
+					// few centimetres of a sloped puddle off the floor. Filled in
+					// from real neighbours below instead.
+					BedSamples[At] = 0.f;
+				}
+			}
+
+			// Measured again after the fill below, so a cell that was still
+			// unknown here does not report zero as its depth.
+			(void)Deepest;
+		}
+	}
+
+	// WHAT NOTHING WAS FOUND UNDER takes the nearest height that WAS, spread out
+	// from the real samples a ring at a time. A margin cell over a drop then
+	// continues the slope its neighbours are on rather than flattening it.
+	for (int32 Pass = 0; Pass < 4; ++Pass)
+	{
+		bool bFilled = false;
+
+		for (int32 Y = 0; Y < BedCountY; ++Y)
+		{
+			for (int32 X = 0; X < BedCountX; ++X)
+			{
+				const int32 At = Y * BedCountX + X;
+				if (BedKnown[At])
+				{
+					continue;
+				}
+
+				float Sum = 0.f;
+				int32 Count = 0;
+
+				const FIntPoint Steps[4] = { {1, 0}, {-1, 0}, {0, 1}, {0, -1} };
+				for (const FIntPoint& Step : Steps)
+				{
+					const int32 NX = X + Step.X;
+					const int32 NY = Y + Step.Y;
+
+					if (NX < 0 || NX >= BedCountX || NY < 0 || NY >= BedCountY)
+					{
+						continue;
+					}
+
+					const int32 NeighbourAt = NY * BedCountX + NX;
+					if (BedKnown[NeighbourAt] == 1)
+					{
+						Sum += BedSamples[NeighbourAt];
+						++Count;
+					}
+				}
+
+				if (Count > 0)
+				{
+					BedSamples[At] = Sum / Count;
+
+					// TWO, not one: filled this pass, so the pass after this can
+					// spread from it without this one smearing across the grid in
+					// whatever order the loop happens to run.
+					BedKnown[At] = 2;
+					bFilled = true;
+				}
+			}
+		}
+
+		for (uint8& Known : BedKnown)
+		{
+			if (Known == 2)
+			{
+				Known = 1;
+			}
+		}
+
+		if (!bFilled)
+		{
+			break;
+		}
+	}
+
+	for (int32 Y = 0; Y < BedCountY; ++Y)
+	{
+		for (int32 X = 0; X < BedCountX; ++X)
+		{
+			const FVector2D Where = BedOrigin + FVector2D(X * BedSpacing, Y * BedSpacing);
+
+			// Only what is actually under the body counts toward its bounds.
+			if (ARPGFluidGeometry::PolygonContains(Ring, Where))
+			{
+				Deepest = FMath::Max(Deepest, FMath::Abs(BedSamples[Y * BedCountX + X]));
+			}
+		}
+	}
+
+	BedSpan = Deepest;
+}
+
+float AARPGFluidPool::GetBedOffsetAt(const FVector2D& At) const
+{
+	if (BedSpacing <= 0.f || BedCountX < 2 || BedCountY < 2)
+	{
+		return 0.f;
+	}
+
+	// BILINEAR, so the surface is continuous. Nearest-sample would step the
+	// puddle down a ramp in visible stairs at exactly the spacing of the grid,
+	// which is the artefact this whole path exists to remove.
+	const FVector2D Local = (At - BedOrigin) / BedSpacing;
+
+	const int32 X0 = FMath::Clamp(FMath::FloorToInt32(Local.X), 0, BedCountX - 2);
+	const int32 Y0 = FMath::Clamp(FMath::FloorToInt32(Local.Y), 0, BedCountY - 2);
+
+	const float FracX = FMath::Clamp(static_cast<float>(Local.X) - X0, 0.f, 1.f);
+	const float FracY = FMath::Clamp(static_cast<float>(Local.Y) - Y0, 0.f, 1.f);
+
+	const float A = BedSamples[Y0 * BedCountX + X0];
+	const float B = BedSamples[Y0 * BedCountX + X0 + 1];
+	const float C = BedSamples[(Y0 + 1) * BedCountX + X0];
+	const float D = BedSamples[(Y0 + 1) * BedCountX + X0 + 1];
+
+	return FMath::Lerp(FMath::Lerp(A, B, FracX), FMath::Lerp(C, D, FracX), FracY);
+}
+
+ARPGFluidGeometry::FBedSampler AARPGFluidPool::GetBedSampler() const
+{
+	if (BedSpacing <= 0.f)
+	{
+		return {};
+	}
+
+	return [this](const FVector2D& World) { return static_cast<double>(GetBedOffsetAt(World)); };
+}
+
+double AARPGFluidPool::GetBedDetailSpacing() const
+{
+	// FLAT NEEDS NO INTERIOR VERTICES. A pool on level ground is exactly the mesh
+	// it always was, and pays nothing for a floor that does not vary.
+	if (BedSpan <= KINDA_SMALL_NUMBER)
+	{
+		return 0.0;
+	}
+
+	return BedSpacing;
+}
+
+float AARPGFluidPool::GetSurfaceLevelAt(const FVector2D& At) const
+{
+	// WHERE THE WATERLINE IS *HERE*. A floe asks this to know how high it rides
+	// and the runoff asks it to know what it landed in; both used to get the one
+	// height the pool was laid at, which down a ramp is the wrong end of it.
+	return GetSurfaceHeight() + GetBedOffsetAt(At);
+}
+
+float AARPGFluidPool::GetSurfaceBedAt(const FVector2D& At) const
+{
+	return GroundHeight + GetBedOffsetAt(At);
+}
+
 void AARPGFluidPool::RebuildFromRing()
 {
+	// BEFORE the mesh, which reads it. Cheap on every rebuild after the first:
+	// the grid is kept and only cells nobody has traced for cost anything.
+	SampleBed();
+
 	Super::RebuildFromRing();
 
 	if (!Definition)

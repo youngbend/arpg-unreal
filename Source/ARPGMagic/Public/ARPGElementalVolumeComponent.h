@@ -207,6 +207,16 @@ public:
 	UFUNCTION(BlueprintPure, Category = "ARPG|Volume")
 	FVector GetVolumeLocation() const;
 
+	/**
+	 * Half-extent of what this volume occupies, from its overlap shape.
+	 *
+	 * Beside GetVolumeLocation because the pair is what tells a big body from a
+	 * small one -- and how they compare decides where the two are said to have
+	 * met. See the reaction subsystem's contact point.
+	 */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Elemental")
+	FVector GetVolumeExtent() const;
+
 	/** Every other volume currently overlapping this one. */
 	UFUNCTION(BlueprintCallable, Category = "ARPG|Volume")
 	TArray<UARPGElementalVolumeComponent*> GetOverlappingVolumes() const;

@@ -130,6 +130,14 @@ SURFACES = [
         # FULLY OPAQUE both ways. Every other surface here is a fluid or a pane
         # of one and reads correctly as translucent; a wall of earth that you can
         # see through is not cover, and cover is the entire point of it.
+        #
+        # AND THAT MEANS THE BLEND MODE, not just the number. Opacity 1 on a
+        # TRANSLUCENT material is still translucent: it writes no depth and sorts
+        # per object rather than per pixel, so a slab draws its own far side over
+        # its near one and reads as a scrambled box. That is what "opaque" was
+        # always meant to say here, and saying it only in the opacity pin is how
+        # every surface in this file ended up blended.
+        "opaque": True,
         "opacity_facing": 1.0,
         "opacity_grazing": 1.0,
         "fresnel_exponent": 1.0,
@@ -140,6 +148,7 @@ SURFACES = [
         "roughness": 0.55,
         # OPAQUE, unlike water. You do not see the ground through molten rock, and
         # a translucent lava pool would read as tinted glass over the floor.
+        "opaque": True,
         "opacity_facing": 1.0,
         "opacity_grazing": 1.0,
         "fresnel_exponent": 2.0,
@@ -153,6 +162,7 @@ SURFACES = [
         # visual difference between it and the earth slab beside it. Both are
         # rock you stand on; only one of them was liquid an instant ago.
         "roughness": 0.08,
+        "opaque": True,
         "opacity_facing": 1.0,
         "opacity_grazing": 1.0,
         "fresnel_exponent": 1.0,
@@ -171,12 +181,26 @@ def build_surface(spec):
     material = ensure(MATERIAL_DIR, spec["name"], unreal.Material,
                       unreal.MaterialFactoryNew())
 
-    material.set_editor_property("blend_mode", unreal.BlendMode.BLEND_TRANSLUCENT)
+    # PER SURFACE, because three of these are rock. A blend mode is not a
+    # brightness knob: a translucent material writes no depth and is sorted one
+    # whole object at a time, so a solid drawn with one shows its own back faces
+    # through its front and interleaves wrongly with every other body near it.
+    # Only the ones you are actually meant to see into are blended.
+    opaque = spec.get("opaque", False)
 
-    # TWO SIDED on purpose. A body is a closed slab, so in principle you never see
-    # its backfaces -- but the walls of an eroded hole are wound inward, and a
-    # placeholder that vanishes when you look into the gap wastes an afternoon.
-    material.set_editor_property("two_sided", True)
+    material.set_editor_property(
+        "blend_mode",
+        unreal.BlendMode.BLEND_OPAQUE if opaque else unreal.BlendMode.BLEND_TRANSLUCENT)
+
+    # TWO SIDED ONLY WHERE YOU SEE THE INSIDE. The original reason was that the
+    # walls of an eroded hole were wound inward -- but that was the bug in
+    # BuildFieldMesh/BuildSlabMesh, where every face pointed at the body's own
+    # interior, and it is fixed: Unreal is left-handed and takes a triangle's
+    # normal as (C - A) x (B - A). A closed opaque body now needs no help, and
+    # leaving it two-sided would hide the next winding regression the same way
+    # this one was hidden. A translucent fluid keeps it, because looking down
+    # into a pool genuinely does mean looking at its far wall from inside.
+    material.set_editor_property("two_sided", not opaque)
 
     colour = unreal.MaterialEditingLibrary.create_material_expression(
         material, unreal.MaterialExpressionVectorParameter, -600, 0)
@@ -241,6 +265,8 @@ def build_surface(spec):
 FLUIDS = [
     {
         "name": "DA_Fluid_Water", "element": "Water",
+        # Water off a rim is nearly a fall: it sheets down a wall in a moment.
+        "wall_speed": 220.0,
         # Ankle deep. The surface a floe forms on and a character wades through.
         "depth": 20.0,
         "minimum_area": 2500.0,
@@ -277,6 +303,10 @@ FLUIDS = [
     },
     {
         "name": "DA_Fluid_Lava", "element": "Lava",
+        # THE SLOWEST THING HERE, and the one this number was added for. Molten rock
+        # does not run off a wall, it CREEPS -- a metre of earth wall takes the
+        # better part of five seconds, which is the whole read of the material.
+        "wall_speed": 22.0,
         # DEEPER THAN WATER, because molten rock does not spread thin: the same
         # volume covers less ground and stands taller on it. Depth is also the
         # exchange rate between volume and area for anything that melts back into
@@ -627,6 +657,7 @@ def main():
         fluid.set_editor_property("yield_slope", spec["yield_slope"])
         fluid.set_editor_property("minimum_film", spec["minimum_film"])
         fluid.set_editor_property("runoff_batch", spec["runoff_batch"])
+        fluid.set_editor_property("wall_speed", spec.get("wall_speed", 200.0))
         fluid.set_editor_property("surface_material", surfaces[spec["surface"]])
 
         save(fluid, "{}/{}".format(FLUID_DIR, spec["name"]))

@@ -68,6 +68,33 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ARPG|Discharge")
 	float SpawnHeightOffset = 60.f;
 
+	/**
+	 * Fire where the player is LOOKING rather than where the character happens to
+	 * be facing. The character orients to its movement, so actor-forward throws a
+	 * bolt sideways whenever the cast comes out mid-strafe -- which is most of
+	 * them. Off by default: only the types that TRAVEL care where they were
+	 * aimed, and an emanation or a cloak has no direction to get wrong.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ARPG|Discharge")
+	bool bAimAlongView = false;
+
+	/**
+	 * Degrees to tilt the aim UP off the view. The follow camera sits above and
+	 * behind the caster looking slightly down, so a shot along the view alone
+	 * buries itself in the ground a few metres out.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "ARPG|Discharge",
+		meta = (ClampMin = "-89.0", ClampMax = "89.0", EditCondition = "bAimAlongView"))
+	float AimPitchOffset = 0.f;
+
+	/**
+	 * The view rotation a discharge actually fires along. Separate from
+	 * GetAimDirection so the tilt is testable without a controller: the rotation
+	 * a pawn reports arrives unnormalised (a pitch of -20 comes back as 340), and
+	 * adding to that raw is how a nudge upward becomes a shot at the sky.
+	 */
+	static FVector ApplyAimPitch(const FRotator& ViewRotation, float PitchOffset);
+
 protected:
 	UFUNCTION()
 	void OnChargeReleased(float ChargeFraction, bool bForced);
@@ -86,6 +113,9 @@ protected:
 
 	/** Where the effect appears and which way it points. */
 	void GetSpawnTransform(FVector& OutOrigin, FVector& OutDirection) const;
+
+	/** Which way this caster is pointing the cast. */
+	FVector GetAimDirection(const AActor& Avatar) const;
 
 	UPROPERTY(Transient)
 	TObjectPtr<class UARPGAbilityTask_ChargeDischarge> ChargeTask;

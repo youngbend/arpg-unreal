@@ -480,9 +480,18 @@ namespace
 	 * Wound so the face points AWAY from the body's interior for an outer ring
 	 * given counter-clockwise, and into the gap for a hole given clockwise --
 	 * which is the winding each already has by the time it gets here.
+	 *
+	 * WHICH WAY A TRIANGLE FACES IS NOT THE RIGHT-HAND RULE HERE. Unreal's
+	 * coordinate system is left-handed, so FDynamicMesh3 takes a triangle's
+	 * normal as (C - A) x (B - A) -- the reverse of the cross product every
+	 * other library uses. See VectorUtil::Normal, which says so in a comment.
+	 * Wound the other way every face in the body points at its own interior:
+	 * the top is a backface you see straight through to the underside, and the
+	 * complex collision cooked from it has no upward surface to land on.
 	 */
 	void AppendWall(UE::Geometry::FDynamicMesh3& Mesh, const TArray<FVector2D>& Ring,
-		const FVector2D& Origin, double BottomZ, double TopZ)
+		const FVector2D& Origin, double BottomZ, double TopZ,
+		const ARPGFluidGeometry::FBedSampler& Bed)
 	{
 		const int32 Count = Ring.Num();
 
@@ -491,24 +500,31 @@ namespace
 			const FVector2D& A = Ring[Index];
 			const FVector2D& B = Ring[(Index + 1) % Count];
 
+			// THE WALL FOLLOWS THE FLOOR TOO. Lifting only the cap would leave the
+			// rim of a puddle on a ramp joined to a skirt that stayed level, which
+			// is a worse artefact than the flat pool it replaced.
+			const double LiftA = Bed ? Bed(A + Origin) : 0.0;
+			const double LiftB = Bed ? Bed(B + Origin) : 0.0;
+
 			// Fresh vertices per quad rather than shared with the cap, so the lip
 			// of the slab is a HARD edge. Sharing them would average the cap's
 			// upward normal into the wall's sideways one and round the whole thing
 			// off, which on a 20cm puddle reads as a blob rather than as water
 			// with an edge.
-			const int32 TopA = AppendSurfaceVertex(Mesh, Origin, A.X, A.Y, TopZ);
-			const int32 TopB = AppendSurfaceVertex(Mesh, Origin, B.X, B.Y, TopZ);
-			const int32 BottomA = AppendSurfaceVertex(Mesh, Origin, A.X, A.Y, BottomZ);
-			const int32 BottomB = AppendSurfaceVertex(Mesh, Origin, B.X, B.Y, BottomZ);
+			const int32 TopA = AppendSurfaceVertex(Mesh, Origin, A.X, A.Y, TopZ + LiftA);
+			const int32 TopB = AppendSurfaceVertex(Mesh, Origin, B.X, B.Y, TopZ + LiftB);
+			const int32 BottomA = AppendSurfaceVertex(Mesh, Origin, A.X, A.Y, BottomZ + LiftA);
+			const int32 BottomB = AppendSurfaceVertex(Mesh, Origin, B.X, B.Y, BottomZ + LiftB);
 
-			Mesh.AppendTriangle(TopA, BottomA, BottomB);
-			Mesh.AppendTriangle(TopA, BottomB, TopB);
+			Mesh.AppendTriangle(TopA, BottomB, BottomA);
+			Mesh.AppendTriangle(TopA, TopB, BottomB);
 		}
 	}
 }
 
 void BuildSlabMesh(UDynamicMeshComponent* Component, const TArray<FVector2D>& Ring,
-	const TArray<FVector2D>& Hole, const FVector2D& Origin, double BottomZ, double TopZ)
+	const TArray<FVector2D>& Hole, const FVector2D& Origin, double BottomZ, double TopZ,
+	const FBedSampler& Bed, double DetailSpacing)
 {
 	using namespace UE::Geometry;
 
@@ -521,8 +537,31 @@ void BuildSlabMesh(UDynamicMeshComponent* Component, const TArray<FVector2D>& Ri
 	Mesh.EnableVertexNormals(FVector3f::UnitZ());
 	Mesh.EnableVertexUVs(FVector2f::Zero());
 
+	// INTO THE COMPONENT'S OWN SPACE FIRST, which is what Origin is for.
+	//
+	// THE MESH USED TO BE BUILT IN WORLD COORDINATES AND THEN DRAWN AS LOCAL
+	// ONES. The actor sits at Origin, so every vertex came out displaced by
+	// exactly however far the body was from the world origin: a puddle in the
+	// middle of a stage looked close enough to right, and one out at the edge was
+	// drawn at twice its distance and left the map. BuildFieldMesh has always
+	// subtracted this -- see the Centre it takes off every cell -- and the two
+	// paths simply disagreed about whose space the ring was in.
+	TArray<FVector2D> LocalRing;
+	LocalRing.Reserve(Ring.Num());
+	for (const FVector2D& Point : Ring)
+	{
+		LocalRing.Add(Point - Origin);
+	}
+
+	TArray<FVector2D> LocalHole;
+	LocalHole.Reserve(Hole.Num());
+	for (const FVector2D& Point : Hole)
+	{
+		LocalHole.Add(Point - Origin);
+	}
+
 	FGeneralPolygon2d Polygon;
-	if (!ToGeneralPolygon(Ring, Polygon))
+	if (!ToGeneralPolygon(LocalRing, Polygon))
 	{
 		// Eroded away to nothing. An EMPTY mesh rather than an early return: the
 		// component is still showing the last shape it was given, and leaving it
@@ -535,10 +574,10 @@ void BuildSlabMesh(UDynamicMeshComponent* Component, const TArray<FVector2D>& Ri
 	// The hole has to wind against the outline for the fill rule to read it as a
 	// gap rather than as a second body sitting inside the first.
 	TArray<FVector2D> WoundHole;
-	if (Hole.Num() >= 3)
+	if (LocalHole.Num() >= 3)
 	{
 		FPolygon2d HolePolygon;
-		for (const FVector2D& Point : Hole)
+		for (const FVector2D& Point : LocalHole)
 		{
 			HolePolygon.AppendVertex(FVector2d(Point.X, Point.Y));
 		}
@@ -564,6 +603,37 @@ void BuildSlabMesh(UDynamicMeshComponent* Component, const TArray<FVector2D>& Ri
 	Triangulator.FillRule = FConstrainedDelaunay2d::EFillRule::Positive;
 	Triangulator.Add(Polygon);
 
+	// INTERIOR POINTS ON A GRID, so the cap has somewhere to bend.
+	//
+	// A constrained triangulation puts vertices only where the OUTLINE has them,
+	// which for a puddle is a ring of sixteen and nothing in the middle. That is
+	// exactly right for a flat body and useless for one following the floor: the
+	// whole interior would be a handful of triangles spanning metres, and any
+	// floor that is not a single plane would be cut straight across. A plane it
+	// still reproduces exactly -- linear interpolation of a linear surface --
+	// which is why this stays off until a bed sampler asks for it.
+	if (Bed && DetailSpacing > 0.0)
+	{
+		const FBox2D Extent = PolygonBounds(LocalRing);
+
+		for (double X = Extent.Min.X; X <= Extent.Max.X; X += DetailSpacing)
+		{
+			for (double Y = Extent.Min.Y; Y <= Extent.Max.Y; Y += DetailSpacing)
+			{
+				const FVector2D Point(X, Y);
+
+				// Inside the body and clear of its edge. A Steiner point sitting
+				// on the outline fights the constraint edge it duplicates, and the
+				// triangulator is entitled to refuse the whole polygon over it.
+				if (PolygonContains(LocalRing, Point)
+					&& (LocalHole.Num() < 3 || !PolygonContains(LocalHole, Point)))
+				{
+					Triangulator.Vertices.Add(FVector2d(X, Y));
+				}
+			}
+		}
+	}
+
 	if (!Triangulator.Triangulate() || Triangulator.Triangles.Num() == 0)
 	{
 		Component->SetMesh(FDynamicMesh3());
@@ -574,40 +644,49 @@ void BuildSlabMesh(UDynamicMeshComponent* Component, const TArray<FVector2D>& Ri
 	const int32 CapCount = Triangulator.Vertices.Num();
 	const bool bHasDepth = TopZ - BottomZ > UE_DOUBLE_SMALL_NUMBER;
 
+	// LIFTED ONTO THE FLOOR, vertex by vertex. Both caps take the same lift, so
+	// the body keeps its thickness everywhere and a puddle on a ramp is a sheet
+	// down the ramp rather than a wedge that thins out at the top of it.
 	for (const FVector2d& Vertex : Triangulator.Vertices)
 	{
-		AppendSurfaceVertex(Mesh, Origin, Vertex.X, Vertex.Y, TopZ);
+		const double Lift = Bed ? Bed(FVector2D(Vertex.X, Vertex.Y) + Origin) : 0.0;
+		AppendSurfaceVertex(Mesh, Origin, Vertex.X, Vertex.Y, TopZ + Lift);
 	}
 
 	if (bHasDepth)
 	{
 		for (const FVector2d& Vertex : Triangulator.Vertices)
 		{
-			AppendSurfaceVertex(Mesh, Origin, Vertex.X, Vertex.Y, BottomZ);
+			const double Lift = Bed ? Bed(FVector2D(Vertex.X, Vertex.Y) + Origin) : 0.0;
+			AppendSurfaceVertex(Mesh, Origin, Vertex.X, Vertex.Y, BottomZ + Lift);
 		}
 	}
 
 	for (const FIndex3i& Triangle : Triangulator.Triangles)
 	{
-		Mesh.AppendTriangle(Triangle.A, Triangle.B, Triangle.C);
+		// REVERSED FROM THE TRIANGULATOR'S OWN WINDING, which is the usual
+		// counter-clockwise. Under Unreal's left-handed rule -- see AppendWall --
+		// that winding points a cap DOWN, so the surface everything is meant to
+		// be seen and stood on faced into the body.
+		Mesh.AppendTriangle(Triangle.A, Triangle.C, Triangle.B);
 
 		if (bHasDepth)
 		{
-			// Reversed, so the underside faces DOWN. A one-sided slab whose floor
-			// pointed up is invisible from below and lets you see into it through
-			// the walls.
-			Mesh.AppendTriangle(Triangle.A + CapCount, Triangle.C + CapCount,
-				Triangle.B + CapCount);
+			// And the underside is the triangulator's winding untouched, so it
+			// faces DOWN. A slab whose floor pointed up is invisible from below
+			// and lets you see into it through the walls.
+			Mesh.AppendTriangle(Triangle.A + CapCount, Triangle.B + CapCount,
+				Triangle.C + CapCount);
 		}
 	}
 
 	if (bHasDepth)
 	{
-		AppendWall(Mesh, FromPolygon(Polygon.GetOuter()), Origin, BottomZ, TopZ);
+		AppendWall(Mesh, FromPolygon(Polygon.GetOuter()), Origin, BottomZ, TopZ, Bed);
 
 		if (WoundHole.Num() >= 3)
 		{
-			AppendWall(Mesh, WoundHole, Origin, BottomZ, TopZ);
+			AppendWall(Mesh, WoundHole, Origin, BottomZ, TopZ, Bed);
 		}
 	}
 
@@ -615,6 +694,147 @@ void BuildSlabMesh(UDynamicMeshComponent* Component, const TArray<FVector2D>& Ri
 
 	Component->SetMesh(MoveTemp(Mesh));
 	Component->NotifyMeshUpdated();
+}
+
+namespace
+{
+	/**
+	 * One layer of cells drawn as a box each: a cap top, a cap bottom, and a face
+	 * on any side where this cell's span is not covered by its neighbour's.
+	 *
+	 * SHARED BY THE ROCK AND THE LAVA LYING ON IT, which are the same shape
+	 * problem asked of two different pairs of heights -- the solid runs Bottom to
+	 * Top, the film runs Top to Top plus however deep it lies. Written once
+	 * because the side-face rule is the part that is easy to get wrong, and
+	 * getting it wrong in one of two copies is how a melted slab came to be open
+	 * at every terrace a spell had cut into it.
+	 *
+	 * Spans are LOCAL Z in centimetres, indexed as the field is. A cell whose
+	 * Present is false is a gap, and its neighbours draw a full-height face at it.
+	 */
+	void BuildCellLayer(UE::Geometry::FDynamicMesh3& Mesh, const FARPGSolidField& Field,
+		const FVector2D& Origin, const TArray<bool>& Present,
+		const TArray<double>& BottomOf, const TArray<double>& TopOf)
+	{
+		const float Half = Field.CellSize * 0.5f;
+
+		// A CELL AT A TIME, and that is the point. Nothing here triangulates an
+		// outline, so nothing here can grow: the worst case is a fixed handful of
+		// triangles per cell however many spells have landed on the floe. The Godot
+		// pathology this replaced was unbounded by construction.
+		for (int32 Y = 0; Y < Field.CountY; ++Y)
+		{
+			for (int32 X = 0; X < Field.CountX; ++X)
+			{
+				const int32 At = Field.Index(X, Y);
+
+				if (!Present[At] || TopOf[At] - BottomOf[At] <= UE_DOUBLE_SMALL_NUMBER)
+				{
+					continue;
+				}
+
+				const FVector2D Centre = Field.CentreOf(X, Y) - Origin;
+				const double TopZ = TopOf[At];
+				const double BottomZ = BottomOf[At];
+
+				const FVector2D Corners[4] = {
+					Centre + FVector2D(-Half, -Half),
+					Centre + FVector2D(Half, -Half),
+					Centre + FVector2D(Half, Half),
+					Centre + FVector2D(-Half, Half)
+				};
+
+				int32 TopVerts[4];
+				int32 BottomVerts[4];
+
+				for (int32 Corner = 0; Corner < 4; ++Corner)
+				{
+					TopVerts[Corner] = AppendSurfaceVertex(Mesh, Origin,
+						Corners[Corner].X, Corners[Corner].Y, TopZ);
+					BottomVerts[Corner] = AppendSurfaceVertex(Mesh, Origin,
+						Corners[Corner].X, Corners[Corner].Y, BottomZ);
+				}
+
+				// CLOCKWISE IN XY, which is what points a face UP here. Unreal is
+				// left-handed and FDynamicMesh3 normals are (C - A) x (B - A) --
+				// see AppendWall. The counter-clockwise winding that reads as "up"
+				// everywhere else turns the cell inside out.
+				Mesh.AppendTriangle(TopVerts[0], TopVerts[2], TopVerts[1]);
+				Mesh.AppendTriangle(TopVerts[0], TopVerts[3], TopVerts[2]);
+
+				Mesh.AppendTriangle(BottomVerts[0], BottomVerts[1], BottomVerts[2]);
+				Mesh.AppendTriangle(BottomVerts[0], BottomVerts[2], BottomVerts[3]);
+
+				// A FACE WHEREVER THIS CELL STANDS PROUD OF ITS NEIGHBOUR, which is
+				// not the same question as whether the neighbour is there at all.
+				//
+				// THIS USED TO SKIP EVERY PRESENT NEIGHBOUR, on the reasoning that
+				// between two iced cells there is nothing to see. True only while
+				// the layer is flat. The moment a spell melts a bowl into it the
+				// cells have DIFFERENT tops, and the step between them is a face
+				// nobody drew -- so the terrace it cut was open at the side and you
+				// could see, and walk, straight into the middle of the rock.
+				//
+				// The exposed band is whatever part of this cell's span the
+				// neighbour's own span does not cover. An absent neighbour covers
+				// nothing, which is the old behaviour falling out of the general
+				// rule rather than sitting beside it as a case.
+				static const FIntPoint Steps[4] = { {0, -1}, {1, 0}, {0, 1}, {-1, 0} };
+
+				// FRESH VERTICES PER BAND rather than the cap's, so the lip of
+				// every terrace is a HARD edge -- see AppendWall, which does the
+				// same for the same reason. Sharing them averaged the cap's upward
+				// normal into the wall's sideways one and rounded a cut in rock
+				// into a slump.
+				auto AppendBand = [&](int32 CornerA, int32 CornerB, double FromZ, double ToZ)
+				{
+					if (ToZ - FromZ <= UE_DOUBLE_SMALL_NUMBER)
+					{
+						return;
+					}
+
+					const FVector2D& PA = Corners[CornerA];
+					const FVector2D& PB = Corners[CornerB];
+
+					const int32 TA = AppendSurfaceVertex(Mesh, Origin, PA.X, PA.Y, ToZ);
+					const int32 TB = AppendSurfaceVertex(Mesh, Origin, PB.X, PB.Y, ToZ);
+					const int32 BA = AppendSurfaceVertex(Mesh, Origin, PA.X, PA.Y, FromZ);
+					const int32 BB = AppendSurfaceVertex(Mesh, Origin, PB.X, PB.Y, FromZ);
+
+					Mesh.AppendTriangle(TA, BB, BA);
+					Mesh.AppendTriangle(TA, TB, BB);
+				};
+
+				for (int32 Side = 0; Side < 4; ++Side)
+				{
+					const int32 NeighbourX = X + Steps[Side].X;
+					const int32 NeighbourY = Y + Steps[Side].Y;
+
+					const bool bInside = NeighbourX >= 0 && NeighbourX < Field.CountX
+						&& NeighbourY >= 0 && NeighbourY < Field.CountY;
+
+					const int32 NeighbourAt = bInside ? Field.Index(NeighbourX, NeighbourY) : 0;
+					const bool bNeighbour = bInside && Present[NeighbourAt];
+
+					// COLLAPSED ONTO THIS CELL'S FLOOR when there is no neighbour,
+					// so the two bands below come out as the one full-height face
+					// the silhouette wants without a branch of their own.
+					const double NeighbourTop = bNeighbour ? TopOf[NeighbourAt] : BottomZ;
+					const double NeighbourBottom = bNeighbour ? BottomOf[NeighbourAt] : BottomZ;
+
+					const int32 A = Side;
+					const int32 B = (Side + 1) % 4;
+
+					// Standing above the neighbour: the riser of a terrace.
+					AppendBand(A, B, FMath::Max(BottomZ, NeighbourTop), TopZ);
+
+					// And hanging below it, which is the same step seen from a cell
+					// melted from underneath rather than from on top.
+					AppendBand(A, B, BottomZ, FMath::Min(TopZ, NeighbourBottom));
+				}
+			}
+		}
+	}
 }
 
 void BuildFieldMesh(UDynamicMeshComponent* Component, const FARPGSolidField& Field,
@@ -638,73 +858,169 @@ void BuildFieldMesh(UDynamicMeshComponent* Component, const FARPGSolidField& Fie
 		return;
 	}
 
-	const float Half = Field.CellSize * 0.5f;
+	const int32 Cells = Field.CountX * Field.CountY;
 
-	// A CELL AT A TIME, and that is the point. Nothing here triangulates an
-	// outline, so nothing here can grow: the worst case is a fixed handful of
-	// triangles per cell however many spells have landed on the floe. The Godot
-	// pathology this replaced was unbounded by construction.
+	TArray<bool> Present;
+	TArray<double> BottomOf;
+	TArray<double> TopOf;
+	Present.SetNumUninitialized(Cells);
+	BottomOf.SetNumUninitialized(Cells);
+	TopOf.SetNumUninitialized(Cells);
+
 	for (int32 Y = 0; Y < Field.CountY; ++Y)
 	{
 		for (int32 X = 0; X < Field.CountX; ++X)
 		{
-			if (!Field.IsSolid(X, Y))
-			{
-				continue;
-			}
-
 			const int32 At = Field.Index(X, Y);
-			const FVector2D Centre = Field.CentreOf(X, Y) - Origin;
+			Present[At] = Field.IsSolid(X, Y);
+			BottomOf[At] = Field.Bottom[At] * 0.1;
+			TopOf[At] = Field.Top[At] * 0.1;
+		}
+	}
 
-			const double TopZ = Field.Top[At] * 0.1;
-			const double BottomZ = Field.Bottom[At] * 0.1;
+	BuildCellLayer(Mesh, Field, Origin, Present, BottomOf, TopOf);
 
-			const FVector2D Corners[4] = {
-				Centre + FVector2D(-Half, -Half),
-				Centre + FVector2D(Half, -Half),
-				Centre + FVector2D(Half, Half),
-				Centre + FVector2D(-Half, Half)
-			};
+	FMeshNormals::QuickComputeVertexNormals(Mesh);
 
-			int32 TopVerts[4];
-			int32 BottomVerts[4];
+	Component->SetMesh(MoveTemp(Mesh));
+	Component->NotifyMeshUpdated();
+}
 
-			for (int32 Corner = 0; Corner < 4; ++Corner)
+void BuildFilmMesh(UDynamicMeshComponent* Component, const FARPGSolidField& Field,
+	const FVector2D& Origin, float MinimumFilm, TArrayView<const FARPGWallRun> Runs)
+{
+	using namespace UE::Geometry;
+
+	if (!Component)
+	{
+		return;
+	}
+
+	FDynamicMesh3 Mesh;
+	Mesh.EnableVertexNormals(FVector3f::UnitZ());
+	Mesh.EnableVertexUVs(FVector2f::Zero());
+
+	// EMPTY RATHER THAN EARLY, on the same reasoning as an eroded pool: the
+	// component is still showing the last film it was given, and returning here
+	// is how lava that has finished running off stays lying on the rock forever.
+	if (!Field.IsValidField() || (!Field.HasWet() && Runs.Num() == 0))
+	{
+		Component->SetMesh(MoveTemp(Mesh));
+		Component->NotifyMeshUpdated();
+		return;
+	}
+
+	const int32 Cells = Field.CountX * Field.CountY;
+
+	TArray<bool> Present;
+	TArray<double> BottomOf;
+	TArray<double> TopOf;
+	Present.SetNumUninitialized(Cells);
+	BottomOf.SetNumUninitialized(Cells);
+	TopOf.SetNumUninitialized(Cells);
+
+	// A FILM TOO THIN TO SEE IS NOT WORTH A TRIANGLE, and the fluid already names
+	// the depth below which it does not count as lying anywhere -- the same number
+	// the flow solver stops moving at, so the drawn film and the simulated one
+	// agree about where the edge of the wet is.
+	const double Floor = FMath::Max(0.f, MinimumFilm);
+
+	for (int32 Y = 0; Y < Field.CountY; ++Y)
+	{
+		for (int32 X = 0; X < Field.CountX; ++X)
+		{
+			const int32 At = Field.Index(X, Y);
+			const double Depth = Field.Wet.IsValidIndex(At) ? Field.Wet[At] : 0.0;
+
+			Present[At] = Field.IsSolid(X, Y) && Depth > Floor;
+
+			// ON TOP OF THE ROCK, so the film sits in whatever bowl the rock was
+			// cut into and its own top is the rock's plus how deep it lies. Both
+			// read the same heightfield, so lava cannot drift off the surface it
+			// is lying on.
+			BottomOf[At] = Field.Top[At] * 0.1;
+			TopOf[At] = BottomOf[At] + Depth;
+		}
+	}
+
+	BuildCellLayer(Mesh, Field, Origin, Present, BottomOf, TopOf);
+
+	// AND OVER THE EDGE. Everything above lies on cell TOPS, which is the whole of
+	// what a heightfield can hold -- z = f(x, y) has no room for a vertical face,
+	// so fluid reaching the rim of a slab leaves the field entirely.
+	//
+	// EACH RUN ONLY AS FAR AS IT HAS GOT. Drawing a full-height sheet the instant
+	// a rim cell went wet was the first version of this, and it made every wall
+	// read as though the lava had teleported to the bottom -- which is exactly
+	// what the timed fall underneath it was doing. A run knows where its leading
+	// edge is; the sheet stops there, and creeps as it does.
+	const float Half = Field.CellSize * 0.5f;
+
+	for (const FARPGWallRun& Run : Runs)
+	{
+		const FIntPoint Cell = Field.CellAt(Run.At);
+		if (Cell.X < 0)
+		{
+			continue;
+		}
+
+		const int32 At = Field.Index(Cell.X, Cell.Y);
+		const double RockTop = Field.Top[At] * 0.1;
+
+		if (RockTop - Run.Front <= UE_DOUBLE_SMALL_NUMBER)
+		{
+			continue; // just gone over; nothing to see yet
+		}
+
+		const FVector2D Centre = Field.CentreOf(Cell.X, Cell.Y) - Origin;
+
+		// The two corners of the side it went over, in the winding the faces use.
+		const FVector2D Corners[4] = {
+			Centre + FVector2D(-Half, -Half),
+			Centre + FVector2D(Half, -Half),
+			Centre + FVector2D(Half, Half),
+			Centre + FVector2D(-Half, Half)
+		};
+
+		static const FIntPoint Steps[4] = { {0, -1}, {1, 0}, {0, 1}, {-1, 0} };
+
+		int32 Side = INDEX_NONE;
+		for (int32 Index = 0; Index < 4; ++Index)
+		{
+			if (Steps[Index] == Run.Side)
 			{
-				TopVerts[Corner] = AppendSurfaceVertex(Mesh, Origin,
-					Corners[Corner].X, Corners[Corner].Y, TopZ);
-				BottomVerts[Corner] = AppendSurfaceVertex(Mesh, Origin,
-					Corners[Corner].X, Corners[Corner].Y, BottomZ);
-			}
-
-			Mesh.AppendTriangle(TopVerts[0], TopVerts[1], TopVerts[2]);
-			Mesh.AppendTriangle(TopVerts[0], TopVerts[2], TopVerts[3]);
-
-			Mesh.AppendTriangle(BottomVerts[0], BottomVerts[2], BottomVerts[1]);
-			Mesh.AppendTriangle(BottomVerts[0], BottomVerts[3], BottomVerts[2]);
-
-			// A WALL ONLY WHERE THE ICE STOPS. Between two iced cells there is
-			// nothing to see and a face there would be interior geometry the
-			// collision cook has to chew through for no reason. The neighbours
-			// that are missing are the silhouette -- and the rim of a hole is the
-			// same test, which is how a hole gets its inside face without being a
-			// thing anyone tracked.
-			static const FIntPoint Steps[4] = { {0, -1}, {1, 0}, {0, 1}, {-1, 0} };
-
-			for (int32 Side = 0; Side < 4; ++Side)
-			{
-				if (Field.IsSolid(X + Steps[Side].X, Y + Steps[Side].Y))
-				{
-					continue;
-				}
-
-				const int32 A = Side;
-				const int32 B = (Side + 1) % 4;
-
-				Mesh.AppendTriangle(TopVerts[A], BottomVerts[A], BottomVerts[B]);
-				Mesh.AppendTriangle(TopVerts[A], BottomVerts[B], TopVerts[B]);
+				Side = Index;
+				break;
 			}
 		}
+
+		if (Side == INDEX_NONE)
+		{
+			continue;
+		}
+
+		const int32 A = Side;
+		const int32 B = (Side + 1) % 4;
+
+		// OUTWARD BY ITS OWN THICKNESS, along the side's normal, so the sheet
+		// stands off the face by as much as the film stands off the top. Any less
+		// and it would be in the same plane as the rock and shimmer against it.
+		const FVector2D Along = Corners[B] - Corners[A];
+		const FVector2D Out = FVector2D(Along.Y, -Along.X).GetSafeNormal() * Run.Thickness;
+
+		const FVector2D PA = Corners[A] + Out;
+		const FVector2D PB = Corners[B] + Out;
+
+		const int32 TA = AppendSurfaceVertex(Mesh, Origin, PA.X, PA.Y, RockTop);
+		const int32 TB = AppendSurfaceVertex(Mesh, Origin, PB.X, PB.Y, RockTop);
+		const int32 BA = AppendSurfaceVertex(Mesh, Origin, PA.X, PA.Y, Run.Front);
+		const int32 BB = AppendSurfaceVertex(Mesh, Origin, PB.X, PB.Y, Run.Front);
+
+		// Wound to face out of the slab -- see AppendWall. Nobody is ever behind a
+		// sheet on the outside of a wall, so one face is all it needs and the
+		// material need not be two-sided to show it.
+		Mesh.AppendTriangle(TA, BB, BA);
+		Mesh.AppendTriangle(TA, TB, BB);
 	}
 
 	FMeshNormals::QuickComputeVertexNormals(Mesh);

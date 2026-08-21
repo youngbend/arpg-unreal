@@ -9,6 +9,7 @@
 #include "ARPGWorld.h"
 #include "Components/BoxComponent.h"
 #include "Components/DynamicMeshComponent.h"
+#include "DynamicMesh/DynamicMesh3.h"
 #include "Engine/OverlapResult.h"
 #include "Engine/World.h"
 #include "GameFramework/Pawn.h"
@@ -30,6 +31,70 @@ AARPGSolidBody::AARPGSolidBody()
 	// The outline replicates at its own rate while drifting; the transform between
 	// those is the client's to smooth.
 	SetNetUpdateFrequency(10.f);
+
+	// WHAT HAS MELTED, drawn separately from what it melted off. See the header.
+	Film = CreateDefaultSubobject<UDynamicMeshComponent>(TEXT("Film"));
+	Film->SetupAttachment(GetRootComponent());
+	Film->SetMobility(EComponentMobility::Movable);
+
+	// NEVER. The rock under it is what you stand on, and a film with collision
+	// would have a character walking on lava rather than through it.
+	Film->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+
+	// Same reach as the slab's own surface: a film is smaller and fainter than
+	// the thing it lies on, so anything that culls the rock should have culled
+	// this first.
+	Film->SetCullDistance(15000.f);
+}
+
+UPrimitiveComponent* AARPGSolidBody::GetFilmComponent() const
+{
+	return Film;
+}
+
+int32 AARPGSolidBody::GetFilmTriangleCount() const
+{
+	if (!Film)
+	{
+		return 0;
+	}
+
+	int32 Count = 0;
+	Film->ProcessMesh([&Count](const UE::Geometry::FDynamicMesh3& Mesh)
+	{
+		Count = Mesh.TriangleCount();
+	});
+
+	return Count;
+}
+
+void AARPGSolidBody::RebuildFilm()
+{
+	if (!Film)
+	{
+		return;
+	}
+
+	// DRY IS THE COMMON CASE and costs one cached comparison -- HasWet is a total,
+	// not a sweep. An earth wall nobody has hit pays that for the whole level.
+	// Still called rather than skipped, because the tick AFTER the last of the
+	// film drains is the one that has to clear the mesh.
+	const UARPGFluidDefinition* Fluid = Definition ? Definition->MeltsInto : nullptr;
+
+	ARPGFluidGeometry::BuildFilmMesh(Film, Field, Field.SolidCentroid(),
+		Fluid ? Fluid->MinimumFilm : 0.f, WallRuns);
+
+	// THE FLUID'S MATERIAL, not the slab's: what is running down a pillar of earth
+	// is lava, and drawing it in rock would make the whole point of it invisible.
+	// Re-applied on every rebuild for the same reason the slab's is -- on a client
+	// the definition arrives by replication and may land after the first film.
+	if (Fluid)
+	{
+		if (UMaterialInterface* Material = Fluid->SurfaceMaterial.LoadSynchronous())
+		{
+			Film->SetMaterial(0, Material);
+		}
+	}
 }
 
 void AARPGSolidBody::Setup(UARPGSolidDefinition* InDefinition, const TArray<FVector2D>& InRing,
@@ -64,6 +129,24 @@ void AARPGSolidBody::Setup(UARPGSolidDefinition* InDefinition, const TArray<FVec
 float AARPGSolidBody::GetSurfaceOffset() const
 {
 	return Definition ? Definition->Thickness : 0.f;
+}
+
+float AARPGSolidBody::GetSurfaceLevelAt(const FVector2D& At) const
+{
+	if (!Field.IsValidField())
+	{
+		return GetSurfaceHeight();
+	}
+
+	// FROM THE FIELD, in the field's own frame. Off the slab entirely TopAt
+	// answers zero, which as a height would be the world origin rather than
+	// "nothing here" -- so the nominal top stands in for anywhere the field has
+	// nothing to say.
+	const float Local = Field.TopAt(ToField(At));
+
+	return Local > 0.f
+		? GroundHeight + GetVerticalOffset() + Local
+		: GetSurfaceHeight();
 }
 
 float AARPGSolidBody::GetSurfaceEnergyDensity() const
@@ -150,6 +233,10 @@ void AARPGSolidBody::RebuildFromRing()
 	Volume->SurfaceHeightOffset = Definition->Thickness;
 
 	ARPGFluidGeometry::BuildFieldMesh(Surface, Field, Centre);
+
+	// AND WHATEVER IS LYING ON IT. A spell that cuts the rock is usually the same
+	// spell that leaves a film in the cut, and both arrive in the same write.
+	RebuildFilm();
 
 	if (UMaterialInterface* Material = ResolveSurfaceMaterial())
 	{
@@ -732,8 +819,18 @@ void AARPGSolidBody::ReturnMeltedFluid(double MeltedVolume, const FVector2D& At)
 	{
 		FluidVolume = Field.Pour(ToField(At), Definition->MeltRadius, FluidVolume);
 
+		// DRAWN THE INSTANT IT IS POURED, not on the next tick. The melt above
+		// already rewrote the slab's mesh -- before this line, while the field was
+		// still dry -- so leaving the film to the runoff tick meant the frame the
+		// fireball landed on showed a fresh crater with nothing in it.
+		RebuildFilm();
+
 		if (FluidVolume <= 0.0)
 		{
+			// ALL OF IT LANDED ON THE SLAB, which is what a bowl cut into the
+			// middle does with its own melt. There is no pool coming and never
+			// will be, so the film just drawn is the entire visible result of the
+			// spell -- see Slabs.MeltedLavaIsDrawnOnTheSlab.
 			return;
 		}
 	}
@@ -779,6 +876,207 @@ float AARPGSolidBody::GroundBelow() const
 	return Riding ? Riding->GetSurfaceBedAt(GetWorldCentre()) : GroundHeight;
 }
 
+double AARPGSolidBody::GetWallVolume() const
+{
+	double Held = 0.0;
+	for (const FARPGWallRun& Run : WallRuns)
+	{
+		Held += Run.Volume;
+	}
+	return Held;
+}
+
+double AARPGSolidBody::GetPendingRunoff() const
+{
+	return PendingRunoff + GetWallVolume();
+}
+
+void AARPGSolidBody::ShedOntoTheWall(const FVector2D& ShedAt, double Shed)
+{
+	if (Shed <= 0.0 || !Field.IsValidField())
+	{
+		return;
+	}
+
+	// ACROSS EVERY WET RIM CELL, in proportion to how wet each one is.
+	//
+	// NOT AT ShedAt, WHICH IS AN AVERAGE. The flow solver reports one position for
+	// a whole tick's shedding, weighted across everywhere it happened -- and for a
+	// tower draining evenly all the way round, the average of every point on the
+	// rim is the MIDDLE of the slab. There is no face there to run down, so
+	// placing the run by that number put the entire runoff nowhere. It is the
+	// right answer for "where should the puddle form" and the wrong one for
+	// "which side did it go over".
+	static const FIntPoint Steps[4] = { {0, -1}, {1, 0}, {0, 1}, {-1, 0} };
+
+	struct FSpill
+	{
+		FIntPoint Cell;
+		FIntPoint Side;
+		float Foot;
+		double Weight;
+	};
+
+	TArray<FSpill> Spills;
+	double Total = 0.0;
+
+	for (int32 Y = 0; Y < Field.CountY; ++Y)
+	{
+		for (int32 X = 0; X < Field.CountX; ++X)
+		{
+			if (!Field.IsSolid(X, Y))
+			{
+				continue;
+			}
+
+			const int32 At = Field.Index(X, Y);
+			const double Depth = Field.Wet.IsValidIndex(At) ? Field.Wet[At] : 0.0;
+
+			if (Depth <= 0.0)
+			{
+				continue;
+			}
+
+			const double RockTop = Field.Top[At] * 0.1;
+
+			// THE STEEPEST WAY OFF. Where several sides are open the fluid takes
+			// the biggest drop, which is the outside of the slab rather than a
+			// terrace one step down.
+			double Deepest = 0.0;
+			FIntPoint Best = FIntPoint::ZeroValue;
+
+			for (const FIntPoint& Step : Steps)
+			{
+				const int32 NX = X + Step.X;
+				const int32 NY = Y + Step.Y;
+
+				const bool bInside = NX >= 0 && NX < Field.CountX
+					&& NY >= 0 && NY < Field.CountY;
+				const bool bNeighbour = bInside && Field.IsSolid(NX, NY);
+
+				const double Drop = bNeighbour
+					? RockTop - Field.Top[Field.Index(NX, NY)] * 0.1
+					: RockTop - Field.Bottom[At] * 0.1;
+
+				if (Drop > Deepest)
+				{
+					Deepest = Drop;
+					Best = Step;
+				}
+			}
+
+			if (Best == FIntPoint::ZeroValue)
+			{
+				continue; // an interior cell, with nowhere to spill
+			}
+
+			Spills.Add({ FIntPoint(X, Y), Best,
+				static_cast<float>(RockTop - Deepest), Depth });
+			Total += Depth;
+		}
+	}
+
+	if (Spills.Num() == 0 || Total <= 0.0)
+	{
+		// NOTHING WET AT AN EDGE. The solver shed from somewhere with no way off,
+		// which should not happen -- but handing the volume to the batch is the
+		// answer that cannot lose it.
+		PendingRunoff += Shed;
+		return;
+	}
+
+	for (const FSpill& Spill : Spills)
+	{
+		const double Share = Shed * (Spill.Weight / Total);
+		const int32 At = Field.Index(Spill.Cell.X, Spill.Cell.Y);
+		const FVector2D Where = Field.CentreOf(Spill.Cell.X, Spill.Cell.Y);
+
+		// ONE STREAM PER PLACE IT POURS FROM, fed for as long as it keeps
+		// pouring. A fresh run per tick would be a new rivulet every frame --
+		// hundreds of them, one cell-height apart -- where what is actually there
+		// is one stream running continuously.
+		FARPGWallRun* Existing = WallRuns.FindByPredicate(
+			[&](const FARPGWallRun& Run)
+			{
+				return Run.Side == Spill.Side && Run.At.Equals(Where, 1.0);
+			});
+
+		if (Existing)
+		{
+			Existing->Volume += Share;
+			continue;
+		}
+
+		FARPGWallRun Run;
+		Run.At = Where;
+		Run.Side = Spill.Side;
+		Run.Volume = Share;
+		Run.Front = static_cast<float>(Field.Top[At] * 0.1);
+		Run.Foot = Spill.Foot;
+		Run.Thickness = FMath::Max(1.f, static_cast<float>(Spill.Weight));
+
+		WallRuns.Add(Run);
+	}
+}
+
+void AARPGSolidBody::TickWallRuns(float DeltaTime, const UARPGFluidDefinition& Fluid)
+{
+	if (WallRuns.Num() == 0)
+	{
+		return;
+	}
+
+	// THE VISCOSITY, AS A SPEED. See the definition: a wall is vertical
+	// everywhere, so there is no slope for a settling rate to read and the only
+	// thing separating water from lava is how fast it moves down the face.
+	const float Speed = FMath::Max(0.1f, Fluid.WallSpeed);
+
+	for (int32 Index = WallRuns.Num() - 1; Index >= 0; --Index)
+	{
+		FARPGWallRun& Run = WallRuns[Index];
+
+		Run.Front = FMath::Max(Run.Foot, Run.Front - Speed * DeltaTime);
+
+		if (!Run.HasArrived())
+		{
+			continue;
+		}
+
+		// ARRIVED, so what it is carrying is on the ground. Into the batch rather
+		// than deposited on the spot: every deposit is a polygon merge or an actor
+		// spawn, and a stream running for seconds would be a boolean op a frame.
+		// Where it came down is carried with it, so the pool forms under the side
+		// it actually ran down.
+		if (Run.Volume > 0.0)
+		{
+			const FVector2D LeftAt = ToWorld(Run.At);
+
+			RunoffAt = PendingRunoff > 0.0
+				? (RunoffAt * PendingRunoff + LeftAt * Run.Volume) / (PendingRunoff + Run.Volume)
+				: LeftAt;
+
+			PendingRunoff += Run.Volume;
+			Run.Volume = 0.0;
+		}
+
+		// KEPT WHILE THE SOURCE IS STILL POURING. A stream that reached the bottom
+		// is still a stream: it goes on delivering as long as the cell feeding it
+		// is wet, and only stops being drawn once that has dried. Removing it on
+		// arrival would restart the descent from the top every time another
+		// trickle went over, which is a wall that flickers rather than one that
+		// runs.
+		const FIntPoint Cell = Field.CellAt(Run.At);
+		const bool bSourceDry = Cell.X < 0
+			|| !Field.Wet.IsValidIndex(Field.Index(Cell.X, Cell.Y))
+			|| Field.Wet[Field.Index(Cell.X, Cell.Y)] <= Fluid.MinimumFilm;
+
+		if (bSourceDry)
+		{
+			WallRuns.RemoveAtSwap(Index);
+		}
+	}
+}
+
 void AARPGSolidBody::TickRunoff(float DeltaTime)
 {
 	// FREE WHEN DRY, which is nearly always. HasWet is a cached total rather than
@@ -790,7 +1088,9 @@ void AARPGSolidBody::TickRunoff(float DeltaTime)
 	// so returning on HasWet alone stranded the final batch a couple of metres
 	// above the ground for the rest of the level. Pending runoff is zero whenever
 	// a slab is genuinely idle, so the fast path costs the same comparison.
-	if (!Definition || (!Field.HasWet() && PendingRunoff <= 0.0))
+	// UNLESS SOMETHING IS STILL ON THE WALL, which is most of the time now that
+	// leaving the rim is the START of the journey rather than the end of it.
+	if (!Definition || (!Field.HasWet() && PendingRunoff <= 0.0 && WallRuns.Num() == 0))
 	{
 		return;
 	}
@@ -808,19 +1108,27 @@ void AARPGSolidBody::TickRunoff(float DeltaTime)
 	const double Shed = Field.FlowStep(DeltaTime, Fluid->FlowRate, Fluid->YieldSlope,
 		Fluid->MinimumFilm, ShedAt);
 
+	// REDRAWN WHERE IT MOVED, which is the whole of what a film looks like: this
+	// is reached only while a slab is actually draining, and a drain lasts
+	// seconds. A slab nobody has melted never gets here at all -- see the HasWet
+	// guard at the top -- so the cost is paid by exactly the thing being watched.
+	//
+	// AFTER the runs advance below as well as after the flow above, because a run
+	// creeping down the face is a moving thing even when the top has dried.
+
 	if (Shed > 0.0)
 	{
-		// WEIGHTED BY WHERE IT LEFT, so a tower melted down one side sheds on that
-		// side and the puddle forms there rather than under the middle. Averaged
-		// across the batch below for the same reason.
-		const FVector2D LeftAt = ToWorld(ShedAt);
-
-		RunoffAt = PendingRunoff > 0.0
-			? (RunoffAt * PendingRunoff + LeftAt * Shed) / (PendingRunoff + Shed)
-			: LeftAt;
-
-		PendingRunoff += Shed;
+		// ONTO THE FACE, not into the batch. What leaves the rim has not arrived
+		// anywhere -- it is on the outside of the slab, working its way down at
+		// whatever speed the stuff moves. Weighting by where it left still
+		// happens, but on arrival rather than departure.
+		ShedOntoTheWall(ShedAt, Shed);
 	}
+
+	TickWallRuns(DeltaTime, *Fluid);
+
+	// Both the film on top and the sheets on the face have just moved.
+	RebuildFilm();
 
 	// BATCHED. Runoff arrives in dribbles by design and every deposit is a polygon
 	// merge or an actor spawn, so putting each one down as it comes would charge a
@@ -830,42 +1138,22 @@ void AARPGSolidBody::TickRunoff(float DeltaTime)
 	// is always under the batch, and water that never arrives because it was the
 	// remainder is the kind of loss nobody can see happening but everybody
 	// eventually notices.
-	const bool bFinished = !Field.HasWet();
+	// NOT MERELY DRY ON TOP: a slab whose film has all gone over the edge still
+	// has it, on the way down. Flushing then would put the last of the lava on
+	// the ground before it had finished running there.
+	const bool bFinished = !Field.HasWet() && WallRuns.Num() == 0;
 
 	if (PendingRunoff <= 0.0 || (!bFinished && PendingRunoff < Fluid->RunoffBatch))
 	{
 		return;
 	}
 
-	// AND THEN IT FALLS. Water that has left the rim of a two-metre tower is not
-	// yet water on the ground, and the gap is the most legible part of the whole
-	// effect -- the puddle appearing a beat after the film reaches the edge is
-	// what reads as "it ran down". Timed rather than simulated, because a
-	// heightfield has no vertical face for anything to run down: a face is many
-	// heights at one column, which is precisely what z = f(x,y) cannot hold.
-	if (RunoffFall <= 0.f)
-	{
-		const float Drop = FMath::Max(0.f, GetSurfaceHeight() - GroundBelow());
-
-		// s = ut + at^2/2 with u = 0, in cm and seconds.
-		RunoffFall = FMath::Sqrt(2.f * Drop / 980.f);
-
-		// Nothing worth waiting for on a floe riding flush with the water.
-		if (RunoffFall < 0.05f)
-		{
-			RunoffFall = 0.f;
-		}
-	}
-
-	if (RunoffFall > 0.f)
-	{
-		RunoffFall = FMath::Max(0.f, RunoffFall - DeltaTime);
-
-		if (RunoffFall > 0.f)
-		{
-			return; // still in the air
-		}
-	}
+	// NO WAIT HERE ANY MORE. Getting down the outside of the slab used to be a
+	// timed fall applied to the batch -- the time a stone would take, which for a
+	// chest-high wall is half a second and reads as instant. The journey is now
+	// the runs above, which creep at the fluid's own speed and only add to this
+	// batch once they have actually arrived. What is in PendingRunoff is on the
+	// ground already.
 
 	if (UARPGFluidSurfaceSubsystem* Fluids =
 			GetWorld() ? GetWorld()->GetSubsystem<UARPGFluidSurfaceSubsystem>() : nullptr)
@@ -883,7 +1171,6 @@ void AARPGSolidBody::TickRunoff(float DeltaTime)
 	}
 
 	PendingRunoff = 0.0;
-	RunoffFall = 0.f;
 }
 
 bool AARPGSolidBody::ContainsPoint(FVector WorldPoint) const

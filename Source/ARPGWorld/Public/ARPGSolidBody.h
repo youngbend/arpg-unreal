@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "ARPGSurfaceBody.h"
 #include "ARPGSolidField.h"
+#include "ARPGWallRun.h"
 #include "ARPGSolidBody.generated.h"
 
 class UARPGSolidDefinition;
@@ -164,8 +165,24 @@ public:
 	 * an actor spawn, so it is batched. Visible for the tests, which would
 	 * otherwise have to infer it from a puddle that has not appeared yet.
 	 */
+	/**
+	 * Everything this slab has melted that is not yet in a pool.
+	 *
+	 * THE BATCH AND THE WALL BOTH, because "pending" means the world has not got
+	 * it yet -- and volume held in a run creeping down the face is exactly as
+	 * undelivered as volume waiting to be worth a deposit. Reporting only the
+	 * batch would let a test watch the whole journey and conclude nothing was in
+	 * flight.
+	 */
 	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
-	double GetPendingRunoff() const { return PendingRunoff; }
+	double GetPendingRunoff() const;
+
+	/** How much is on the face right now, on its way down. */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
+	double GetWallVolume() const;
+
+	/** The runs currently on the outside of the slab. */
+	const TArray<FARPGWallRun>& GetWallRuns() const { return WallRuns; }
 
 	/**
 	 * Where the last reaction touched this slab, in world XY.
@@ -291,6 +308,48 @@ public:
 
 	virtual float GetSurfaceEnergyDensity() const override;
 
+	/**
+	 * The top of the slab HERE, which after a spell has landed on it is not one
+	 * number: a bowl melted into the middle is centimetres lower than the rim
+	 * around it, and the field has said so all along.
+	 */
+	virtual float GetSurfaceLevelAt(const FVector2D& At) const override;
+
+	/**
+	 * What has melted and is lying on top of the rock, drawn as its own surface.
+	 *
+	 * SEPARATE FROM Surface, not a second material on it, for two reasons that
+	 * both come down to the film being a different KIND of thing. It is drawn
+	 * with the FLUID's material rather than the solid's -- lava, not the earth it
+	 * is running down -- and it carries no collision, because what you stand on
+	 * is the rock underneath and what the lava does to you is the volume
+	 * component's business. It also changes far more often than the rock does:
+	 * the film moves every tick while it drains, and the slab it lies on is
+	 * rebuilt only when a spell cuts it.
+	 */
+	UPROPERTY(VisibleAnywhere, Category = "Components")
+	TObjectPtr<UDynamicMeshComponent> Film;
+
+	/** Redraws the film. Cheap when dry, which is nearly always. */
+	void RebuildFilm();
+
+	/** Puts what just left a rim onto the face, to make its own way down. */
+	void ShedOntoTheWall(const FVector2D& ShedAt, double Shed);
+
+	/** Advances everything on the face, and banks whatever reached the bottom. */
+	void TickWallRuns(float DeltaTime, const UARPGFluidDefinition& Fluid);
+
+	/** How much film is actually being drawn. Zero on rock nobody has melted. */
+	int32 GetFilmTriangleCount() const;
+
+	/**
+	 * The drawn film as a plain primitive, for anything that only wants its
+	 * bounds. Here for the same reason GetSurfaceComponent is -- so a caller
+	 * needs no dependency on GeometryFramework to ask where the lava reaches.
+	 */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
+	UPrimitiveComponent* GetFilmComponent() const;
+
 protected:
 	virtual void RebuildFromRing() override;
 	virtual float GetSurfaceOffset() const override;
@@ -319,6 +378,18 @@ protected:
 	UPROPERTY(Transient)
 	float OccupantPoll = 0.f;
 
+	/**
+	 * Everything currently making its way down the outside.
+	 *
+	 * NOT REPLICATED, on the same rule as the film it came from: this is the
+	 * journey, and what matters at the end of it is a pool, which replicates
+	 * already. A client sees the lava arrive rather than watching it crawl -- the
+	 * cost of sending a per-slab list of runs at tick rate buys a detail nobody
+	 * away from the wall can see.
+	 */
+	UPROPERTY(Transient)
+	TArray<FARPGWallRun> WallRuns;
+
 	/** Runoff waiting to be worth a deposit, and where it ran off. */
 	UPROPERTY(Transient)
 	double PendingRunoff = 0.0;
@@ -326,17 +397,4 @@ protected:
 	UPROPERTY(Transient)
 	FVector2D RunoffAt = FVector2D::ZeroVector;
 
-	/**
-	 * How long the batch still has to fall before it lands.
-	 *
-	 * WATER LEAVING A RIM IS NOT WATER ON THE GROUND. A heightfield has no
-	 * vertical face for a film to cling to -- a face is many heights at one
-	 * column, which is the one thing z = f(x,y) cannot say -- so nothing can flow
-	 * DOWN the side of a tower. What actually happens off a rim is a fall, and a
-	 * fall is a delay: the puddle appears a beat after the water leaves, which is
-	 * the whole of what the eye is reading. Cheaper than a face solver by three
-	 * orders of magnitude and, for a drop, not obviously less true.
-	 */
-	UPROPERTY(Transient)
-	float RunoffFall = 0.f;
 };

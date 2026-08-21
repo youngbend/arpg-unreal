@@ -128,6 +128,27 @@ public:
 		meta = (ClampMin = "0.0"))
 	float RunoffBatch = 20000.f;
 
+	/**
+	 * How fast this runs DOWN a vertical face, in centimetres per second.
+	 *
+	 * THE ONE PLACE VISCOSITY IS A SPEED. FlowRate above is a rate of settling --
+	 * a fraction of the head between neighbouring cells -- because across a
+	 * heightfield what drives the flow is the slope. A wall has no slope to speak
+	 * of: it is vertical everywhere, gravity is the whole of the forcing, and what
+	 * distinguishes water from lava there is simply how fast the stuff moves.
+	 *
+	 * SO A FALL IS NOT THE ANSWER EITHER, which is what this replaced. Runoff used
+	 * to leave the rim and arrive at the foot after the time a stone would take --
+	 * about half a second off a chest-high wall, and visually instant. Lava does
+	 * not fall off a wall. It creeps, and the creep is most of what tells you what
+	 * you are looking at.
+	 *
+	 * Water is a few metres a second; lava is a slow crawl.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Runoff",
+		meta = (ClampMin = "0.1"))
+	float WallSpeed = 200.f;
+
 	/** How much energy the body's volume carries per unit of area. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Body",
 		meta = (ClampMin = "0.0"))

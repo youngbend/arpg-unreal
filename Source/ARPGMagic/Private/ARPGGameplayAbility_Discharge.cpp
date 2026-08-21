@@ -126,6 +126,42 @@ void UARPGGameplayAbility_Discharge::InputReleased(const FGameplayAbilitySpecHan
 	}
 }
 
+FVector UARPGGameplayAbility_Discharge::ApplyAimPitch(const FRotator& ViewRotation, float PitchOffset)
+{
+	FRotator Aim = ViewRotation;
+
+	// NormalizeAxis first. A pawn's view pitch comes back in [0, 360), so a
+	// caster looking twenty degrees down reports 340 -- and 340 + 15 clamps to
+	// straight up rather than nudging the shot level.
+	Aim.Pitch = FRotator::NormalizeAxis(Aim.Pitch) + PitchOffset;
+
+	// Clamped short of vertical rather than wrapped: past 90 the yaw flips and
+	// the bolt leaves behind the caster.
+	Aim.Pitch = FMath::Clamp(Aim.Pitch, -89.f, 89.f);
+	Aim.Roll = 0.f;
+
+	return Aim.Vector();
+}
+
+FVector UARPGGameplayAbility_Discharge::GetAimDirection(const AActor& Avatar) const
+{
+	if (!bAimAlongView)
+	{
+		return Avatar.GetActorForwardVector();
+	}
+
+	// GetActorEyesViewPoint rather than the camera component: on a pawn it
+	// resolves to the CONTROLLER's rotation, which the server holds for a remote
+	// client (move packets carry the view) and which an AI caster fills in from
+	// its focus. The camera component only exists on the machine looking through
+	// it, and this runs on the server -- see OnChargeReleased.
+	FVector ViewLocation;
+	FRotator ViewRotation;
+	Avatar.GetActorEyesViewPoint(ViewLocation, ViewRotation);
+
+	return ApplyAimPitch(ViewRotation, AimPitchOffset);
+}
+
 void UARPGGameplayAbility_Discharge::GetSpawnTransform(FVector& OutOrigin, FVector& OutDirection) const
 {
 	const AActor* Avatar = GetAvatarActorFromActorInfo();
@@ -136,7 +172,11 @@ void UARPGGameplayAbility_Discharge::GetSpawnTransform(FVector& OutOrigin, FVect
 		return;
 	}
 
-	OutDirection = Avatar->GetActorForwardVector();
+	OutDirection = GetAimDirection(*Avatar);
+
+	// Offset along the AIM, not along a flat forward, so the effect always
+	// appears on the line it is about to travel -- a bolt aimed upward that
+	// spawned at chest height would visibly start off its own path.
 	OutOrigin = Avatar->GetActorLocation()
 		+ OutDirection * SpawnForwardOffset
 		+ FVector::UpVector * SpawnHeightOffset;
@@ -261,6 +301,14 @@ UARPGGameplayAbility_DischargeProject::UARPGGameplayAbility_DischargeProject()
 		Tags.AddTag(TAG_Ability_Discharge_Project);
 		SetAssetTags(Tags);
 	}
+
+	// The only discharge that TRAVELS, so the only one where being thrown along
+	// the character's facing instead of the player's aim is visible: a bolt cast
+	// mid-strafe left sideways. The tilt is what keeps it out of the floor --
+	// the follow camera looks slightly down, and a projectile with no gravity
+	// fired along that view meets the ground well short of its range.
+	bAimAlongView = true;
+	AimPitchOffset = 15.f;
 }
 
 UARPGGameplayAbility_DischargeCloak::UARPGGameplayAbility_DischargeCloak()

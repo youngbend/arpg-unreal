@@ -17,6 +17,7 @@
 #include "ARPGMagicLoadout.h"
 #include "ARPGMagicSettings.h"
 #include "ARPGPlaceholderEffect.h"
+#include "GameFramework/ProjectileMovementComponent.h"
 #include "ARPGVitalSet.h"
 #include "AbilitySystemComponent.h"
 #include "Engine/Engine.h"
@@ -369,6 +370,65 @@ bool FARPGHandVisualTest::RunTest(const FString& Parameters)
 	Magic->ClearSelection();
 	Hand->Refresh();
 	TestNull(TEXT("Discarding empties the hand"), Hand->GetHandEffect());
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGProjectileAimTest,
+	"ARPG.Magic.Placeholder.AProjectileFliesTheWayItWasAimed",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGProjectileAimTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGPlaceholderTestUtils;
+	FTestWorld Scope;
+
+	UARPGMagicElement* Element = MakeElement(GetTransientPackage(), TAG_Element_Fire, false);
+
+	// NOT AN AXIS, and that is the whole test. Every other case in this file aims
+	// down +X, where the spawn rotation is the identity -- which is exactly the
+	// one direction that hides a velocity being rotated by that rotation a second
+	// time. Yaw 40 and pitch 15 doubles to yaw 80 pitch 30 when it is.
+	const FRotator Aimed(15.f, 40.f, 0.f);
+
+	FARPGDischargeContext Context = MakeContext(EARPGDischargeType::Project, Element, 1.f);
+	Context.Direction = Aimed.Vector();
+
+	AARPGPlaceholderProjectile* Bolt =
+		SpawnPlaceholder<AARPGPlaceholderProjectile>(Scope.World, Context);
+
+	UProjectileMovementComponent* Movement =
+		Bolt ? Bolt->FindComponentByClass<UProjectileMovementComponent>() : nullptr;
+
+	if (!Movement)
+	{
+		AddError(TEXT("No projectile to aim"));
+		return false;
+	}
+
+	const FVector Flight = Movement->Velocity.GetSafeNormal();
+
+	// THE DIRECTION IT WAS GIVEN, not that direction turned by its own facing.
+	// UProjectileMovementComponent reads Velocity as LOCAL space by default and
+	// transforms it by the actor's rotation on initialise -- and the actor was
+	// already spawned facing the aim, so the aim came out applied twice.
+	TestEqual(TEXT("It flies where it was aimed"),
+		static_cast<float>(Flight.X), static_cast<float>(Context.Direction.X), 0.001f);
+	TestEqual(TEXT("In Y"),
+		static_cast<float>(Flight.Y), static_cast<float>(Context.Direction.Y), 0.001f);
+	TestEqual(TEXT("And in Z"),
+		static_cast<float>(Flight.Z), static_cast<float>(Context.Direction.Z), 0.001f);
+
+	// Stated as the angle too, because that is what the doubling looks like from
+	// behind the character: turn 40 degrees and the bolt leaves at 80.
+	TestEqual(TEXT("Its yaw is the yaw it was aimed at"),
+		static_cast<float>(Flight.Rotation().Yaw), 40.f, 0.01f);
+	TestEqual(TEXT("And its pitch the pitch it was aimed at"),
+		static_cast<float>(Flight.Rotation().Pitch), 15.f, 0.01f);
+
+	// And the speed still comes from the definition rather than the aim.
+	TestEqual(TEXT("At its own speed"),
+		static_cast<float>(Movement->Velocity.Size()), Bolt->Speed, 0.5f);
 
 	return true;
 }

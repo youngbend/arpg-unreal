@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "ARPGSolidField.h"
+#include "ARPGWallRun.h"
 
 class UDynamicMeshComponent;
 
@@ -151,9 +152,19 @@ namespace ARPGFluidGeometry
 	 * TopZ == BottomZ is legal and gives a flat cap with no walls, which is what a
 	 * body with no depth is.
 	 */
+	/**
+	 * How high the floor is under a point, for a body that follows it.
+	 *
+	 * Local Z in the body's own frame, so zero is the height the body was laid
+	 * at. Unset means FLAT, which is what a body on level ground is and what
+	 * every caller wanted before floors had slopes in them.
+	 */
+	using FBedSampler = TFunction<double(const FVector2D& World)>;
+
 	ARPGWORLD_API void BuildSlabMesh(UDynamicMeshComponent* Component,
 		const TArray<FVector2D>& Ring, const TArray<FVector2D>& Hole,
-		const FVector2D& Origin, double BottomZ, double TopZ);
+		const FVector2D& Origin, double BottomZ, double TopZ,
+		const FBedSampler& Bed = FBedSampler(), double DetailSpacing = 0.0);
 
 	/**
 	 * The sixth call, and the one with a CEILING: a heightfield as a mesh.
@@ -174,4 +185,26 @@ namespace ARPGFluidGeometry
 	 */
 	ARPGWORLD_API void BuildFieldMesh(UDynamicMeshComponent* Component,
 		const FARPGSolidField& Field, const FVector2D& Origin);
+
+	/**
+	 * The seventh: what is LYING ON that heightfield, drawn as its own surface.
+	 *
+	 * A slab melted by a spell hands its fluid back onto its own top -- lava down
+	 * a pillar of earth, meltwater down a floe -- and the field carries how deep
+	 * that film lies on every cell. Nothing drew it, so the whole journey from
+	 * "the fireball hit" to "a pool formed at the foot" happened invisibly, and a
+	 * bowl in the middle of a slab (which keeps its melt rather than shedding it)
+	 * showed nothing at all, ever.
+	 *
+	 * The same cell rule as BuildFieldMesh, run over Top to Top-plus-film instead
+	 * of Bottom to Top. Cells shallower than MinimumFilm are left out, so the
+	 * drawn edge of the wet is the same edge the flow solver stops at.
+	 *
+	 * NO COLLISION BEHIND THIS. What you stand on is the rock; the lava on top of
+	 * it is something you are standing in, which the volume component already
+	 * says. Emitted in the component's LOCAL space, like the field it lies on.
+	 */
+	ARPGWORLD_API void BuildFilmMesh(UDynamicMeshComponent* Component,
+		const FARPGSolidField& Field, const FVector2D& Origin, float MinimumFilm,
+		TArrayView<const FARPGWallRun> Runs = {});
 }

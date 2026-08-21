@@ -150,6 +150,26 @@ public:
 	float MaxDepositDrop = 1000.f;
 
 	/**
+	 * How far the ground under a body may wander from where it started before the
+	 * body stops rather than carrying on over it.
+	 *
+	 * A POOL IS FLAT. It is one outline at one height -- that is what makes it
+	 * affordable to replicate and to reason about -- so ground that falls away
+	 * underneath it is ground it cannot lie on. Cast an emanation on the lip of a
+	 * platform and the half of the disc past the edge used to hang in the air
+	 * with nothing under it.
+	 *
+	 * MEASURED BETWEEN NEIGHBOURING SAMPLES, not against where the body started,
+	 * which is what lets a puddle run the whole length of a ramp and still stop
+	 * dead at a ledge. A slope is a great many small steps and passes; a drop is
+	 * one big one and does not. Compared against the middle instead, a body could
+	 * never be longer than this no matter how gentle the ground under it.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Fluid",
+		meta = (ClampMin = "0.0"))
+	float MaxDepositStep = 25.f;
+
+	/**
 	 * Puts a VOLUME of fluid back into the world, as opposed to wetting a radius.
 	 *
 	 * What melting a solid returns. The caller has a volume of stuff and no
@@ -308,6 +328,32 @@ public:
 	/** Starts a fresh reaction. Called by the reaction solver before it consumes. */
 	void OpenReactionLedger();
 
+	/**
+	 * The height of the floor under a world XY, ignoring every body this system
+	 * owns. False where there is none within reach.
+	 *
+	 * PUBLIC BECAUSE A BODY FOLLOWS THE FLOOR NOW. A pool is no longer one height
+	 * -- it is laid over whatever it is lying on -- so it has to be able to ask
+	 * the same question the deposit asked, with the same exclusions: a puddle
+	 * must not find ITSELF, or the floe next to it, and decide that is the ground.
+	 *
+	 * @param NearZ roughly where the body is, so the probe starts above it.
+	 */
+	bool FindGroundAt(const FVector2D& At, float NearZ, float& OutHeight,
+		const AActor* Ignore = nullptr) const;
+
+	/**
+	 * How far apart the floor is sampled under a body that follows it.
+	 *
+	 * The resolution of a puddle's underside. Finer follows a bumpy floor more
+	 * closely and costs a trace per sample per rebuild; coarser cuts corners
+	 * across it. A flat floor and an even ramp are reproduced exactly at ANY
+	 * spacing, because a plane interpolates linearly and so does a triangle.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Fluid",
+		meta = (ClampMin = "10.0"))
+	float BedSampleSpacing = 60.f;
+
 	/** A body has handed this element's fluid back, so nothing else should. */
 	void NoteFluidReturned(FGameplayTag ElementTag);
 
@@ -320,7 +366,23 @@ private:
 
 	/** Merges a footprint into a nearby body, or spawns one. */
 	AARPGFluidPool* DepositRing(const TArray<FVector2D>& Footprint, float GroundHeight,
-		UARPGFluidDefinition* Definition);
+		UARPGFluidDefinition* Definition, const AActor* Ignore = nullptr);
+
+	/**
+	 * Cuts a footprint back to the ground that can actually hold it.
+	 *
+	 * Every point is pulled in along its own spoke from the centre until the
+	 * ground under it is within MaxDepositStep of the height the body is being
+	 * laid at. A disc cast on a platform comes back as a disc with a flat side
+	 * along the lip, which is where the water would stop.
+	 *
+	 * WHY SPOKES AND NOT A GRID. A footprint is a circle or a capsule around the
+	 * point the spell finished, so every part of it is visible from the centre --
+	 * which means "how far can this direction go" is the whole question, and it
+	 * costs a handful of traces per point rather than a raster of the whole area.
+	 */
+	TArray<FVector2D> ClipToGround(const TArray<FVector2D>& Footprint, float GroundHeight,
+		const AActor* Ignore) const;
 
 	/**
 	 * A cast spell leaving its element on the ground. THE ONLY THING THAT PUTS A

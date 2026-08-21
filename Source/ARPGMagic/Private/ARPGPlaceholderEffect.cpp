@@ -215,6 +215,20 @@ AARPGPlaceholderProjectile::AARPGPlaceholderProjectile()
 	Movement = CreateDefaultSubobject<UProjectileMovementComponent>(TEXT("Movement"));
 	Movement->bRotationFollowsVelocity = true;
 
+	// THE VELOCITY BELOW IS A WORLD DIRECTION, and the component has to be told
+	// so. UProjectileMovementComponent defaults bInitialVelocityInLocalSpace to
+	// TRUE: on initialise it takes whatever is in Velocity and transforms it by
+	// the actor's rotation. The discharge spawns this actor ALREADY FACING the
+	// aim, so a world-space velocity was being turned by the aim a second time --
+	// fire at 40 degrees and the bolt left at 80, which reads as no direction at
+	// all rather than as a consistent offset.
+	//
+	// Invisible down +X, which is the one heading where the spawn rotation is the
+	// identity and the double turn is a no-op. See
+	// Placeholder.AProjectileFliesTheWayItWasAimed, which aims off-axis for
+	// exactly that reason.
+	Movement->bInitialVelocityInLocalSpace = false;
+
 	// No arc. A placeholder that dropped would make range look shorter than the
 	// real spell's, and range is most of what a projectile is for.
 	Movement->ProjectileGravityScale = 0.f;

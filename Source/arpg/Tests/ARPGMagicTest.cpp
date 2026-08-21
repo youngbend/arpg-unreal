@@ -9,6 +9,7 @@
 #include "ARPGCombatDummy.h"
 #include "ARPGDamageTypeAsset.h"
 #include "ARPGElementalCoating.h"
+#include "ARPGGameplayAbility_Discharge.h"
 #include "ARPGGameplayTags.h"
 #include "ARPGMagicCaster.h"
 #include "ARPGMagicCombinationTable.h"
@@ -879,6 +880,48 @@ bool FARPGMagicConsumeFailsTest::RunTest(const FString& Parameters)
 	TestNull(TEXT("Nothing is consumed"), Consumed);
 	TestEqual(TEXT("The element stays readied"), Rig.Magic->GetActiveCount(), 1);
 	TestEqual(TEXT("And nothing is spent"), Rig.Mana(), 10.f);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGDischargeAimTest,
+	"ARPG.Magic.Aim.ProjectilesLeaveAlongTheViewTiltedUp",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGDischargeAimTest::RunTest(const FString& Parameters)
+{
+	using FDischarge = UARPGGameplayAbility_Discharge;
+
+	// A pawn reports its view pitch in [0, 360): looking twenty degrees down is
+	// 340, not -20. Adding the tilt to that raw is the bug this normalises away,
+	// so the down-the-camera cases are written the way a controller reports them.
+	const FVector Level = FDischarge::ApplyAimPitch(FRotator(0.f, 90.f, 0.f), 15.f);
+	TestEqual(TEXT("A level view leaves tilted up by the offset"),
+		static_cast<float>(Level.Rotation().Pitch), 15.f, 0.01f);
+	TestEqual(TEXT("Without touching where the player is facing"),
+		static_cast<float>(Level.Rotation().Yaw), 90.f, 0.01f);
+
+	const FVector Down = FDischarge::ApplyAimPitch(FRotator(340.f, 0.f, 0.f), 15.f);
+	TestEqual(TEXT("A view twenty degrees down comes out five, not at the sky"),
+		static_cast<float>(Down.Rotation().Pitch), -5.f, 0.01f);
+
+	// The tilt is a nudge, not a floor: aim at your feet and the bolt still goes
+	// there. Keeping it a plain offset is what makes the knob predictable.
+	const FVector Steep = FDischarge::ApplyAimPitch(FRotator(300.f, 0.f, 0.f), 15.f);
+	TestEqual(TEXT("A steep look down still fires down"),
+		static_cast<float>(Steep.Rotation().Pitch), -45.f, 0.01f);
+
+	// Past vertical the yaw flips and the shot leaves BEHIND the caster, which is
+	// why the tilt clamps short rather than wrapping.
+	const FVector Up = FDischarge::ApplyAimPitch(FRotator(85.f, 0.f, 0.f), 15.f);
+	TestEqual(TEXT("Straight up clamps short of vertical"),
+		static_cast<float>(Up.Rotation().Pitch), 89.f, 0.01f);
+	TestTrue(TEXT("So it never comes out backwards"), Up.X > 0.f);
+
+	// No offset is the other three discharges: the view, untouched.
+	const FVector Untilted = FDischarge::ApplyAimPitch(FRotator(340.f, 0.f, 0.f), 0.f);
+	TestEqual(TEXT("No offset leaves the view alone"),
+		static_cast<float>(Untilted.Rotation().Pitch), -20.f, 0.01f);
 
 	return true;
 }

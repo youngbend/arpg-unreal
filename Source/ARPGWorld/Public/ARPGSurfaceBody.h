@@ -6,6 +6,7 @@
 #include "GameFramework/Actor.h"
 #include "ARPGElementalReactive.h"
 #include "ARPGElementalSurface.h"
+#include "ARPGFluidGeometry.h"
 #include "ARPGSurfaceBody.generated.h"
 
 class UARPGElementalVolumeComponent;
@@ -224,6 +225,36 @@ protected:
 	virtual const TArray<FVector2D>& GetMeshHole() const;
 
 	/**
+	 * The floor this body is lying on, or unset for one that is simply flat.
+	 *
+	 * A FLOE DOES NOT WANT THIS and a puddle does, which is the whole reason it
+	 * is virtual rather than a field. A floe rides a surface -- it is level by
+	 * definition, whatever is under it -- while a puddle is poured onto the
+	 * ground and takes the shape of it.
+	 */
+	virtual ARPGFluidGeometry::FBedSampler GetBedSampler() const { return {}; }
+
+	/**
+	 * How finely the cap is subdivided so it has somewhere to bend. Zero for a
+	 * flat body, which needs no interior vertices at all.
+	 */
+	virtual double GetBedDetailSpacing() const { return 0.0; }
+
+	/** How far the floor under this body rises and falls, for its bounds. */
+	virtual float GetBedSpan() const { return 0.f; }
+
+	/**
+	 * How far the body's underside is sunk BELOW the floor it lies on.
+	 *
+	 * Zero for anything whose underside is genuinely visible -- a floe has water
+	 * under it and you can swim beneath the edge of one. A puddle does not: its
+	 * underside is pressed against the ground, and drawing the two in the same
+	 * plane is asking the depth buffer to choose between them. It cannot, so it
+	 * chooses differently per pixel and per frame, which is the shimmer.
+	 */
+	virtual float GetUndersideSink() const { return 0.f; }
+
+	/**
 	 * Every replicated field lands here, and every one of them rebuilds.
 	 *
 	 * ONE NOTIFY FOR ALL OF THEM on purpose. The ring, the ground height and the
@@ -274,9 +305,76 @@ public:
 	void Setup(UARPGFluidDefinition* InDefinition, const TArray<FVector2D>& InRing,
 		float InGroundHeight);
 
+	/**
+	 * Height of the floor under a world XY, relative to GroundHeight.
+	 *
+	 * Zero on the level ground the pool was laid at, negative downhill of it.
+	 * Interpolated between samples, so it is continuous rather than stepped.
+	 */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
+	float GetBedOffsetAt(const FVector2D& At) const;
+
+	//~ A pool follows its floor, so neither of these is one number any more.
+	virtual float GetSurfaceLevelAt(const FVector2D& At) const override;
+	virtual float GetSurfaceBedAt(const FVector2D& At) const override;
+
 protected:
 	virtual void RebuildFromRing() override;
 	virtual float GetSurfaceOffset() const override;
 	virtual double GetMinimumArea() const override;
 	virtual UMaterialInterface* ResolveSurfaceMaterial() const override;
+
+	virtual ARPGFluidGeometry::FBedSampler GetBedSampler() const override;
+	virtual double GetBedDetailSpacing() const override;
+
+	/**
+	 * Buried, because the ground is right there.
+	 *
+	 * Has to clear the error between the floor the mesh is built from -- sampled
+	 * on a grid and interpolated between -- and the floor actually drawn, or the
+	 * underside weaves above and below it and shimmers along the seam.
+	 */
+	virtual float GetUndersideSink() const override { return 4.f; }
+	virtual float GetBedSpan() const override { return BedSpan; }
+
+	/**
+	 * Traces the floor under the outline, into a grid this keeps.
+	 *
+	 * NOT REPLICATED, AND DELIBERATELY NOT. The floor is level geometry: every
+	 * machine already has it, identical, and sampling it locally costs a few
+	 * traces where sending it would cost a heightfield per puddle per change. It
+	 * is the same argument the ring itself is replicated on -- send what cannot
+	 * be derived, derive the rest -- and it means server and client agree by
+	 * construction rather than by hoping the numbers survived quantisation.
+	 *
+	 * CACHED ACROSS REBUILDS. A pool is rebuilt every time weather erodes it,
+	 * which is four times a second, and the floor underneath has not moved: only
+	 * cells nobody has sampled yet cost a trace, so an evaporating puddle -- which
+	 * only ever shrinks -- pays for its grid once.
+	 */
+	void SampleBed();
+
+	/** Grid of floor heights relative to GroundHeight. Empty until sampled. */
+	UPROPERTY(Transient)
+	TArray<float> BedSamples;
+
+	/** Which of those have actually been traced for. */
+	UPROPERTY(Transient)
+	TArray<uint8> BedKnown;
+
+	UPROPERTY(Transient)
+	FVector2D BedOrigin = FVector2D::ZeroVector;
+
+	UPROPERTY(Transient)
+	float BedSpacing = 0.f;
+
+	UPROPERTY(Transient)
+	int32 BedCountX = 0;
+
+	UPROPERTY(Transient)
+	int32 BedCountY = 0;
+
+	/** The deepest the floor gets under this pool, for the trigger box.  */
+	UPROPERTY(Transient)
+	float BedSpan = 0.f;
 };

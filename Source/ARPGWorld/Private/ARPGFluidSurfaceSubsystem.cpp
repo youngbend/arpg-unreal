@@ -15,6 +15,7 @@
 #include "ARPGWorld.h"
 #include "ARPGWorldSettings.h"
 #include "Engine/World.h"
+#include "EngineUtils.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
 #include "SignificanceManager.h"
@@ -214,8 +215,12 @@ AARPGFluidPool* UARPGFluidSurfaceSubsystem::ReturnFluid(FVector2D Where, float G
 	// Merging would have conserved nothing, silently, in the common case.
 	for (AARPGFluidPool* Pool : Pools)
 	{
+		// CONTAINS IS A PLAN QUESTION and this one is not -- see the merge in
+		// DepositRing. Runoff arriving on the floor of a room must not be absorbed
+		// by the puddle on the balcony it happens to be standing under.
 		if (IsValid(Pool) && Pool->Definition == Definition
-			&& Pool->ContainsPoint(FVector(Where.X, Where.Y, GroundHeight)))
+			&& Pool->ContainsPoint(FVector(Where.X, Where.Y, GroundHeight))
+			&& FMath::Abs(Pool->GetSurfaceBedAt(Where) - GroundHeight) <= MaxDepositStep)
 		{
 			Pool->AbsorbSurfaceVolume(Volume);
 			return Pool;
@@ -252,11 +257,113 @@ AARPGFluidPool* UARPGFluidSurfaceSubsystem::DepositSwept(FVector From, FVector T
 	return DepositRing(Footprint, FMath::Min(From.Z, To.Z), Definition);
 }
 
-AARPGFluidPool* UARPGFluidSurfaceSubsystem::DepositRing(const TArray<FVector2D>& Footprint,
-	float GroundHeight, UARPGFluidDefinition* Definition)
+bool UARPGFluidSurfaceSubsystem::FindGroundAt(const FVector2D& At, float NearZ,
+	float& OutHeight, const AActor* Ignore) const
+{
+	FVector Ground;
+	if (!TraceToGround(FVector(At.X, At.Y, NearZ), Ignore, Ground))
+	{
+		return false;
+	}
+
+	OutHeight = static_cast<float>(Ground.Z);
+	return true;
+}
+
+TArray<FVector2D> UARPGFluidSurfaceSubsystem::ClipToGround(const TArray<FVector2D>& Footprint,
+	float GroundHeight, const AActor* Ignore) const
+{
+	if (Footprint.Num() < 3 || MaxDepositStep <= 0.f)
+	{
+		return Footprint;
+	}
+
+	const FVector2D Centre = ARPGFluidGeometry::PolygonCentroid(Footprint);
+
+	float Middle = GroundHeight;
+	if (!FindGroundAt(Centre, GroundHeight, Middle, Ignore))
+	{
+		// NOTHING UNDER THE MIDDLE means there is no body to trim -- the spell
+		// finished over a hole. Handed back whole so the area test downstream
+		// refuses it as one decision rather than this returning a sliver.
+		return Footprint;
+	}
+
+	// HOW FAR THIS DIRECTION CAN GO BEFORE THE FLOOR STOPS BEING ONE FLOOR.
+	//
+	// WALKED, NOT BISECTED, and that is the whole difference between a body that
+	// follows a ramp and one that cannot leave the flat. The question is not "is
+	// this point level with where I started" -- down a slope nothing is -- but
+	// "did the floor get here without jumping". So the walk carries the last
+	// height it saw and compares each sample against THAT, which a slope passes
+	// however far it runs and a ledge fails at its lip.
+	auto ReachAlong = [&](const FVector2D& Toward)
+	{
+		const double Span = (Toward - Centre).Size();
+		if (Span <= UE_DOUBLE_SMALL_NUMBER)
+		{
+			return Toward;
+		}
+
+		const FVector2D Direction = (Toward - Centre) / Span;
+
+		// Stepped at the same spacing the bed is sampled at, so the trim and the
+		// mesh agree about what counts as a step in the floor rather than one
+		// finding detail the other cannot draw.
+		const double Stride = FMath::Max(10.f, BedSampleSpacing);
+
+		float Last = Middle;
+		FVector2D Reached = Centre;
+
+		for (double Along = Stride; Along <= Span + Stride; Along += Stride)
+		{
+			const FVector2D At = Centre + Direction * FMath::Min(Along, Span);
+
+			float Here = 0.f;
+			if (!FindGroundAt(At, Last, Here, Ignore)
+				|| FMath::Abs(Here - Last) > MaxDepositStep)
+			{
+				return Reached;
+			}
+
+			Last = Here;
+			Reached = At;
+
+			if (Along >= Span)
+			{
+				break;
+			}
+		}
+
+		return Reached;
+	};
+
+	TArray<FVector2D> Clipped;
+	Clipped.Reserve(Footprint.Num());
+
+	for (const FVector2D& Point : Footprint)
+	{
+		Clipped.Add(ReachAlong(Point));
+	}
+
+	return Clipped;
+}
+
+AARPGFluidPool* UARPGFluidSurfaceSubsystem::DepositRing(const TArray<FVector2D>& Raw,
+	float GroundHeight, UARPGFluidDefinition* Definition, const AActor* Ignore)
 {
 	UWorld* World = GetWorld();
-	if (!World || Footprint.Num() < 3)
+	if (!World || Raw.Num() < 3)
+	{
+		return nullptr;
+	}
+
+	// TRIMMED TO WHAT HOLDS IT before anything else looks at it, so the merge
+	// below joins the shape that will actually be drawn and the area test refuses
+	// what is left rather than what was asked for.
+	const TArray<FVector2D> Footprint = ClipToGround(Raw, GroundHeight, Ignore);
+
+	if (Footprint.Num() < 3)
 	{
 		return nullptr;
 	}
@@ -266,24 +373,108 @@ AARPGFluidPool* UARPGFluidSurfaceSubsystem::DepositRing(const TArray<FVector2D>&
 	// MERGE rather than stack. Two puddles of the same thing overlapping are one
 	// puddle; leaving them as separate bodies would double their ambient effect
 	// and make the pair react twice to the same spell.
+	//
+	// WHETHER THEY ACTUALLY MEET, which a centroid in a bounding box does not
+	// answer. That was the old test, and it is wrong in both directions: a small
+	// puddle overlapping the RIM of a big one has its centre well outside the big
+	// one's box, and a centre inside a box says nothing about the outlines
+	// touching. So merging worked or did not depending on where the second cast
+	// happened to land, which is exactly as inconsistent as it sounds.
+	auto bMeets = [&](const AARPGFluidPool* Pool)
+	{
+		const TArray<FVector2D>& Ring = Pool->GetRing();
+
+		// Boxes first, so the polygon work below is only ever done for a pool
+		// that could plausibly be touched.
+		const FBox2D Reach = ARPGFluidGeometry::PolygonBounds(Ring)
+			.ExpandBy(Definition->MergeDistance);
+
+		if (!Reach.Intersect(ARPGFluidGeometry::PolygonBounds(Footprint)))
+		{
+			return false;
+		}
+
+		// GROWN BY THE MERGE DISTANCE and then genuinely intersected. Two puddles
+		// a hand's breadth apart are one puddle -- that is what MergeDistance is
+		// for -- and the offset is how "nearly touching" becomes "touching".
+		const TArray<FVector2D> Grown = Definition->MergeDistance > 0.f
+			? ARPGFluidGeometry::OffsetRing(Ring, Definition->MergeDistance)
+			: Ring;
+
+		return ARPGFluidGeometry::PolygonArea(
+			ARPGFluidGeometry::IntersectRings(Grown, Footprint)) > 0.0;
+	};
+
+	// AND AT THE SAME HEIGHT. A PLAN VIEW CANNOT TELL TWO FLOORS APART: overlap
+	// in X and Y was once the whole test, so a puddle cast on the floor of a room
+	// merged into one sitting on the balcony above it -- the ring grew to cover
+	// both, the body stayed at the balcony's height, and the water appeared
+	// nowhere near the spell. Two bodies of the same stuff at two heights are two
+	// bodies, however they look from directly overhead.
+	auto bLevelWith = [&](const AARPGFluidPool* Pool)
+	{
+		return FMath::Abs(Pool->GetSurfaceBedAt(Centre) - GroundHeight) <= MaxDepositStep;
+	};
+
+	AARPGFluidPool* Into = nullptr;
+
 	for (int32 Index = Pools.Num() - 1; Index >= 0; --Index)
 	{
 		AARPGFluidPool* Pool = Pools[Index];
-		if (!IsValid(Pool) || Pool->Definition != Definition)
+		if (!IsValid(Pool) || Pool->Definition != Definition
+			|| !bLevelWith(Pool) || !bMeets(Pool))
 		{
 			continue;
 		}
 
-		const FBox2D PoolBounds = ARPGFluidGeometry::PolygonBounds(Pool->GetRing());
-		const FBox2D Expanded = PoolBounds.ExpandBy(Definition->MergeDistance);
+		Into = Pool;
+		Into->SetRing(ARPGFluidGeometry::MergeRings(Into->GetRing(), Footprint));
+		break;
+	}
 
-		if (!Expanded.IsInside(Centre))
+	// AND THEN EVERYTHING THE GROWN OUTLINE NOW REACHES.
+	//
+	// A footprint dropped BETWEEN two puddles belongs to both, and joining only
+	// the first left the second overlapping it as a separate body -- two outlines
+	// crossing, each drawing its own rim through the middle of the other. Which
+	// is the seam running across the water in the report. Bridging is exactly
+	// what a new cast between two puddles is for, so the union has to be taken to
+	// completion rather than one step of it.
+	for (int32 Index = Pools.Num() - 1; Into && Index >= 0; --Index)
+	{
+		AARPGFluidPool* Pool = Pools[Index];
+		if (Pool == Into || !IsValid(Pool) || Pool->Definition != Definition)
 		{
 			continue;
 		}
 
-		Pool->SetRing(ARPGFluidGeometry::MergeRings(Pool->GetRing(), Footprint));
-		return Pool;
+		const FBox2D Reach = ARPGFluidGeometry::PolygonBounds(Into->GetRing())
+			.ExpandBy(Definition->MergeDistance);
+
+		if (!Reach.Intersect(ARPGFluidGeometry::PolygonBounds(Pool->GetRing()))
+			|| !bLevelWith(Pool))
+		{
+			continue;
+		}
+
+		const TArray<FVector2D> Grown = Definition->MergeDistance > 0.f
+			? ARPGFluidGeometry::OffsetRing(Into->GetRing(), Definition->MergeDistance)
+			: Into->GetRing();
+
+		if (ARPGFluidGeometry::PolygonArea(
+				ARPGFluidGeometry::IntersectRings(Grown, Pool->GetRing())) <= 0.0)
+		{
+			continue;
+		}
+
+		Into->SetRing(ARPGFluidGeometry::MergeRings(Into->GetRing(), Pool->GetRing()));
+		RetireBody(Pool);
+	}
+
+	// NOTHING TO JOIN falls through to a body of its own below.
+	if (Into)
+	{
+		return Into;
 	}
 
 	// TOO LITTLE TO BE A BODY. Nothing merged it, so this would be a new pool
@@ -338,6 +529,17 @@ bool UARPGFluidSurfaceSubsystem::TraceToGround(FVector From, const AActor* Ignor
 	// The spell is still in the world at the moment it finishes, so without this a
 	// projectile with a collider lands on ITSELF and the puddle forms in mid-air.
 	Params.AddIgnoredActor(Ignore);
+
+	// AND EVERY PAWN, because a person standing in a puddle is not the floor of
+	// it. An emanation is cast AROUND its caster, so the caster is at dead centre
+	// of the footprint every single time -- and a probe that stopped on their
+	// capsule reported the floor as being wherever their shoulders were. The body
+	// was then built to that height, its underside standing proud of the real
+	// ground and shifting as they moved.
+	for (TActorIterator<APawn> It(GetWorld()); It; ++It)
+	{
+		Params.AddIgnoredActor(*It);
+	}
 
 	// AND EVERY BODY THIS SYSTEM OWNS, because a body is not ground.
 	//

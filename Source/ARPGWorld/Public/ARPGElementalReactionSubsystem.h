@@ -103,7 +103,25 @@ public:
 	UFUNCTION(BlueprintPure, Category = "ARPG|Reactions")
 	UARPGMagicElement* GetLastProduct() const { return LastProduct; }
 
+	/**
+	 * How much bigger one volume must be than the other before the meeting is
+	 * placed at the SMALL one rather than half way between them.
+	 *
+	 * Two comparable volumes meet in the middle; a fireball and a six-metre slab
+	 * meet at the fireball. Below this the midpoint is honest, above it the big
+	 * body's centre drags the contact toward its own middle -- which is a spell
+	 * landing on the rim of a wall and melting a hole in the centre of it.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Reactions",
+		meta = (ClampMin = "1.0"))
+	float ContactSizeMismatch = 2.f;
+
 private:
+	/** Where the top of a body is under a point, asked of the body itself. */
+	static float SurfaceHeightUnder(const UARPGElementalVolumeComponent* Volume,
+		const FVector& At);
+
+
 	/** True where this machine owns the simulation. */
 	bool HasAuthority() const;
 

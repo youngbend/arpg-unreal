@@ -118,6 +118,11 @@ FVector UARPGElementalVolumeComponent::GetVolumeLocation() const
 	return OverlapSource ? OverlapSource->Bounds.Origin : GetComponentLocation();
 }
 
+FVector UARPGElementalVolumeComponent::GetVolumeExtent() const
+{
+	return OverlapSource ? OverlapSource->Bounds.BoxExtent : FVector::ZeroVector;
+}
+
 float UARPGElementalVolumeComponent::GetSurfaceHeightAt(FVector WorldPoint) const
 {
 	if (!OverlapSource)

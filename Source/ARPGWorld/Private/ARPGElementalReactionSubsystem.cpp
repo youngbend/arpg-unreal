@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ARPGElementalReactionSubsystem.h"
+#include "ARPGElementalSurface.h"
 #include "ARPGWorldAuthority.h"
 #include "ARPGConductionSubsystem.h"
 #include "ARPGDischargeContext.h"
@@ -230,25 +231,56 @@ void UARPGElementalReactionSubsystem::Resolve(UARPGElementalVolumeComponent* A,
 	}
 
 	// --- Contact point -----------------------------------------------------
-	// A reservoir's own origin is not a meaningful position to average against:
-	// a river's origin is the centre of a huge box, tens of metres from wherever
-	// a fireball actually touched its edge. The midpoint is only a good
-	// approximation for two comparably-sized volumes, so when exactly one side is
-	// a reservoir, anchor on the other.
-	FVector Contact;
+	// A BIG BODY'S OWN ORIGIN IS NOT A POSITION TO AVERAGE AGAINST: a river's
+	// origin is the centre of a huge box, tens of metres from wherever a fireball
+	// actually touched its edge. The midpoint is only a good approximation for two
+	// comparably-sized volumes, so when one dwarfs the other, anchor on the small
+	// one -- it is the thing that arrived, and where it is IS where they met.
+	//
+	// THIS USED TO ASK ONLY ABOUT RESERVOIRS, which named the case rather than the
+	// property causing it. An earth slab is not a reservoir -- a raised one sets
+	// bReservoir false explicitly -- but it is metres across, so a fireball on its
+	// rim averaged to a point half way to the middle and melted the bowl there.
+	// The mismatch is what matters, not what the big thing is.
+	auto Reach = [](const UARPGElementalVolumeComponent* Volume)
+	{
+		// HORIZONTAL ONLY. A slab's trigger box is deliberately tall -- headroom
+		// so a spell enters the broadphase before it lands -- and counting that
+		// would call a thin wide body big for the wrong reason.
+		const FVector Extent = Volume->GetVolumeExtent();
+		return FMath::Max(Extent.X, Extent.Y);
+	};
+
+	const UARPGElementalVolumeComponent* Larger = nullptr;
+	const UARPGElementalVolumeComponent* Incoming = nullptr;
+
 	if (A->bReservoir != B->bReservoir)
 	{
-		const UARPGElementalVolumeComponent* Reservoir = A->bReservoir ? A : B;
-		const UARPGElementalVolumeComponent* Incoming = A->bReservoir ? B : A;
+		Larger = A->bReservoir ? A : B;
+		Incoming = A->bReservoir ? B : A;
+	}
+	else if (Reach(A) > Reach(B) * ContactSizeMismatch)
+	{
+		Larger = A;
+		Incoming = B;
+	}
+	else if (Reach(B) > Reach(A) * ContactSizeMismatch)
+	{
+		Larger = B;
+		Incoming = A;
+	}
 
+	FVector Contact;
+	if (Larger)
+	{
 		Contact = Incoming->GetVolumeLocation();
 
-		// ...and put it ON THE WATERLINE. The surface sits inside a much taller
-		// box, so the projectile's own centre can be half a metre off the surface
-		// it visibly hit. Splashing where the water actually is costs one query
-		// and is the whole difference between a hiss of steam on the surface and
-		// one hanging over it.
-		Contact.Z = Reservoir->GetSurfaceHeightAt(Contact);
+		// ...and put it ON THE SURFACE. The surface sits inside a much taller box,
+		// so the projectile's own centre can be half a metre off the thing it
+		// visibly hit. Landing where the surface actually is costs one query and
+		// is the whole difference between a hiss of steam on the water and one
+		// hanging over it.
+		Contact.Z = SurfaceHeightUnder(Larger, Contact);
 	}
 	else
 	{
@@ -305,6 +337,28 @@ void UARPGElementalReactionSubsystem::Resolve(UARPGElementalVolumeComponent* A,
 
 		SpawnProduct(Product, Contact, Direction, Magnitude, SourceActor, bProductDeposits);
 	}
+}
+
+float UARPGElementalReactionSubsystem::SurfaceHeightUnder(
+	const UARPGElementalVolumeComponent* Volume, const FVector& At)
+{
+	// THROUGH THE BODY WHERE THERE IS ONE. A volume component only has a box, and
+	// the top of a slab's box is a metre of headroom above the rock -- fine as a
+	// broadphase and useless as "where did this land". A surface body knows its
+	// own height at a position, bowls and slopes included.
+	if (const AActor* Owner = Volume->GetOwner())
+	{
+		if (const IARPGElementalSurface* Surface = Cast<IARPGElementalSurface>(Owner))
+		{
+			const FVector2D Where(At.X, At.Y);
+			if (Surface->IsSurfaceAt(Where))
+			{
+				return Surface->GetSurfaceLevelAt(Where);
+			}
+		}
+	}
+
+	return Volume->GetSurfaceHeightAt(At);
 }
 
 void UARPGElementalReactionSubsystem::SpawnProduct(UARPGMagicElement* Product,
