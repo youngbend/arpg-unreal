@@ -735,6 +735,39 @@ void AarpgCharacter::ARPGDebugDraw(bool bEnabled)
 	}
 }
 
+void AarpgCharacter::ARPGMagicIgnoreGate(bool bIgnore)
+{
+	// Selection is server-authoritative -- ToggleElement forwards to the server
+	// and the gate is checked there -- so a client setting only its own copy
+	// would watch the server go on refusing. Set both: the local one so any UI
+	// reading the flag agrees, and the server's because it is the one that
+	// decides.
+	if (MagicComponent)
+	{
+		MagicComponent->bIgnoreComplexityGate = bIgnore;
+	}
+
+	if (HasAuthority())
+	{
+		ServerSetIgnoreComplexityGate_Implementation(bIgnore);
+	}
+	else
+	{
+		ServerSetIgnoreComplexityGate(bIgnore);
+	}
+
+	UE_LOG(Logarpg, Log, TEXT("Magic complexity gate %s"),
+		bIgnore ? TEXT("IGNORED") : TEXT("ENFORCED"));
+}
+
+void AarpgCharacter::ServerSetIgnoreComplexityGate_Implementation(bool bIgnore)
+{
+	if (MagicComponent)
+	{
+		MagicComponent->bIgnoreComplexityGate = bIgnore;
+	}
+}
+
 void AarpgCharacter::ARPGAttack()
 {
 	if (HasAuthority()) { ServerComboInput_Implementation(false); }

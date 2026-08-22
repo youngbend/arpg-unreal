@@ -81,6 +81,33 @@ def set_bool(asset, name, value):
     log("could not set '{}' -- check the property name in the bindings".format(name))
 
 
+def facets(spec):
+    """Builds an FARPGSurfaceFacets from a spec's optional facet keys.
+
+    Absent means smooth, which is the honest reading of a heightfield and what
+    ice wants -- see FARPGSurfaceFacets. Only rock asks for anything else.
+
+    The bool inside the struct has the same b-prefix ambiguity set_bool exists
+    for, and a struct cannot be built half-way, so each name is tried in turn on
+    a struct that is otherwise already filled in.
+    """
+    style = unreal.ARPGSurfaceFacets()
+    style.set_editor_property("relief", spec.get("facet_relief", 0.0))
+    style.set_editor_property("spread", spec.get("facet_spread", 0.0))
+
+    flat = spec.get("facet_flat", False)
+    for candidate in ("flat_shaded", "b_flat_shaded"):
+        try:
+            style.set_editor_property(candidate, flat)
+            break
+        except Exception:
+            continue
+    else:
+        log("could not set the facet flat-shading flag -- check the bindings")
+
+    return style
+
+
 def element(name):
     loaded = unreal.EditorAssetLibrary.load_asset("{}/DA_Element_{}".format(ELEMENT_DIR, name))
     if not loaded:
@@ -369,10 +396,29 @@ SOLIDS = [
         # meltable AT ALL -- a slab used to carry no energy, so the reaction
         # solver bailed at its zero-energy guard and fire did nothing to ice.
         "energy_per_area": 0.002,
-        # 20cm cells. The one resolution knob a floe has: triangles, collision
-        # cook and replication all scale with the cell count, and a hole cannot
-        # be finer than this. Fine enough that a bowl reads as a bowl.
-        "cell_size": 20.0,
+        # 25cm cells, up from the 20 this started at and the 12 it briefly was.
+        #
+        # RESOLUTION STOPPED BUYING SHAPE. A slab keeps a signed distance to the
+        # polygon it froze from and the mesher cuts at the zero crossing, so the
+        # outline follows the water to well under a centimetre at any of these
+        # sizes -- chord error across one cell on a 3m floe is 0.26cm at 25.
+        # Before that was true, cell size was the only knob the shape had.
+        #
+        # AND IT IS THE ONLY THING A FLOE COSTS. Cell count is triangles,
+        # collision cook and the heaviest payload the game replicates, and it goes
+        # with the SQUARE of this. Measured on a full-power 5m emanation floe,
+        # rebuilding and re-cooking one costs 27ms at 12cm cells, 10ms at 20 and
+        # 5ms at 30 -- and a melting floe rebuilds whenever its shape changes.
+        # Twelve was a dropped frame per floe.
+        #
+        # What is left for resolution to decide is how fine a hole can be, which
+        # is a quarter of a metre here. That is the trade; it is the number to
+        # move if ice ever needs finer carving than that.
+        "cell_size": 25.0,
+
+        # SMOOTH, and by omission rather than by setting anything -- ice froze out
+        # of a water surface and its job is to reproduce that surface. See
+        # FARPGSurfaceFacets, whose default is exactly this.
         # Narrow and deep enough that one fireball drills through a 30cm slab
         # rather than dishing it.
         "melt_radius": 90.0,
@@ -442,6 +488,24 @@ SOLIDS = [
         "cell_size": 40.0,
         "melt_radius": 70.0,
 
+        # ROCK IS NOT A GRID, and drawn honestly from one it reads as masonry --
+        # a pillar of perfectly rectangular segments, which is the complaint this
+        # answers. The two numbers break the lattice before it is meshed and touch
+        # nothing the simulation stores; see FARPGSurfaceFacets.
+        #
+        # RELIEF IS THE SMALLER HALF. 9cm on a 120cm pillar is a surface with
+        # lumps in it, well short of the third of the thickness where a fresh
+        # slab starts reading as rubble.
+        "facet_relief": 9.0,
+        # AND SPREAD IS THE HALF THAT MATTERS. Relief alone gives a rectangular
+        # grid with a bumpy top, which is still visibly a grid; sliding the
+        # samples a third of a cell sideways leaves neither the top nor the
+        # silhouette with an axis-aligned edge in it.
+        "facet_spread": 0.33,
+        # Hard normals, so it reads as planes meeting at edges. Stone fractures;
+        # it does not curve.
+        "facet_flat": True,
+
         # DENSER THAN ANY FLUID HERE, so if one is ever raised in water it rests
         # on the bed instead of bobbing -- one comparison in the same Archimedes
         # the floes use, reached without anything knowing it is rock.
@@ -476,6 +540,17 @@ SOLIDS = [
         # sculpture.
         "cell_size": 60.0,
         "melt_radius": 70.0,
+
+        # THE SAME ROCK, and the relief scales with the slab rather than with the
+        # cell: this one is half the pillar's thickness, so it gets half the
+        # break-up or the wall would read as a heap rather than as something
+        # raised. Spread is a FRACTION of a cell already, so it needs no such
+        # adjustment -- on 60cm cells it is simply a bigger displacement, which is
+        # right for a coarser wall.
+        "facet_relief": 5.0,
+        "facet_spread": 0.33,
+        "facet_flat": True,
+
         "density": 0.0025,
         "occupant_mass": 80.0,
         "load_response": 100000.0,
@@ -519,6 +594,15 @@ SOLIDS = [
         # thing you look at, where a pillar is a block that takes hits.
         "cell_size": 25.0,
         "melt_radius": 70.0,
+
+        # FACETED, BUT BARELY LIFTED. Volcanic glass fractures into planes, so it
+        # wants the hard normals and the broken-up outline as much as earth does
+        # -- and it is a 25cm skin, so relief that would read as lumps on a
+        # pillar would read as a crust with holes worn in it. Almost all of the
+        # break-up here is sideways.
+        "facet_relief": 1.5,
+        "facet_spread": 0.3,
+        "facet_flat": True,
 
         # LIGHTER THAN THE LAVA UNDER IT, so a crust floats -- which is both what
         # real obsidian does (2.4 against basalt magma's 2.7) and the only thing
@@ -675,6 +759,8 @@ def main():
         solid.set_editor_property("minimum_area", spec["minimum_area"])
         solid.set_editor_property("energy_per_area", spec["energy_per_area"])
         solid.set_editor_property("cell_size", spec["cell_size"])
+        solid.set_editor_property("facets", facets(spec))
+        solid.set_editor_property("edge_melt_scale", spec.get("edge_melt_scale", 6.0))
         solid.set_editor_property("melt_radius", spec["melt_radius"])
         solid.set_editor_property("density", spec["density"])
         solid.set_editor_property("occupant_mass", spec["occupant_mass"])

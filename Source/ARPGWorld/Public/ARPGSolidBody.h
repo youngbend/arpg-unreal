@@ -127,6 +127,30 @@ public:
 	double MeltUniformly(float FromTop, float FromBottom);
 
 	/**
+	 * Pulls the slab's outline in, taking the rim with it. See FARPGSolidField::Erode.
+	 *
+	 * The other half of ambient melting, and the half that makes a floe SHRINK
+	 * rather than only thin. Without it every cell reaches zero thickness on the
+	 * same tick and the whole sheet vanishes between two frames.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "ARPG|Fluid")
+	double MeltInward(float Distance);
+
+	/**
+	 * Takes the slab off the water and stands it on the bed.
+	 *
+	 * WHAT A FROZEN-SOLID PUDDLE IS. Freezing the last of a pool leaves ice where
+	 * the water was and no water under it, so the slab is not floating on anything
+	 * -- and a floe placed at the WATERLINE with no buoyancy tick to settle it
+	 * hangs in the air by exactly the depth the puddle had. GroundHeight tracks
+	 * the surface a slab rides; for one that rides nothing it has to be the floor.
+	 *
+	 * Null FloatsOn is how this codebase says rooted, so this is the same state a
+	 * raised earth wall is in -- see AARPGRaiseSlabEffect.
+	 */
+	void GroundOnBed(float BedHeight);
+
+	/**
 	 * Puts a melted volume of this slab back into the world as fluid.
 	 *
 	 * REACTIONS ONLY. Ambient melting calls MeltUniformly directly and discards
@@ -396,5 +420,26 @@ protected:
 
 	UPROPERTY(Transient)
 	FVector2D RunoffAt = FVector2D::ZeroVector;
+
+	/**
+	 * Ambient melting that has happened but has not been drawn yet, in cm.
+	 *
+	 * BECAUSE A REBUILD IS THE EXPENSIVE THING A SLAB DOES, and ambient melting
+	 * asked for one four times a second forever. A 5m floe at 20cm cells is 2800
+	 * cells and roughly 8000 triangles, and rebuilding plus re-cooking collision
+	 * measured over 10ms -- a dropped frame, four times a second, per floe. What
+	 * it bought was a tenth of a millimetre of thinning: the weather tick moves
+	 * the field by MeltRate * 0.25s, which for ice is 1.25mm.
+	 *
+	 * So the melt lands in the cells every tick -- the simulation never lags the
+	 * truth -- and the MESH waits until there is something to see. Anything that
+	 * changes the slab's shape rather than its thickness still rebuilds at once;
+	 * see MeltUniformly.
+	 */
+	UPROPERTY(Transient)
+	float UndrawnMelt = 0.f;
+
+	/** How much ambient thinning is worth a rebuild, in cm. */
+	static constexpr float UndrawnMeltLimit = 0.5f;
 
 };

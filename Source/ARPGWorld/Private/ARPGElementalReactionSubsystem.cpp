@@ -8,6 +8,7 @@
 #include "ARPGDischargeEffect.h"
 #include "ARPGElementalVolumeComponent.h"
 #include "ARPGFluidSurfaceSubsystem.h"
+#include "ARPGSolidBody.h"
 #include "ARPGMagicCombinationTable.h"
 #include "ARPGMagicElement.h"
 #include "ARPGWorld.h"
@@ -77,6 +78,7 @@ void UARPGElementalReactionSubsystem::Resolve(UARPGElementalVolumeComponent* A,
 
 	UARPGMagicElement* ElementA = A->Element;
 	UARPGMagicElement* ElementB = B->Element;
+
 	if (!ElementA || !ElementB)
 	{
 		return; // a volume with no element is inert
@@ -91,6 +93,44 @@ void UARPGElementalReactionSubsystem::Resolve(UARPGElementalVolumeComponent* A,
 	const float EnergyA = A->GetEnergy();
 	const float EnergyB = B->GetEnergy();
 	if (EnergyA <= 0.f || EnergyB <= 0.f)
+	{
+		return;
+	}
+
+	// A BODY DOES NOT REACT WITH THE SURFACE IT IS RIDING, and until this was here
+	// one cast could eat a whole puddle.
+	//
+	// A floe is a surface body with an elemental volume, exactly as a pool is --
+	// which is what lets water meet lava and set to obsidian. So ice floating on
+	// water is two overlapping volumes whose elements match a row, and the solver
+	// read it as an ice agent ARRIVING at a body of water. It froze another piece;
+	// that piece was another floe on the same pool with a full tank of energy of
+	// its own; and that one froze another. A spell that correctly froze the lens
+	// where it overlapped set off forty more freezes marching inward until there
+	// was no water left -- then the pool died and DropRiders took every
+	// intermediate floe with it, leaving one small slab near the middle of where
+	// the puddle had been. Cast dead centre it looked nearly right, because the
+	// first lens was most of the pool and the cascade had little left to eat.
+	//
+	// REFUSED HERE RATHER THAN IN TrySolidify, because freezing is not the only
+	// thing the pair would otherwise do. Blocked from solidifying they simply fell
+	// through to an ordinary energy trade instead, and ate the pool that way --
+	// same cascade, different door. Ice sitting on water is not a collision
+	// either; it is one thing resting on another, and nothing about it is an
+	// event.
+	//
+	// RIDING IS THE TEST, not being a slab. Ice thrown at a pool it has never met
+	// still freezes it -- that is the spell -- and a crust setting on lava is
+	// still two surfaces meeting. What cannot happen is a body reacting with the
+	// surface it is a product of and afloat on.
+	auto RidesTheOther = [](const UARPGElementalVolumeComponent* Rider,
+		const UARPGElementalVolumeComponent* Beneath)
+	{
+		const AARPGSolidBody* Slab = Rider ? Cast<AARPGSolidBody>(Rider->GetOwner()) : nullptr;
+		return Slab && Beneath && Slab->FloatsOn.GetObject() == Beneath->GetOwner();
+	};
+
+	if (RidesTheOther(A, B) || RidesTheOther(B, A))
 	{
 		return;
 	}

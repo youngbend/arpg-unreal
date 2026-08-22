@@ -224,9 +224,24 @@ protected:
 	UFUNCTION(Exec)
 	void ARPGDebugDraw(bool bEnabled);
 
+	/**
+	 * Turns the magic complexity gate off, so any two elements can be readied
+	 * together regardless of how well this character knows either.
+	 *
+	 * For trying out combinations without first earning them -- a fresh character
+	 * is level 0 in everything and primitives are complexity 1, so the gate
+	 * refuses every pairing until each element has been cast solo to level 1.
+	 * See UARPGMagicComponent::bIgnoreComplexityGate, which this sets.
+	 */
+	UFUNCTION(Exec)
+	void ARPGMagicIgnoreGate(bool bIgnore);
+
 protected:
 	UFUNCTION(Server, Reliable)
 	void ServerDebugSwing();
+
+	UFUNCTION(Server, Reliable)
+	void ServerSetIgnoreComplexityGate(bool bIgnore);
 
 	UFUNCTION(Server, Reliable)
 	void ServerComboInput(bool bHeavy);

@@ -699,6 +699,7 @@ bool UARPGFluidSurfaceSubsystem::TrySolidify(UARPGElementalVolumeComponent* A,
 
 	const TArray<FVector2D> AgentRing = ARPGFluidGeometry::MakeCircle(AgentCentre, AgentRadius);
 
+
 	// Bounded by the contact rather than asked for whole, because a river is
 	// kilometres long and only the metre the shard touched is a candidate. A pool
 	// ignores the bound and hands back its ring.
@@ -712,6 +713,7 @@ bool UARPGFluidSurfaceSubsystem::TrySolidify(UARPGElementalVolumeComponent* A,
 	ARPGFluidGeometry::IntersectWithHoles(Footprint, AgentRing, SolidifiedRing, Holes);
 
 	const double SolidifiedArea = ARPGFluidGeometry::PolygonArea(SolidifiedRing);
+
 	if (SolidifiedArea < SolidDefinition->MinimumArea)
 	{
 		return false;
@@ -757,6 +759,37 @@ bool UARPGFluidSurfaceSubsystem::TrySolidify(UARPGElementalVolumeComponent* A,
 	// a river takes nothing and is never finished.
 	if (Surface->ConsumeSurfaceArea(SolidifiedArea))
 	{
+		// THE ICE IS NOT A RIDER THAT LOST ITS WATER -- IT IS WHAT THE WATER
+		// BECAME, and that distinction is the whole of this branch.
+		//
+		// Retiring a pool drops everything floating on it, which is exactly right
+		// for the case DropRiders was written for: fire boils a puddle out from
+		// under a floe and the floe has nothing left to ride. A freeze that takes
+		// the LAST of a pool is the same call and the opposite event -- the slab
+		// created a few lines above IS that pool, set solid and resting on the bed
+		// it used to float in -- so the retire below would destroy the ice as part
+		// of making it, and this function would go on to report success.
+		//
+		// THIS IS WHY FREEZING A PUDDLE LOOKED LIKE IT DID NOTHING. A partial
+		// freeze leaves enough water to keep the pool alive, so the floe survives
+		// and everything works; anything taking a pool under its minimum area
+		// destroyed its own product and said it had frozen it. An emanation is
+		// metres across and a puddle is not, so the common case in a real game was
+		// the broken one -- and the only test on this path called TrySolidify with
+		// a shard small enough to land on the other side of it.
+		//
+		// GROUNDING IT IS NOT A SPECIAL CASE. A null FloatsOn is already how this
+		// codebase says "rooted" -- see AARPGRaiseSlabEffect, which makes rooted
+		// slabs the same way, and the buoyancy tick, which reads it and leaves
+		// them alone. A slab standing on the bed of a pool that is gone is rooted
+		// by any reading.
+		// ON THE BED, not at the waterline. Setup placed the slab at the surface it
+		// froze out of, which is right for a floe because the buoyancy tick settles
+		// it on the next frame -- and wrong for this one, because grounding it is
+		// exactly what stops that tick from ever running. Left alone it hangs in
+		// the air by the depth the puddle had.
+		Solid->GroundOnBed(Surface->GetSurfaceBedAt(Centre));
+
 		// Only this subsystem's own bodies are its to retire. Anything else that
 		// reports itself used up owns its own lifetime.
 		RetireBody(Cast<AARPGSurfaceBody>(Surface));
@@ -1195,13 +1228,28 @@ void UARPGFluidSurfaceSubsystem::TickWeather(float DeltaTime)
 			continue; // permanent -- obsidian is rock, not frozen lava
 		}
 
-		// AMBIENT MELT IS A THINNING, not an inward offset of an outline. Both
-		// faces at once, because a floe in water melts from underneath as much as
-		// from above -- and every hole in it widens for free, since a hole is just
-		// the cells where the two faces have already met. No ring to offset, no
-		// slit to round into arcs, nothing that can grow.
+		// AMBIENT MELT IS A THINNING FIRST. Both faces at once, because a floe in
+		// water melts from underneath as much as from above -- and every hole in it
+		// widens for free, since a hole is just the cells where the two faces have
+		// already met.
 		const float Thinning = Solid->Definition->MeltRate * DeltaTime;
 		Solid->MeltUniformly(Thinning * 0.5f, Thinning * 0.5f);
+
+		// AND A RETREAT SECOND, which for a long time was missing entirely. A slab
+		// that only thins keeps its full plan until every cell reaches zero on the
+		// same tick and the whole sheet disappears between two frames. The rim is
+		// exposed on its side as well, so it goes faster -- see EdgeMeltScale --
+		// and the floe shrinks to its minimum area while there is still thickness
+		// to see.
+		//
+		// STILL NOT AN OFFSET OF AN OUTLINE. It is one addition per cell against
+		// the stored distance the field already keeps, so the pathology that made
+		// this a thinning in the first place has nowhere to happen. See
+		// FARPGSolidField::Erode.
+		if (Solid->Definition->EdgeMeltScale > 0.f)
+		{
+			Solid->MeltInward(Thinning * Solid->Definition->EdgeMeltScale);
+		}
 
 		if (Solid->GetArea() < Solid->Definition->MinimumArea)
 		{

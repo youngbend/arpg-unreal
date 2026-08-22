@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "ARPGSolidField.h"
+#include "ARPGSurfaceFacets.h"
 #include "ARPGWallRun.h"
 
 class UDynamicMeshComponent;
@@ -50,6 +51,22 @@ namespace ARPGFluidGeometry
 
 	/** Is this point inside the ring? Even-odd crossing test. */
 	ARPGWORLD_API bool PolygonContains(const TArray<FVector2D>& Ring, const FVector2D& Point);
+
+	/**
+	 * Distance from a point to the ring's nearest edge, negative inside it.
+	 *
+	 * WHAT A GRID NEEDS IN ORDER NOT TO BE A STAIRCASE. Asking a cell whether its
+	 * centre is inside throws away everything about where the outline ran between
+	 * one centre and the next; asking how FAR keeps it, and two neighbours with
+	 * opposite signs then say exactly where the edge crossed. See
+	 * FARPGSolidField::Edge, which is this sampled onto a grid.
+	 *
+	 * Inside-ness comes from PolygonContains rather than from a winding test of
+	 * its own, so the sign here and the answer there cannot disagree about a
+	 * point sitting on the line.
+	 */
+	ARPGWORLD_API double PolygonSignedDistance(const TArray<FVector2D>& Ring,
+		const FVector2D& Point);
 
 	/** Axis-aligned bounds, for a trigger box that only has to be generous. */
 	ARPGWORLD_API FBox2D PolygonBounds(const TArray<FVector2D>& Ring);
@@ -181,10 +198,19 @@ namespace ARPGFluidGeometry
 	 * over eighteen melt ticks. A field cannot: its triangle count is at most a
 	 * fixed few per cell, forever, no matter how many fireballs land on it.
 	 *
+	 * A GRID IS NOT A LOOK, though it was drawn as one for a long time. Cells were
+	 * meshed as boxes, which put a staircase around every slab and terraces down
+	 * every melted bowl -- detail the field never had and the player could see.
+	 * They are meshed as SAMPLES now: joined into a surface, with the silhouette
+	 * cut where the material actually runs out rather than at the nearest cell
+	 * boundary. Facets asks for some of the grid back, which is what rock wants --
+	 * see FARPGSurfaceFacets. The default asks for none.
+	 *
 	 * Emitted in the component's LOCAL space; the field's own heights already are.
 	 */
 	ARPGWORLD_API void BuildFieldMesh(UDynamicMeshComponent* Component,
-		const FARPGSolidField& Field, const FVector2D& Origin);
+		const FARPGSolidField& Field, const FVector2D& Origin,
+		const FARPGSurfaceFacets& Facets = FARPGSurfaceFacets());
 
 	/**
 	 * The seventh: what is LYING ON that heightfield, drawn as its own surface.
@@ -196,9 +222,14 @@ namespace ARPGFluidGeometry
 	 * bowl in the middle of a slab (which keeps its melt rather than shedding it)
 	 * showed nothing at all, ever.
 	 *
-	 * The same cell rule as BuildFieldMesh, run over Top to Top-plus-film instead
-	 * of Bottom to Top. Cells shallower than MinimumFilm are left out, so the
-	 * drawn edge of the wet is the same edge the flow solver stops at.
+	 * The same surface rule as BuildFieldMesh, run over Top to Top-plus-film
+	 * instead of Bottom to Top. The wet stops where the depth falls to
+	 * MinimumFilm -- the same number the flow solver stops moving at -- or where
+	 * the rock under it stops, whichever comes first.
+	 *
+	 * PASS THE SLAB'S OWN FACETS, not the fluid's. They displace the lattice by a
+	 * hash of each sample, so a film given anything else would break over
+	 * different bumps than the rock it is lying on and float clear of it.
 	 *
 	 * NO COLLISION BEHIND THIS. What you stand on is the rock; the lava on top of
 	 * it is something you are standing in, which the volume component already
@@ -206,5 +237,6 @@ namespace ARPGFluidGeometry
 	 */
 	ARPGWORLD_API void BuildFilmMesh(UDynamicMeshComponent* Component,
 		const FARPGSolidField& Field, const FVector2D& Origin, float MinimumFilm,
+		const FARPGSurfaceFacets& Facets = FARPGSurfaceFacets(),
 		TArrayView<const FARPGWallRun> Runs = {});
 }

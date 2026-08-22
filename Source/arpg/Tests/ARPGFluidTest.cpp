@@ -18,10 +18,12 @@
 #include "ARPGSolidDefinition.h"
 #include "ARPGFluidGeometry.h"
 #include "ARPGSolidField.h"
+#include "ARPGWorld.h"
 #include "ARPGFluidSurfaceSubsystem.h"
 #include "ARPGGameplayTags.h"
 #include "ARPGMagicCombinationTable.h"
 #include "ARPGMagicElement.h"
+#include "ARPGPlaceholderEffect.h"
 #include "ARPGReservoirVolumeComponent.h"
 #include "Components/BoxComponent.h"
 #include "Components/CapsuleComponent.h"
@@ -2148,6 +2150,279 @@ bool FARPGSolidFieldRefreezeTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// ---------------------------------------------------------------------------
+// The shape, rather than the grid it is stored on
+// ---------------------------------------------------------------------------
+//
+// A SLAB IS NOT ITS CELLS, and for a long time it was drawn as though it were.
+// The three tests below are the three places that showed: the outline it froze
+// with, the surface a spell cut into it, and the material it is made of.
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGSolidFieldOutlineTest,
+	"ARPG.World.Fluid.Ice.TheSlabKeepsTheOutlineItFrozeWith",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGSolidFieldOutlineTest::RunTest(const FString& Parameters)
+{
+	// DELIBERATELY COARSE: a 40cm grid under a 6m circle. The claim is that the
+	// outline survives the grid, so the grid has to be big enough to destroy it.
+	const TArray<FVector2D> Ring =
+		ARPGFluidGeometry::MakeCircle(FVector2D::ZeroVector, 300.0, 24);
+
+	FARPGSolidField Field;
+	Field.BuildFrom(Ring, /*CellSize=*/40.f, /*Thickness=*/30.f);
+
+	// A point sitting within a couple of centimetres of the line can honestly be
+	// called either, and testing those would be testing floating point. Every
+	// other point has a right answer.
+	constexpr double Slack = 3.0;
+
+	int32 Wrong = 0;
+	int32 WouldHaveBeenWrong = 0;
+	double Worst = 0.0;
+	int32 Judged = 0;
+
+	// An irrational-ish step, so the samples do not quietly land on cell centres
+	// and flatter the thing being measured.
+	for (double X = -340.0; X <= 340.0; X += 7.3)
+	{
+		for (double Y = -340.0; Y <= 340.0; Y += 7.3)
+		{
+			const FVector2D At(X, Y);
+			const double Distance = ARPGFluidGeometry::PolygonSignedDistance(Ring, At);
+
+			if (FMath::Abs(Distance) < Slack)
+			{
+				continue;
+			}
+
+			++Judged;
+
+			const bool bShouldBeSolid = Distance < 0.0;
+
+			if (Field.IsSolidAt(At) != bShouldBeSolid)
+			{
+				++Wrong;
+				Worst = FMath::Max(Worst, FMath::Abs(Distance));
+			}
+
+			// WHAT THE CELL RULE WOULD HAVE SAID, run alongside so this measures an
+			// improvement rather than asserting a number somebody picked. Asking
+			// whether the containing cell's CENTRE was inside is exactly what
+			// BuildFrom used to keep, and it is wrong by up to half a cell in every
+			// direction -- which on this grid is 20cm of staircase.
+			const FIntPoint Cell = Field.CellAt(At);
+			const bool bCellRule = Cell.X >= 0
+				&& ARPGFluidGeometry::PolygonContains(Ring, Field.CentreOf(Cell.X, Cell.Y));
+
+			WouldHaveBeenWrong += (bCellRule != bShouldBeSolid) ? 1 : 0;
+		}
+	}
+
+	TestTrue(TEXT("Setup: there were points to judge"), Judged > 1000);
+
+	// THE STAIRCASE, MEASURED. This is the artefact the whole change is about, and
+	// it is worth having a number for: on a 40cm grid the cell rule misplaces the
+	// edge of a slab across a 20cm-wide band all the way round it.
+	TestTrue(FString::Printf(
+		TEXT("The cell rule really would have got these wrong (%d of %d)"),
+		WouldHaveBeenWrong, Judged), WouldHaveBeenWrong > 50);
+
+	TestEqual(FString::Printf(
+		TEXT("Nothing clear of the outline is on the wrong side of it (worst %.1fcm)"),
+		Worst), Wrong, 0);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGSolidFieldBowlTest,
+	"ARPG.World.Fluid.Ice.AMeltedBowlIsASlopeAndNotAStaircase",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGSolidFieldBowlTest::RunTest(const FString& Parameters)
+{
+	FARPGSolidField Field;
+	Field.BuildFrom(ARPGFluidGeometry::MakeCircle(FVector2D::ZeroVector, 400.0),
+		/*CellSize=*/20.f, /*Thickness=*/60.f);
+
+	// A wide, deep dish, so its flank is many cells long and there is room for a
+	// staircase to show up in.
+	Field.MeltBowl(FVector2D::ZeroVector, /*Radius=*/200.f, /*Depth=*/40.f);
+
+	TestTrue(TEXT("Setup: the middle is lower than the rim"),
+		Field.TopAt(FVector2D::ZeroVector) < Field.TopAt(FVector2D(300, 0)) - 20.f);
+
+	// THE FLANK, not the whole bowl. MeltBowl's falloff is flat at the very bottom
+	// and flat again past the rim, both legitimately, and a run of equal heights
+	// there says nothing about the meshing.
+	int32 Longest = 0;
+	int32 Run = 0;
+	float Previous = Field.TopAt(FVector2D(40.f, 0.f));
+
+	for (float X = 41.f; X <= 160.f; X += 1.f)
+	{
+		const float Here = Field.TopAt(FVector2D(X, 0.f));
+
+		// A CENTIMETRE ALONG THE FLOOR SHOULD BE A CLIMB. Drawn as boxes it was
+		// twenty flat centimetres and then a 4cm step, which is the staircase you
+		// could see and the ledge you could stand on.
+		Run = (Here - Previous < 0.01f) ? Run + 1 : 0;
+		Longest = FMath::Max(Longest, Run);
+
+		Previous = Here;
+	}
+
+	TestTrue(FString::Printf(
+		TEXT("The flank climbs the whole way rather than in steps (flat run of %d)"),
+		Longest), Longest < 4);
+
+	// AND IT STILL PASSES THROUGH THE CELLS THEMSELVES. Interpolation that
+	// smoothed the field instead of reading between it would round the bottom of
+	// the bowl off, and the depth a fireball cut would quietly stop being the
+	// depth the simulation charged for.
+	const float Cut = Field.TopAt(Field.CentreOf(Field.CountX / 2, Field.CountY / 2));
+	const float Stored = Field.Top[Field.Index(Field.CountX / 2, Field.CountY / 2)] * 0.1f;
+
+	TestEqual(TEXT("A cell centre still reads exactly what the cell stores"),
+		Cut, Stored, 0.05f);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGSlabFacetTest,
+	"ARPG.World.Fluid.Slabs.FacetingBreaksTheGridUpWithoutTouchingTheField",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGSlabFacetTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+	UARPGMagicElement* Earth = MakeElement(GetTransientPackage(), TAG_Element_Earth);
+
+	UARPGSolidDefinition* Smooth = MakeEarth(Earth);
+
+	UARPGSolidDefinition* Rough = MakeEarth(Earth);
+	Rough->Facets.Relief = 8.f;
+	Rough->Facets.Spread = 0.3f;
+	Rough->Facets.bFlatShaded = true;
+
+	Fluids->Solids = { Smooth };
+
+	AARPGSolidBody* Plain = RaiseSlab(Scope.World, Fluids, Smooth,
+		FVector2D::ZeroVector, 200.0);
+	AARPGSolidBody* Broken = RaiseSlab(Scope.World, Fluids, Rough,
+		FVector2D(2000, 0), 200.0);
+
+	// FACETING IS DRAWING, AND NOTHING ELSE. If any of it reached the cells the
+	// simulation would be a different simulation on two machines that disagreed
+	// about the art settings -- and a slab's thickness, volume and buoyancy would
+	// depend on how rough it was made to look.
+	TestEqual(TEXT("Both slabs have the same grid"),
+		Broken->Field.CountX * Broken->Field.CountY,
+		Plain->Field.CountX * Plain->Field.CountY);
+
+	int32 Differences = 0;
+	for (int32 At = 0; At < Plain->Field.Top.Num(); ++At)
+	{
+		Differences += (Plain->Field.Top[At] != Broken->Field.Top[At]) ? 1 : 0;
+		Differences += (Plain->Field.Bottom[At] != Broken->Field.Bottom[At]) ? 1 : 0;
+		Differences += (Plain->Field.Edge[At] != Broken->Field.Edge[At]) ? 1 : 0;
+	}
+
+	TestEqual(TEXT("And byte-identical cells in it"), Differences, 0);
+	TestEqual(TEXT("And the same volume of rock"),
+		Broken->Field.SolidVolume(), Plain->Field.SolidVolume(), 1.0);
+
+	// BUT A DIFFERENT SURFACE. Traced rather than inspected, because what the
+	// relief is FOR is that the rock you walk on is not a flat plane -- and the
+	// drawn mesh is the collision, so the trace is the honest question.
+	const float Ceiling = Smooth->Thickness + 400.f;
+
+	auto SurfaceUnder = [&Scope, Ceiling](const FVector2D& At)
+	{
+		FHitResult Hit;
+		const bool bHit = Scope.World->LineTraceSingleByChannel(Hit,
+			FVector(At.X, At.Y, Ceiling), FVector(At.X, At.Y, -400.f),
+			ECC_Visibility, FCollisionQueryParams(SCENE_QUERY_STAT(Facets), false));
+
+		return bHit ? static_cast<float>(Hit.ImpactPoint.Z) : TNumericLimits<float>::Lowest();
+	};
+
+	int32 Moved = 0;
+	int32 Landed = 0;
+	float Furthest = 0.f;
+
+	for (float X = -80.f; X <= 80.f; X += 20.f)
+	{
+		for (float Y = -80.f; Y <= 80.f; Y += 20.f)
+		{
+			const float Height = SurfaceUnder(FVector2D(2000.f + X, Y));
+			if (Height <= 0.f)
+			{
+				continue;
+			}
+
+			++Landed;
+
+			const float Flat = Smooth->Thickness;
+			Furthest = FMath::Max(Furthest, FMath::Abs(Height - Flat));
+			Moved += FMath::Abs(Height - Flat) > 1.f ? 1 : 0;
+		}
+	}
+
+	TestTrue(TEXT("Setup: the broken slab was there to be traced"), Landed > 10);
+	TestTrue(TEXT("Its surface is not a flat plane"), Moved > 0);
+
+	// WITHIN WHAT WAS ASKED FOR. Relief displaces the whole column by up to half
+	// its own value either way, so anything further than that is the mesher
+	// inventing rock rather than roughening it.
+	TestTrue(FString::Printf(TEXT("But only by as much as the relief allows (%.1fcm)"),
+		Furthest), Furthest <= Rough->Facets.Relief);
+
+	// AND THE SMOOTH ONE IS STILL FLAT, so the roughness came from the setting
+	// rather than from the new mesher having lost the ability to draw a plane.
+	float FlatWorst = 0.f;
+	for (float X = -80.f; X <= 80.f; X += 20.f)
+	{
+		const float Height = SurfaceUnder(FVector2D(X, 0.f));
+		if (Height > 0.f)
+		{
+			FlatWorst = FMath::Max(FlatWorst, FMath::Abs(Height - Smooth->Thickness));
+		}
+	}
+
+	TestTrue(FString::Printf(TEXT("A slab that asked for no facets is flat (%.2fcm)"),
+		FlatWorst), FlatWorst < 0.5f);
+
+	// REPEATABLE, which is what makes the displacement a hash of the lattice index
+	// rather than of anything incidental. Two slabs built the same way have to
+	// break the same way, or a rebuild would make the rock shrug every time a
+	// spell landed on it -- and a client would draw a different rock from the
+	// server's.
+	AARPGSolidBody* Twin = RaiseSlab(Scope.World, Fluids, Rough,
+		FVector2D(2000, 4000), 200.0);
+
+	int32 Compared = 0;
+	for (float X = -80.f; X <= 80.f; X += 20.f)
+	{
+		const float Here = SurfaceUnder(FVector2D(2000.f + X, 0.f));
+		const float There = SurfaceUnder(FVector2D(2000.f + X, 4000.f));
+
+		if (Here > 0.f && There > 0.f)
+		{
+			++Compared;
+			TestEqual(TEXT("The same corner breaks the same way twice"), There, Here, 0.05f);
+		}
+	}
+
+	TestTrue(TEXT("And there was something to compare"), Compared > 3);
+	TestTrue(TEXT("The twin exists"), Twin != nullptr);
+
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGSolidFieldBoundedTest,
 	"ARPG.World.Fluid.Ice.DetailIsBoundedNoMatterHowMuchHappens",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -3619,6 +3894,441 @@ bool FARPGFluidSolidifyTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFluidSolidifyThroughReactionTest,
+	"ARPG.World.Fluid.Solidify.AnIceEmanationOverAPuddleFreezesIt",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGFluidSolidifyThroughReactionTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+
+	// BEGUN PLAY, unlike the rest of this suite. A discharge arms its reaction
+	// volume in BeginPlay -- see AARPGDischargeEffect::ConfigureReactionVolume --
+	// and the default fixture deliberately does not run it, so the emanation
+	// would spawn with a switched-off collider and no energy and meet nothing.
+	// The fixture's own comment names this exact case.
+	ARPGTest::FTestWorldBegunPlay Scope;
+
+	// THE WHOLE PATH, which nothing covered. FreezesTheOverlapIntoAStandableSlab
+	// calls TrySolidify directly, so every step BEFORE it -- the colliders finding
+	// each other, OnVolumesMet firing, and the reaction solver deciding this pair
+	// is a solidify rather than an energy trade -- was untested. A spell cast in
+	// the game goes through all of it.
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+	UARPGElementalReactionSubsystem* Reactions =
+		Scope.World->GetSubsystem<UARPGElementalReactionSubsystem>();
+
+	TestNotNull(TEXT("Setup: the reaction subsystem exists"), Reactions);
+	if (!Reactions)
+	{
+		return false;
+	}
+
+	MakeGround(Scope.World, 0.f);
+
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+	UARPGMagicElement* Ice = MakeElement(GetTransientPackage(), TAG_Element_Ice);
+
+	UARPGFluidDefinition* WaterDefinition = MakeWater(GetTransientPackage(), Water);
+	WaterDefinition->EvaporationRate = 0.f;
+
+	UARPGSolidDefinition* IceDefinition = NewObject<UARPGSolidDefinition>();
+	IceDefinition->Element = Ice;
+	IceDefinition->Thickness = 30.f;
+	IceDefinition->bStandable = true;
+	IceDefinition->MeltRate = 0.f;
+	IceDefinition->MinimumArea = 2500.f; // the shipped number, not a lenient one
+
+	// BOTH ROWS THE SHIPPED TABLE HAS FOR THIS PAIR, because having only the
+	// Surface one is not the configuration the game runs. DA_MagicCombinations
+	// carries Freeze (Collision|Field) alongside FreezeSurface (Surface), and the
+	// solver reads the Collision scope on its way to the hand-off.
+	UARPGMagicCombinationTable* Table = NewObject<UARPGMagicCombinationTable>();
+
+	UARPGMagicCombinationEntry* Surface = NewObject<UARPGMagicCombinationEntry>(Table);
+	Surface->RequiredElements.AddTag(TAG_Element_Ice);
+	Surface->RequiredElements.AddTag(TAG_Element_Water);
+	Surface->Result = Ice;
+	Surface->Mode = EARPGReactionMode::Solidify;
+	Surface->Scope = static_cast<int32>(EARPGCombinationScope::Surface);
+	Table->Entries.Add(Surface);
+
+	UARPGMagicCombinationEntry* Collision = NewObject<UARPGMagicCombinationEntry>(Table);
+	Collision->RequiredElements.AddTag(TAG_Element_Ice);
+	Collision->RequiredElements.AddTag(TAG_Element_Water);
+	Collision->Result = Ice;
+	Collision->Mode = EARPGReactionMode::Auto;
+	Collision->Scope = static_cast<int32>(EARPGCombinationScope::Collision)
+		| static_cast<int32>(EARPGCombinationScope::Field);
+	Table->Entries.Add(Collision);
+
+	Fluids->Definitions = { WaterDefinition };
+	Fluids->Solids = { IceDefinition };
+	Fluids->CombinationTable = Table;
+	Reactions->CombinationTable = Table;
+
+	AARPGFluidPool* Pool = Fluids->Deposit(FVector(0, 0, 0), 300.f, TAG_Element_Water);
+	TestNotNull(TEXT("Setup: a puddle exists"), Pool);
+	if (!Pool)
+	{
+		return false;
+	}
+
+	// AN EMANATION STANDING OVER IT, spawned exactly as the discharge ability
+	// spawns one: deferred, initialised from a context, then finished.
+	FARPGDischargeContext Context;
+	Context.DischargeType = EARPGDischargeType::Emanate;
+	Context.PrimaryElement = Ice;
+	Context.Origin = FVector(0, 0, 90);
+	Context.Direction = FVector::ForwardVector;
+	Context.ComputedDamage = 40.f;
+	Context.MinPower = 0.f;
+	Context.MaxPower = 1.f;
+	Context.PowerFraction = 1.f;
+
+	const FTransform Where(Context.Direction.Rotation(), Context.Origin);
+
+	AARPGPlaceholderDischarge* Emanation = Scope.World->SpawnActorDeferred<AARPGPlaceholderDischarge>(
+		AARPGPlaceholderDischarge::StaticClass(), Where, nullptr, nullptr,
+		ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
+
+	TestNotNull(TEXT("Setup: the emanation spawns"), Emanation);
+	if (!Emanation)
+	{
+		return false;
+	}
+
+	Emanation->InitializeFromContext(Context);
+	Emanation->FinishSpawning(Where);
+
+	// The overlap fires on registration, so by here the reaction has either
+	// happened or been refused. Ticked once regardless, because an overlap
+	// queued during spawn is dispatched on the next update.
+	Scope.World->Tick(LEVELTICK_All, 0.1f);
+
+	TestEqual(TEXT("The overlap froze the water under it"), Fluids->GetSolids().Num(), 1);
+
+	if (Fluids->GetSolids().Num() == 0)
+	{
+		return false;
+	}
+
+	const AARPGSolidBody* Floe = Fluids->GetSolids()[0];
+	TestTrue(TEXT("Into a real slab"), Floe->GetArea() > 0.0);
+	TestTrue(TEXT("You can stand on"),
+		Floe->IsStandableAt(FVector(0, 0, Floe->GetSurfaceHeight())));
+
+	// AND THE PUDDLE IS GONE, which is the half that used to take the ice with
+	// it. An emanation is metres across and a puddle is not, so the frozen region
+	// is the whole pool -- ConsumeSurfaceArea finishes it, the pool retires, and
+	// retiring a pool drops everything floating on it. The slab was floating on
+	// it, because it had just been made from it.
+	TestEqual(TEXT("Having used the whole puddle up"), Fluids->GetPools().Num(), 0);
+
+	// ROOTED, NOT RIDING. What a slab that consumed its own pool is standing on
+	// is the bed, and a null FloatsOn is how this codebase says so -- it is also
+	// what keeps DropRiders from recognising it as a rider of the pool that is
+	// about to go.
+	TestNull(TEXT("The ice is rooted rather than floating"), Floe->FloatsOn.GetObject());
+	TestTrue(TEXT("And says it is aground"), Floe->bAground);
+
+	// It has to SURVIVE, not merely exist for the frame it was made in: the
+	// buoyancy tick reads FloatsOn every frame and a slab that thinks it is riding
+	// a destroyed pool is the other way this goes wrong.
+	Scope.World->Tick(LEVELTICK_All, 0.1f);
+	Scope.World->Tick(LEVELTICK_All, 0.1f);
+
+	TestEqual(TEXT("And is still there a few frames later"), Fluids->GetSolids().Num(), 1);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFluidFrozenPuddleStandsOnTheBedTest,
+	"ARPG.World.Fluid.Solidify.AFullyFrozenPuddleStandsOnTheFloor",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGFluidFrozenPuddleStandsOnTheBedTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+	UARPGMagicElement* Ice = MakeElement(GetTransientPackage(), TAG_Element_Ice);
+
+	UARPGFluidDefinition* WaterDefinition = MakeWater(GetTransientPackage(), Water);
+	WaterDefinition->EvaporationRate = 0.f;
+
+	// A DEEP puddle, so a slab left at the waterline is unmistakably in the air.
+	WaterDefinition->Depth = 40.f;
+
+	UARPGSolidDefinition* IceDefinition = NewObject<UARPGSolidDefinition>();
+	IceDefinition->Element = Ice;
+	IceDefinition->Thickness = 30.f;
+	IceDefinition->bStandable = true;
+	IceDefinition->MeltRate = 0.f;
+	IceDefinition->MinimumArea = 100.f;
+
+	Fluids->Definitions = { WaterDefinition };
+	Fluids->Solids = { IceDefinition };
+	Fluids->CombinationTable = MakeFreezeTable(Ice);
+
+	MakeGround(Scope.World, 0.f);
+
+	AARPGFluidPool* Pool = Fluids->Deposit(FVector(0, 0, 0), 200.f, TAG_Element_Water);
+	TestNotNull(TEXT("Setup: a puddle exists"), Pool);
+	if (!Pool)
+	{
+		return false;
+	}
+
+	const float Bed = Pool->GetSurfaceBedAt(FVector2D::ZeroVector);
+	const float Waterline = Pool->GetSurfaceHeight();
+
+	TestTrue(TEXT("Setup: the waterline is well above the bed"), Waterline - Bed > 30.f);
+
+	// An agent big enough to take the whole puddle, which is the ordinary case:
+	// an emanation is metres across and a puddle is not.
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	AActor* Shard = Scope.World->SpawnActor<AActor>(AActor::StaticClass(),
+		FTransform(FVector(0, 0, 0)), Params);
+
+	USphereComponent* Sphere = NewObject<USphereComponent>(Shard);
+	Sphere->SetSphereRadius(400.f);
+	Sphere->SetMobility(EComponentMobility::Movable);
+	Sphere->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+	Shard->SetRootComponent(Sphere);
+	Sphere->RegisterComponent();
+	Sphere->SetWorldLocation(FVector(0, 0, 0));
+
+	UARPGElementalVolumeComponent* ShardVolume = NewObject<UARPGElementalVolumeComponent>(Shard);
+	ShardVolume->Element = Ice;
+	ShardVolume->OverlapSource = Sphere;
+	ShardVolume->SetupAttachment(Sphere);
+	ShardVolume->RegisterComponent();
+	ShardVolume->SetEnergy(50.f);
+
+	TestTrue(TEXT("The whole puddle freezes"), Fluids->TrySolidify(Pool->Volume, ShardVolume));
+	TestEqual(TEXT("Leaving no water behind"), Fluids->GetPools().Num(), 0);
+	TestEqual(TEXT("And one slab"), Fluids->GetSolids().Num(), 1);
+
+	if (Fluids->GetSolids().Num() == 0)
+	{
+		return false;
+	}
+
+	const AARPGSolidBody* Floe = Fluids->GetSolids()[0];
+
+	// THE POINT. GroundHeight tracks the surface a slab RIDES, and a slab that
+	// rides nothing has to take the floor instead -- otherwise it is left at the
+	// waterline with no buoyancy tick to settle it, hanging in the air by exactly
+	// the depth the puddle had.
+	TestEqual(TEXT("The ice stands on the bed, not at the old waterline"),
+		static_cast<float>(Floe->GetActorLocation().Z), Bed, 1.f);
+
+	TestTrue(TEXT("So its top is one thickness above the floor"),
+		FMath::IsNearlyEqual(Floe->GetSurfaceHeight(), Bed + IceDefinition->Thickness, 1.f));
+
+	// And it stays there rather than being settled or dropped by a later tick.
+	Scope.World->Tick(LEVELTICK_All, 0.1f);
+	Scope.World->Tick(LEVELTICK_All, 0.1f);
+
+	TestEqual(TEXT("And is still there afterwards"), Fluids->GetSolids().Num(), 1);
+	TestEqual(TEXT("Still on the floor"),
+		static_cast<float>(Floe->GetActorLocation().Z), Bed, 1.f);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGSolidFieldErodeTest,
+	"ARPG.World.Fluid.Ice.AMeltingFloeShrinksRatherThanVanishing",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGSolidFieldErodeTest::RunTest(const FString& Parameters)
+{
+	FARPGSolidField Field;
+	Field.BuildFrom(ARPGFluidGeometry::MakeCircle(FVector2D::ZeroVector, 300.0),
+		/*CellSize=*/20.f, /*Thickness=*/30.f);
+
+	const double Start = Field.SolidArea();
+	TestTrue(TEXT("Setup: there is a floe"), Start > 0.0);
+
+	// A RETREAT OF ONE CELL takes a ring of cells off the rim, and the area has to
+	// follow. Eroding the drawn contour while the cells kept their material would
+	// leave a floe that weighed and carried more than it showed.
+	Field.Erode(25.f);
+
+	const double After = Field.SolidArea();
+	TestTrue(FString::Printf(TEXT("Eroding takes area off (%.0f -> %.0f)"), Start, After),
+		After < Start);
+	TestTrue(TEXT("But not all of it"), After > Start * 0.5);
+
+	// THE MIDDLE IS UNTOUCHED. Erosion is a rim event; a floe that thinned in the
+	// centre because its outline moved would be a different bug wearing this one's
+	// clothes.
+	TestTrue(TEXT("The middle keeps its full thickness"),
+		FMath::IsNearlyEqual(Field.TopAt(FVector2D::ZeroVector), 30.f, 0.5f));
+
+	// AND IT GOES GRADUALLY. The complaint this answers is that a floe held its
+	// full plan while it thinned and then vanished between two frames, because
+	// every cell was equally thick and reached zero on the same tick.
+	TArray<double> Areas;
+	for (int32 Tick = 0; Tick < 40 && Field.SolidArea() > 0.0; ++Tick)
+	{
+		Field.MeltUniform(0.0625f, 0.0625f);
+		Field.Erode(0.75f);
+		Areas.Add(Field.SolidArea());
+	}
+
+	TestTrue(TEXT("It does eventually go"), Field.SolidArea() < Start);
+
+	// Somewhere in the middle of its life it was genuinely middle-sized, which is
+	// what "shrinks" means and what a slab that only thinned never did.
+	bool bWasHalfway = false;
+	for (const double Area : Areas)
+	{
+		bWasHalfway |= Area < Start * 0.7 && Area > Start * 0.2;
+	}
+
+	TestTrue(TEXT("Passing through sizes in between rather than blinking out"), bWasHalfway);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFluidOffCentreTest,
+	"ARPG.World.Fluid.Solidify.AnOffCentreCastFreezesOnlyWhatItOverlaps",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGFluidOffCentreTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	ARPGTest::FTestWorldBegunPlay Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+	UARPGElementalReactionSubsystem* Reactions =
+		Scope.World->GetSubsystem<UARPGElementalReactionSubsystem>();
+
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+	UARPGMagicElement* Ice = MakeElement(GetTransientPackage(), TAG_Element_Ice);
+
+	UARPGFluidDefinition* WaterDefinition = MakeWater(GetTransientPackage(), Water);
+	WaterDefinition->EvaporationRate = 0.f;
+
+	UARPGSolidDefinition* IceDefinition = NewObject<UARPGSolidDefinition>();
+	IceDefinition->Element = Ice;
+	IceDefinition->Thickness = 30.f;
+	IceDefinition->bStandable = true;
+	IceDefinition->MeltRate = 0.f;
+	IceDefinition->MinimumArea = 100.f;
+	IceDefinition->CellSize = 25.f;
+
+	UARPGMagicCombinationTable* Table = MakeFreezeTable(Ice);
+	UARPGMagicCombinationEntry* Collision = NewObject<UARPGMagicCombinationEntry>(Table);
+	Collision->RequiredElements.AddTag(TAG_Element_Ice);
+	Collision->RequiredElements.AddTag(TAG_Element_Water);
+	Collision->Result = Ice;
+	Collision->Mode = EARPGReactionMode::Auto;
+	Collision->Scope = static_cast<int32>(EARPGCombinationScope::Collision);
+	Table->Entries.Add(Collision);
+
+	Fluids->Definitions = { WaterDefinition };
+	Fluids->Solids = { IceDefinition };
+	Fluids->CombinationTable = Table;
+	Reactions->CombinationTable = Table;
+
+	MakeGround(Scope.World, 0.f);
+
+	// A BIG pool, and the caster standing well off to one side of it.
+	AARPGFluidPool* Pool = Fluids->Deposit(FVector(0, 0, 0), 600.f, TAG_Element_Water);
+	const double PoolArea = Pool->GetArea();
+	const TArray<FVector2D> PoolRing = Pool->GetRing();
+
+	// A real emanation, spawned the way the discharge ability spawns one, at low
+	// power so its 160cm reach is much smaller than the pool it stands in.
+	FARPGDischargeContext Context;
+	Context.DischargeType = EARPGDischargeType::Emanate;
+	Context.PrimaryElement = Ice;
+	Context.Origin = FVector(500, 0, 90);
+	Context.Direction = FVector::ForwardVector;
+	Context.ComputedDamage = 40.f;
+	Context.MinPower = 0.f;
+	Context.MaxPower = 1.f;
+	Context.PowerFraction = 0.f;
+
+	const FTransform Where(Context.Direction.Rotation(), Context.Origin);
+	AARPGPlaceholderDischarge* Emanation =
+		Scope.World->SpawnActorDeferred<AARPGPlaceholderDischarge>(
+			AARPGPlaceholderDischarge::StaticClass(), Where, nullptr, nullptr,
+			ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
+	Emanation->InitializeFromContext(Context);
+	Emanation->FinishSpawning(Where);
+
+	Scope.World->Tick(LEVELTICK_All, 0.1f);
+
+	// EXACTLY ONE. More than one is the cascade: the slab a freeze produces is
+	// itself an ice volume lying on the same water, so it used to be read as a
+	// second agent arriving, freeze another piece, and repeat until the pool was
+	// gone -- see UARPGElementalReactionSubsystem::Resolve.
+	TestEqual(TEXT("One cast freezes one slab"), Fluids->GetSolids().Num(), 1);
+
+	if (Fluids->GetSolids().Num() == 0)
+	{
+		return false;
+	}
+
+	AARPGSolidBody* Floe = Fluids->GetSolids()[0];
+	const FVector2D Centre = Floe->GetWorldCentre();
+
+	// The honest answer: the pool clipped against a disc at the caster with the
+	// emanation's own reach. Computed here rather than hard-coded so the test
+	// still means something if the shape of an emanation changes.
+	const double Reach = Emanation->ReactionRadius;
+	TArray<FVector2D> Expected;
+	TArray<TArray<FVector2D>> Holes;
+	ARPGFluidGeometry::IntersectWithHoles(PoolRing,
+		ARPGFluidGeometry::MakeCircle(FVector2D(500, 0), Reach), Expected, Holes);
+	const double ExpectedArea = ARPGFluidGeometry::PolygonArea(Expected);
+	const FVector2D ExpectedCentre = ARPGFluidGeometry::PolygonCentroid(Expected);
+
+	TestTrue(TEXT("Setup: the overlap is a small part of the pool"),
+		ExpectedArea < PoolArea * 0.2);
+
+	// WHERE THE SPELL WAS, not where the puddle was. The cascade walked the ice
+	// inward cast after cast and left one slab near the pool's middle, which is
+	// nowhere near what the player aimed at.
+	TestEqual(TEXT("The slab sits at the overlap"),
+		static_cast<float>(Centre.X), static_cast<float>(ExpectedCentre.X), 40.f);
+	TestEqual(TEXT("In both axes"),
+		static_cast<float>(Centre.Y), static_cast<float>(ExpectedCentre.Y), 40.f);
+
+	// A tenth, which is comfortably wider than the quarter-metre grid the field is
+	// rasterised onto and far tighter than any cascade.
+	TestTrue(FString::Printf(TEXT("And is the size of the overlap (%.0f against %.0f)"),
+		Floe->GetArea(), ExpectedArea),
+		FMath::Abs(Floe->GetArea() - ExpectedArea) < ExpectedArea * 0.1);
+
+	// AND THE REST OF THE PUDDLE IS STILL THERE. The cascade's signature is a pool
+	// that vanishes from a single cast that only touched a corner of it.
+	TestEqual(TEXT("The puddle survives"), Fluids->GetPools().Num(), 1);
+
+	if (Fluids->GetPools().Num() > 0)
+	{
+		TestTrue(TEXT("Having lost only what froze"),
+			Fluids->GetPools()[0]->GetArea() > PoolArea * 0.8);
+	}
+
+	// Let it settle: the floe rides the pool it froze out of, and a rider that
+	// reacts with what it is riding starts the cascade a frame late instead.
+	Scope.World->Tick(LEVELTICK_All, 0.1f);
+	Scope.World->Tick(LEVELTICK_All, 0.1f);
+
+	TestEqual(TEXT("And nothing else freezes afterwards"), Fluids->GetSolids().Num(), 1);
+	TestEqual(TEXT("With the puddle still there"), Fluids->GetPools().Num(), 1);
+
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFluidNoRowTest,
 	"ARPG.World.Fluid.Solidify.WithoutARowNothingFreezes",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -3862,8 +4572,21 @@ bool FARPGSlabMeltedStaysClosedTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("At the step, not at the far rim"),
 		static_cast<float>(Riser.ImpactPoint.X), Step, EarthDefinition->CellSize);
 
-	// Facing back down the ray, because a riser is a wall like any other.
-	TestTrue(TEXT("By a face pointing back at it"), Riser.ImpactNormal.X < -0.5);
+	// FACING BACK DOWN THE RAY, and no longer facing back STEEPLY.
+	//
+	// This asked for an X of under -0.5, which is a wall at more than sixty
+	// degrees, and that was the right question while a cut cell was a box: the
+	// side of a bowl was a stack of vertical risers, so anything shallower meant
+	// the mesher had drawn a cap where a face belonged. The slab is a surface now
+	// -- the field's own samples joined up rather than each one squared off -- so
+	// the side of a bowl is the SLOPE the melt actually cut, and MeltBowl cuts a
+	// smooth dish. A face at forty degrees here is the bowl, correctly drawn.
+	//
+	// What the ray still proves, and what this test is for, is that something
+	// solid stopped it and that the something was pointing outward. A missing
+	// face fails both: the ray either sails through into the material or stops on
+	// a backface whose normal points the way the ray was already going.
+	TestTrue(TEXT("By a face pointing back at it"), Riser.ImpactNormal.X < 0.f);
 
 	return true;
 }

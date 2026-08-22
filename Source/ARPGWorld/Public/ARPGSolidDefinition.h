@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "ARPGSurfaceFacets.h"
 #include "Engine/DataAsset.h"
 #include "GameplayTagContainer.h"
 #include "ARPGSolidDefinition.generated.h"
@@ -67,6 +68,29 @@ public:
 	 * lava. Ice points back at water, so a floe melting returns its area to the
 	 * pool it came from rather than the fluid simply vanishing.
 	 */
+	/**
+	 * How much faster the RIM retreats than the faces thin.
+	 *
+	 * A SLAB THAT ONLY THINS NEVER GOES AWAY GRACEFULLY. Ambient warmth used to
+	 * take the two faces and nothing else, so a floe held its exact plan while it
+	 * got thinner -- and since every cell was equally thick, every cell reached
+	 * zero on the same tick. What the player saw was a full-size sheet that
+	 * existed in one frame and not the next.
+	 *
+	 * An edge is exposed on its side as well as its faces, so it goes first, and
+	 * a real floe visibly retreats long before it thins through. Several times the
+	 * face rate is what makes a slab reach its minimum area -- and be retired --
+	 * while there is still thickness to see, which is the whole difference between
+	 * melting away and blinking out.
+	 *
+	 * Zero disables it and restores the pure thinning. Scaled off MeltRate rather
+	 * than authored in cm/s so that a permanent solid, whose MeltRate is zero, is
+	 * permanent in plan too without a second thing to remember.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Melting",
+		meta = (ClampMin = "0.0"))
+	float EdgeMeltScale = 6.f;
+
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Melting")
 	TObjectPtr<UARPGFluidDefinition> MeltsInto;
 
@@ -108,6 +132,21 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Body",
 		meta = (ClampMin = "5.0"))
 	float CellSize = 20.f;
+
+	/**
+	 * How much of the grid the player is allowed to see -- see FARPGSurfaceFacets.
+	 *
+	 * THE OTHER HALF OF WHAT A SLAB LOOKS LIKE, and the half CellSize cannot buy.
+	 * Resolution decides how much detail the field can HOLD; this decides how the
+	 * mesher interpolates between the samples it has, and the two are independent:
+	 * a smooth reading of a coarse grid beats a blocky reading of a fine one, and
+	 * costs nothing extra.
+	 *
+	 * Default is smooth, which is ice's answer and the honest one. Rock overrides
+	 * it, because rock drawn honestly from a grid is masonry.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Body")
+	FARPGSurfaceFacets Facets;
 
 	/**
 	 * How wide a bowl one fire impact melts, in cm.

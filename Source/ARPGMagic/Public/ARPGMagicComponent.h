@@ -104,6 +104,28 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "ARPG|Magic")
 	TArray<TObjectPtr<UARPGMagicElement>> UnlockedElements;
 
+	/**
+	 * Turns the complexity gate off entirely, so any two readied elements are
+	 * allowed regardless of how well the caster knows either.
+	 *
+	 * A TESTING AID, and a narrow one on purpose. The gate is doing what it was
+	 * written to do -- an untrained element is one you cannot yet combine -- but
+	 * that means a fresh character cannot hold two primitives at all until each
+	 * has been cast solo to level 1, which is most of the way through the early
+	 * game before the first combination is reachable. Trying out a recipe should
+	 * not require earning it first.
+	 *
+	 * NOT bDebugForceMaxLevel, which already exists on the progression tracker and
+	 * would also do this. That one reports every element at level 4, so it maxes
+	 * every damage multiplier and the whole mastery curve alongside -- a spell
+	 * cast under it is not the spell that ships. This changes what is ALLOWED and
+	 * nothing about what it does.
+	 *
+	 * Toggle it in a running game with the ARPGMagicIgnoreGate console command.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Magic|Debug")
+	bool bIgnoreComplexityGate = false;
+
 	/** Minimum seconds between selections, and the auto-ready step interval. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Magic",
 		meta = (ClampMin = "0.0"))

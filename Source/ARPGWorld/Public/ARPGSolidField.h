@@ -76,6 +76,37 @@ struct ARPGWORLD_API FARPGSolidField
 	UPROPERTY()
 	TArray<int16> Bottom;
 
+	/**
+	 * Distance from each cell's centre to the slab's OUTLINE, in millimetres,
+	 * negative inside it. The sub-cell half of the shape.
+	 *
+	 * WITHOUT THIS A SLAB IS A STAIRCASE, and it is worth being exact about why,
+	 * because the grid was never the thing at fault. Freezing computes the
+	 * genuine overlap between the water's outline and the spell's -- see
+	 * TrySolidify, whose own comment says that polygon is the entire reason a
+	 * body is not a disc -- and BuildFrom then reduced it to one bit per cell by
+	 * asking whether the cell's CENTRE was inside. Everything between two centres
+	 * was lost, so a 2m floe at 20cm cells came out as a twenty-step staircase
+	 * whatever it had actually frozen from.
+	 *
+	 * A DISTANCE INSTEAD OF A BIT. The zero crossing between two neighbouring
+	 * cells says where the edge really ran, to a fraction of a cell, and the
+	 * mesher cuts there -- so the drawn outline follows the water to well under a
+	 * centimetre on a grid ten times coarser than that.
+	 *
+	 * CLAMPED TO ONE CELL EITHER SIDE, which is what keeps it affordable on the
+	 * wire. Interpolation only ever looks one cell across, so a true distance
+	 * further out than that says nothing the mesher can use -- and clamping turns
+	 * the whole interior into one run and the whole exterior into another, which
+	 * is exactly what the codec above wants. Only the band along the edge varies,
+	 * and that is a perimeter's worth of cells rather than an area's.
+	 *
+	 * Empty is legal and means "no outline": every caller falls back to the cell
+	 * rule, which is the behaviour this replaced.
+	 */
+	UPROPERTY()
+	TArray<int16> Edge;
+
 	bool IsValidField() const { return CountX > 0 && CountY > 0 && Top.Num() == CountX * CountY; }
 
 	// --- Getting it across the wire ---------------------------------------------
@@ -139,10 +170,86 @@ struct ARPGWORLD_API FARPGSolidField
 	/** Thickness in centimetres, or 0 where the slab has gone. */
 	float ThicknessAt(int32 X, int32 Y) const;
 
-	/** Solid thick enough to matter, at a world XY. What standing on it asks. */
+	/** How far inside the outline this cell sits, in cm. Negative outside it. */
+	float InsetAt(int32 X, int32 Y) const;
+
+	/**
+	 * WHERE THE SLAB ENDS, as one number per cell: positive where there is
+	 * material, negative where there is not, and zero on the surface between.
+	 *
+	 * THE UNION OF TWO BOUNDARIES, taken as a minimum, which is all an
+	 * intersection of two regions ever is. A slab stops either because the
+	 * outline it was cut with ran out or because something melted through it, and
+	 * whichever is nearer is the one you can see. Written as one scalar so the
+	 * mesher has a single contour to follow rather than an outline and a hole
+	 * rule that have to be kept from disagreeing at the corner where a fireball
+	 * took a bite out of the rim.
+	 *
+	 * The melt half rides on the melt's own falloff -- MeltBowl leaves a smooth
+	 * dish, so the thickness running out has a gradient to interpolate along
+	 * rather than a cliff, and a hole comes out round.
+	 */
+	float SolidityAt(int32 X, int32 Y) const;
+
+	/** The same, anywhere: bilinear between the four cell centres around a point. */
+	float SolidityAtWorld(const FVector2D& World) const;
+
+	/**
+	 * Solid thick enough to matter, at a world XY. What standing on it asks.
+	 *
+	 * SUB-CELL, like the mesh. Answering from the containing cell alone made the
+	 * thing you can stand on a different shape from the thing you can see -- by up
+	 * to half a cell, which on an earth wall is 30cm of floor that either was not
+	 * drawn or could not be walked on.
+	 */
 	bool IsSolidAt(const FVector2D& World) const;
 
-	/** Top of the slab at a world XY, in slab-local cm. */
+	/**
+	 * Top of the material at a cell, in slab-local cm, with a cell that has none
+	 * borrowing from the neighbours that do.
+	 *
+	 * BECAUSE AN EMPTY CELL'S TOP IS A LIE. Where a slab has melted through, Top
+	 * and Bottom are both parked at the height the two faces met -- the FLOOR of
+	 * the hole -- and that value is the one thing an interpolating surface must
+	 * not be allowed to read. Interpolate toward it and the rim of every hole
+	 * slumps down into it, and the vertical edge a fresh cut ought to have becomes
+	 * a bevel running out to nothing.
+	 *
+	 * Borrowing instead extrapolates the material FLAT across its own boundary, so
+	 * the surface stays at full height right up to the point the silhouette cuts
+	 * it off. The taper a melt genuinely has is still there, because MeltBowl put
+	 * it in the cells that DO have material.
+	 */
+	float SurfaceTopAt(int32 X, int32 Y) const;
+
+	/** The underside, by the same rule. */
+	float SurfaceBottomAt(int32 X, int32 Y) const;
+
+private:
+	/** SurfaceTopAt and SurfaceBottomAt, which differ only in which plane. */
+	float BorrowedAt(const TArray<int16>& Plane, int32 X, int32 Y) const;
+
+	/**
+	 * Re-derives Edge from which cells still have material.
+	 *
+	 * Needed after erosion takes a whole cell, because the cells behind the ones
+	 * removed are the new rim and are still saturated at "deep inside". Quantised
+	 * to half a cell, which is both where the boundary between a solid cell and an
+	 * empty one runs and all the precision a one-cell band can hold.
+	 */
+	void RebuildBand();
+
+public:
+
+	/**
+	 * Top of the slab at a world XY, in slab-local cm.
+	 *
+	 * BILINEAR, AND THAT IS NOT A REFINEMENT -- it is the same surface the mesher
+	 * draws, evaluated by the same arithmetic at an arbitrary point. Answering
+	 * from the containing cell alone made the height you stand at a staircase
+	 * while the height you can see was a slope, and on a melted bowl those
+	 * disagreed by a tenth of the slab's thickness.
+	 */
 	float TopAt(const FVector2D& World) const;
 
 	/** Total plan area still carrying material, in square cm. */
@@ -252,6 +359,11 @@ struct ARPGWORLD_API FARPGSolidField
 	 * How a floe begins: the frozen region is still found by clipping polygons,
 	 * because THAT is a two-dimensional question about where two things overlapped.
 	 * It is only what happens to the slab afterwards that wants a field.
+	 *
+	 * THE RING IS KEPT, as a distance rather than as a polygon -- see Edge. What
+	 * the clip worked out is the shape the player was promised, and rounding it
+	 * to whichever cell centres happened to fall inside threw away nearly all of
+	 * it.
 	 */
 	void BuildFrom(const TArray<FVector2D>& Ring, float InCellSize, float Thickness);
 
@@ -286,6 +398,30 @@ struct ARPGWORLD_API FARPGSolidField
 	 * @return volume removed.
 	 */
 	double MeltUniform(float FromTop, float FromBottom);
+
+	/**
+	 * Pulls the outline IN by a distance, taking the material it passes over.
+	 *
+	 * THE OTHER HALF OF MELTING, and for a long time there was no half at all.
+	 * Ambient warmth thinned every cell equally and did nothing else, so a floe
+	 * kept its exact plan while it got thinner and thinner -- and because every
+	 * cell was the same thickness, every cell reached zero on the same tick. A
+	 * floe did not shrink and vanish; it went from a full-size sheet to nothing
+	 * between one frame and the next.
+	 *
+	 * A rim is exposed on its side as well as its faces, so it goes first. That
+	 * is what makes a melting floe RETREAT -- and it is what makes it reach its
+	 * minimum area, and be retired, while there is still thickness left to see.
+	 *
+	 * THIS IS ONLY POSSIBLE BECAUSE OF Edge. Moving an outline used to mean
+	 * offsetting a polygon, which is the operation whose repeated application put
+	 * fifty vertices at seven thousand -- see ARPGFluidGeometry::IntersectWithHoles.
+	 * Here it is one addition per cell against a stored distance, and it cannot
+	 * grow anything.
+	 *
+	 * @return volume removed, in cubic cm.
+	 */
+	double Erode(float Distance);
 
 	/** Slides the whole field. Cells are untouched -- only where it sits changes. */
 	void Translate(const FVector2D& Delta) { Origin += Delta; CachedCentroid += Delta; }

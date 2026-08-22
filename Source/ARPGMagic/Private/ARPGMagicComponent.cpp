@@ -202,6 +202,11 @@ bool UARPGMagicComponent::PassesComplexityGate(const UARPGMagicElement* Candidat
 		return true;
 	}
 
+	if (bIgnoreComplexityGate)
+	{
+		return true; // testing a recipe without earning it first -- see the header
+	}
+
 	if (!GetProgressionProvider())
 	{
 		return true; // no progression wired up = gating disabled, e.g. an NPC
@@ -282,18 +287,26 @@ void UARPGMagicComponent::ActivateSlot(EARPGElementSlot Slot, bool bFromPlayer)
 		return;
 	}
 
-	// Cost BEFORE the gate check, matching the Godot ordering: readying is what
-	// costs mana, and finding out mid-mix that the pair is beyond you is part of
-	// the risk of experimenting.
-	if (Element && Element->ActivationCost > 0.f && !TrySpendMana(Element->ActivationCost))
-	{
-		OnElementActivationFailed.Broadcast(Slot, Element);
-		return;
-	}
-
+	// THE GATE BEFORE THE COST, which reverses the Godot ordering deliberately.
+	//
+	// That ordering charged for the attempt on the reasoning that finding out
+	// mid-mix that a pair is beyond you is part of the risk of experimenting. It
+	// reads as a bug rather than as risk: nothing happens, the element does not
+	// appear in the mix, and the mana is gone -- so the only feedback the player
+	// gets for a refused pairing is a resource they cannot see being spent. A
+	// block should be information.
+	//
+	// Cost is still paid for everything that DOES ready, which is what the rule
+	// was actually about. This only stops charging for the ones that do not.
 	if (!PassesComplexityGate(Element))
 	{
 		OnElementGateBlocked.Broadcast(Slot, Element);
+		return;
+	}
+
+	if (Element && Element->ActivationCost > 0.f && !TrySpendMana(Element->ActivationCost))
+	{
+		OnElementActivationFailed.Broadcast(Slot, Element);
 		return;
 	}
 

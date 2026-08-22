@@ -174,6 +174,37 @@ bool PolygonContains(const TArray<FVector2D>& Ring, const FVector2D& Point)
 	return bInside;
 }
 
+double PolygonSignedDistance(const TArray<FVector2D>& Ring, const FVector2D& Point)
+{
+	if (Ring.Num() < 3)
+	{
+		return TNumericLimits<double>::Max();
+	}
+
+	double Nearest = TNumericLimits<double>::Max();
+
+	for (int32 Index = 0, Previous = Ring.Num() - 1; Index < Ring.Num(); Previous = Index++)
+	{
+		const FVector2D& A = Ring[Previous];
+		const FVector2D& B = Ring[Index];
+
+		// TO THE SEGMENT, not to the infinite line and not to the nearer endpoint.
+		// A ring's vertices are metres apart on a long river bank and centimetres
+		// apart where a spell clipped it, and a vertex-only distance would report
+		// the first as far outside a point sitting right against it.
+		const FVector2D Along = B - A;
+		const double LengthSq = Along.SizeSquared();
+
+		const double T = LengthSq > UE_DOUBLE_SMALL_NUMBER
+			? FMath::Clamp(FVector2D::DotProduct(Point - A, Along) / LengthSq, 0.0, 1.0)
+			: 0.0;
+
+		Nearest = FMath::Min(Nearest, FVector2D::Distance(Point, A + Along * T));
+	}
+
+	return PolygonContains(Ring, Point) ? -Nearest : Nearest;
+}
+
 FBox2D PolygonBounds(const TArray<FVector2D>& Ring)
 {
 	FBox2D Bounds(ForceInit);
@@ -699,138 +730,375 @@ void BuildSlabMesh(UDynamicMeshComponent* Component, const TArray<FVector2D>& Ri
 namespace
 {
 	/**
-	 * One layer of cells drawn as a box each: a cap top, a cap bottom, and a face
-	 * on any side where this cell's span is not covered by its neighbour's.
+	 * A repeatable wobble in [-0.5, 0.5) for one lattice corner.
 	 *
-	 * SHARED BY THE ROCK AND THE LAVA LYING ON IT, which are the same shape
-	 * problem asked of two different pairs of heights -- the solid runs Bottom to
-	 * Top, the film runs Top to Top plus however deep it lies. Written once
-	 * because the side-face rule is the part that is easy to get wrong, and
-	 * getting it wrong in one of two copies is how a melted slab came to be open
-	 * at every terrace a spell had cut into it.
+	 * FROM THE CORNER'S INDEX AND NOTHING ELSE, which is the property that
+	 * matters. The same corner has to come out displaced by the same amount on
+	 * every rebuild or the whole surface swims sideways each time a spell lands
+	 * on it, and it has to come out the same on a client as on the server or the
+	 * rock you can see is not the rock you are standing on. An index satisfies
+	 * both; a position does not, because a drifting floe's Origin moves under it.
+	 */
+	float CornerNoise(int32 X, int32 Y, uint32 Salt)
+	{
+		uint32 Hash = static_cast<uint32>(X) * 73856093u
+			^ static_cast<uint32>(Y) * 19349663u
+			^ (Salt * 83492791u);
+
+		Hash ^= Hash >> 13;
+		Hash *= 0x5bd1e995u;
+		Hash ^= Hash >> 15;
+
+		return (Hash & 0xFFFFFFu) / static_cast<float>(0x1000000) - 0.5f;
+	}
+
+	/**
+	 * The field read as POINTS rather than as squares -- one sample at the centre
+	 * of every cell, joined to its neighbours.
 	 *
-	 * Spans are LOCAL Z in centimetres, indexed as the field is. A cell whose
-	 * Present is false is a gap, and its neighbours draw a full-height face at it.
+	 * THIS IS THE WHOLE TRICK, and it is a change of reading rather than a change
+	 * to what is stored. A value per cell is a value per AREA: it says "this
+	 * square is 30cm thick" and nothing whatever about what happens between this
+	 * square and the next, so the only honest drawing of it is a box -- which is
+	 * exactly the Minecraft slab this replaced. Treat the same number as a sample
+	 * AT the centre and four of them become a patch of surface, and the patch
+	 * bends.
+	 *
+	 * SAMPLED AT CELL CENTRES AND NOT AT THE CORNERS BETWEEN THEM, which is a
+	 * distinction worth the paragraph. Corners are the more obvious choice and are
+	 * what the first version of this used; averaging the four cells around each
+	 * one gives a smoother surface, and a WRONG one -- the average blurs across a
+	 * three-by-three stencil, so a one-cell pit comes out a third as deep as the
+	 * field says it is and a slab's own TopAt no longer describes what the player
+	 * is standing on. Sampling the centres reproduces every stored value exactly
+	 * and interpolates only between them, so the drawn surface and the queried
+	 * one are the same function -- see FARPGSolidField::TopAt, which is this
+	 * evaluated at an arbitrary point.
+	 *
+	 * The samples live for the length of one rebuild. Cells are still what melts,
+	 * what floats, and what replicates.
+	 */
+	struct FSurfaceLattice
+	{
+		int32 CountX = 0;
+		int32 CountY = 0;
+
+		/** Where each sample is, in the mesh's own space. Jittered if faceted. */
+		TArray<FVector2D> At;
+
+		/** Positive where there is material, negative where there is not. */
+		TArray<float> Fill;
+
+		TArray<double> Top;
+		TArray<double> Bottom;
+
+		int32 Index(int32 I, int32 J) const { return J * CountX + I; }
+		int32 Num() const { return CountX * CountY; }
+	};
+
+	void BuildLattice(FSurfaceLattice& Out, const FARPGSolidField& Field,
+		const FVector2D& Origin, const TArray<float>& Fill,
+		const TArray<double>& BottomOf, const TArray<double>& TopOf,
+		const FARPGSurfaceFacets& Facets)
+	{
+		Out.CountX = Field.CountX;
+		Out.CountY = Field.CountY;
+
+		const int32 Samples = Out.Num();
+		Out.At.SetNumUninitialized(Samples);
+		Out.Fill.SetNumUninitialized(Samples);
+		Out.Top.SetNumUninitialized(Samples);
+		Out.Bottom.SetNumUninitialized(Samples);
+
+		for (int32 Y = 0; Y < Out.CountY; ++Y)
+		{
+			for (int32 X = 0; X < Out.CountX; ++X)
+			{
+				const int32 At = Out.Index(X, Y);
+
+				// STRAIGHT THROUGH, unaveraged and unsmoothed. Whatever the caller
+				// worked out for this cell is what the surface passes through.
+				Out.Fill[At] = Fill[At];
+				Out.Top[At] = TopOf[At];
+				Out.Bottom[At] = BottomOf[At];
+
+				FVector2D Where = Field.CentreOf(X, Y) - Origin;
+
+				if (Facets.Spread > 0.f)
+				{
+					Where += FVector2D(CornerNoise(X, Y, 1u), CornerNoise(X, Y, 2u))
+						* (Facets.Spread * Field.CellSize);
+				}
+
+				Out.At[At] = Where;
+
+				if (Facets.Relief > 0.f)
+				{
+					// THE WHOLE COLUMN, top and bottom by the same amount, so the
+					// cell keeps exactly the thickness the simulation gave it --
+					// see FARPGSurfaceFacets::Relief. It is also what lets a film
+					// lying on a broken surface be broken identically and stay in
+					// contact with it, since both lattices hash the same sample.
+					const double Lift = CornerNoise(X, Y, 3u) * Facets.Relief;
+
+					Out.Top[At] += Lift;
+					Out.Bottom[At] += Lift;
+				}
+			}
+		}
+	}
+
+	/** One vertex of the shape a single quad contributes. */
+	struct FCellVertex
+	{
+		FVector2D At = FVector2D::ZeroVector;
+		double Top = 0.0;
+		double Bottom = 0.0;
+
+		/** Which of the quad's four sides this point lies on. */
+		uint8 OnSides = 0;
+
+		/** Its identity in the lattice, so neighbouring quads can share it. */
+		int32 Key = INDEX_NONE;
+	};
+
+	/**
+	 * One layer of the field as a surface: marching squares over the lattice, with
+	 * the material's own top and bottom carried along.
+	 *
+	 * WHAT REPLACED THE BOX PER CELL, and the difference is the whole of what a
+	 * slab looks like. The old rule drew each cell as an axis-aligned box and put
+	 * a vertical face wherever one box stood proud of the next, which is a
+	 * faithful drawing of a value-per-cell and a terrible drawing of a SURFACE:
+	 * the smooth dish MeltBowl writes into the field came out as a ziggurat, and
+	 * an outline that had been clipped to a fraction of a millimetre came out as
+	 * a staircase with one step per cell.
+	 *
+	 * THREE THINGS FALL OUT OF JOINING THE SAMPLES UP.
+	 *
+	 *   THE SILHOUETTE GETS CUT WHERE THE MATERIAL ACTUALLY ENDS. Fill changes
+	 *   sign somewhere along the line between two samples, and that somewhere is
+	 *   a point, not a cell -- so the edge of the slab follows the polygon it
+	 *   froze from rather than the grid it was stored on.
+	 *
+	 *   THE INTERIOR RISERS DISAPPEAR ENTIRELY. Two neighbouring quads share two
+	 *   samples and therefore share their heights exactly, so the top is one
+	 *   continuous surface with nothing to step over. Every vertical face that
+	 *   survives is a real edge of the slab.
+	 *
+	 *   IT IS FEWER TRIANGLES, not more. A box is four cap triangles and up to
+	 *   sixteen of side; a marching-squares quad is at most four and four, plus
+	 *   two per contour segment on the handful the edge runs through.
+	 *
+	 * Spans are LOCAL Z in centimetres, indexed as the field is, and the caller
+	 * has already decided what an empty cell's height should be -- see
+	 * FARPGSolidField::SurfaceTopAt. Fill says where the material stops and is
+	 * what the contour is cut from.
 	 */
 	void BuildCellLayer(UE::Geometry::FDynamicMesh3& Mesh, const FARPGSolidField& Field,
-		const FVector2D& Origin, const TArray<bool>& Present,
-		const TArray<double>& BottomOf, const TArray<double>& TopOf)
+		const FVector2D& Origin, const TArray<float>& Fill,
+		const TArray<double>& BottomOf, const TArray<double>& TopOf,
+		const FARPGSurfaceFacets& Facets)
 	{
-		const float Half = Field.CellSize * 0.5f;
+		FSurfaceLattice Lattice;
+		BuildLattice(Lattice, Field, Origin, Fill, BottomOf, TopOf, Facets);
 
-		// A CELL AT A TIME, and that is the point. Nothing here triangulates an
-		// outline, so nothing here can grow: the worst case is a fixed handful of
-		// triangles per cell however many spells have landed on the floe. The Godot
-		// pathology this replaced was unbounded by construction.
-		for (int32 Y = 0; Y < Field.CountY; ++Y)
+		const int32 Samples = Lattice.Num();
+
+		// FLAT SHADING IS JUST NOT SHARING. The normal solver averages the faces
+		// around each vertex, so a vertex belonging to one triangle gets that
+		// triangle's own normal and a surface built without sharing is faceted for
+		// free -- see FARPGSurfaceFacets::bFlatShaded.
+		const bool bShare = !Facets.bFlatShaded;
+
+		// Sample points, then horizontal edge crossings, then vertical ones.
+		TArray<int32> TopVertexOf;
+		TArray<int32> BottomVertexOf;
+
+		if (bShare)
 		{
-			for (int32 X = 0; X < Field.CountX; ++X)
-			{
-				const int32 At = Field.Index(X, Y);
+			TopVertexOf.Init(INDEX_NONE, Samples * 3);
+			BottomVertexOf.Init(INDEX_NONE, Samples * 3);
+		}
 
-				if (!Present[At] || TopOf[At] - BottomOf[At] <= UE_DOUBLE_SMALL_NUMBER)
+		auto Reuse = [&](TArray<int32>& Cache, int32 Key, double X, double Y, double Z) -> int32
+		{
+			if (bShare && Key != INDEX_NONE && Cache[Key] != INDEX_NONE)
+			{
+				return Cache[Key];
+			}
+
+			const int32 Vertex = AppendSurfaceVertex(Mesh, Origin, X, Y, Z);
+
+			if (bShare && Key != INDEX_NONE)
+			{
+				Cache[Key] = Vertex;
+			}
+
+			return Vertex;
+		};
+
+		// WHERE THE CONTOUR CROSSES ONE LATTICE EDGE, computed from the lower of
+		// the two sample indices every time.
+		//
+		// BOTH QUADS SHARING THE EDGE MUST GET BIT-IDENTICAL ANSWERS. They walk
+		// their own boundaries in opposite directions along it, so interpolating
+		// "from the sample I reached first" would give the two of them the same
+		// point computed two ways -- and floating-point lerp is not symmetric, so
+		// they would land microns apart and leave a crack down every silhouette.
+		auto Crossing = [&](int32 SampleA, int32 SampleB, int32 Key, uint8 OnSides)
+		{
+			const int32 Low = FMath::Min(SampleA, SampleB);
+			const int32 High = FMath::Max(SampleA, SampleB);
+
+			const float FillLow = Lattice.Fill[Low];
+			const float FillHigh = Lattice.Fill[High];
+
+			const float Span = FillLow - FillHigh;
+			const float T = FMath::Abs(Span) > UE_SMALL_NUMBER
+				? FMath::Clamp(FillLow / Span, 0.f, 1.f)
+				: 0.5f;
+
+			FCellVertex Vertex;
+			Vertex.At = FMath::Lerp(Lattice.At[Low], Lattice.At[High], T);
+			Vertex.Top = FMath::Lerp(Lattice.Top[Low], Lattice.Top[High], T);
+			Vertex.Bottom = FMath::Lerp(Lattice.Bottom[Low], Lattice.Bottom[High], T);
+			Vertex.OnSides = OnSides;
+			Vertex.Key = Key;
+
+			return Vertex;
+		};
+
+		FCellVertex Poly[8];
+		int32 TopIndex[8];
+		int32 BottomIndex[8];
+
+		// ONE FEWER QUAD THAN THERE ARE SAMPLES, in each axis, because a quad is
+		// the gap BETWEEN four of them. The half-cell fringe outside the outermost
+		// centres is not meshed and does not need to be: BuildFrom pads the grid by
+		// a whole cell, so the slab's own edge always falls well inside it.
+		for (int32 Y = 0; Y + 1 < Lattice.CountY; ++Y)
+		{
+			for (int32 X = 0; X + 1 < Lattice.CountX; ++X)
+			{
+				// COUNTER-CLOCKWISE IN XY, which is the winding everything below
+				// assumes and the reverse of what points a face up -- see
+				// AppendWall for why this coordinate system works that way round.
+				const int32 Corner[4] = {
+					Lattice.Index(X, Y),
+					Lattice.Index(X + 1, Y),
+					Lattice.Index(X + 1, Y + 1),
+					Lattice.Index(X, Y + 1)
+				};
+
+				// Each side named by the lattice edge it runs along, so the quad
+				// across it names the same one and they share the crossing.
+				const int32 SideKey[4] = {
+					Samples + Lattice.Index(X, Y),
+					Samples * 2 + Lattice.Index(X + 1, Y),
+					Samples + Lattice.Index(X, Y + 1),
+					Samples * 2 + Lattice.Index(X, Y)
+				};
+
+				int32 PolyCount = 0;
+
+				for (int32 Side = 0; Side < 4; ++Side)
+				{
+					const int32 A = Corner[Side];
+					const int32 B = Corner[(Side + 1) % 4];
+
+					const bool bInsideA = Lattice.Fill[A] > 0.f;
+					const bool bInsideB = Lattice.Fill[B] > 0.f;
+
+					if (bInsideA)
+					{
+						FCellVertex& Vertex = Poly[PolyCount++];
+
+						Vertex.At = Lattice.At[A];
+						Vertex.Top = Lattice.Top[A];
+						Vertex.Bottom = Lattice.Bottom[A];
+
+						// A corner lies on the two sides that meet at it.
+						Vertex.OnSides = static_cast<uint8>(
+							(1 << Side) | (1 << ((Side + 3) % 4)));
+						Vertex.Key = A;
+					}
+
+					if (bInsideA != bInsideB)
+					{
+						Poly[PolyCount++] = Crossing(A, B, SideKey[Side],
+							static_cast<uint8>(1 << Side));
+					}
+				}
+
+				// Nothing, or a sliver too degenerate to have an area.
+				if (PolyCount < 3)
 				{
 					continue;
 				}
 
-				const FVector2D Centre = Field.CentreOf(X, Y) - Origin;
-				const double TopZ = TopOf[At];
-				const double BottomZ = BottomOf[At];
-
-				const FVector2D Corners[4] = {
-					Centre + FVector2D(-Half, -Half),
-					Centre + FVector2D(Half, -Half),
-					Centre + FVector2D(Half, Half),
-					Centre + FVector2D(-Half, Half)
-				};
-
-				int32 TopVerts[4];
-				int32 BottomVerts[4];
-
-				for (int32 Corner = 0; Corner < 4; ++Corner)
+				// THE SADDLE RESOLVES ITSELF, which is the one case marching
+				// squares is famous for being ambiguous about. Two opposite
+				// corners inside and two outside can be read as one waist or as
+				// two separate spurs; walking the boundary the way this loop does
+				// always produces the connected reading, as a hexagon. Both are
+				// legal, and picking the same one every time is what matters --
+				// the crossings are shared with the neighbours regardless, so
+				// there is no seam either way.
+				for (int32 At = 0; At < PolyCount; ++At)
 				{
-					TopVerts[Corner] = AppendSurfaceVertex(Mesh, Origin,
-						Corners[Corner].X, Corners[Corner].Y, TopZ);
-					BottomVerts[Corner] = AppendSurfaceVertex(Mesh, Origin,
-						Corners[Corner].X, Corners[Corner].Y, BottomZ);
+					const FCellVertex& Vertex = Poly[At];
+
+					TopIndex[At] = Reuse(TopVertexOf, Vertex.Key,
+						Vertex.At.X, Vertex.At.Y, Vertex.Top);
+					BottomIndex[At] = Reuse(BottomVertexOf, Vertex.Key,
+						Vertex.At.X, Vertex.At.Y, Vertex.Bottom);
 				}
 
-				// CLOCKWISE IN XY, which is what points a face UP here. Unreal is
-				// left-handed and FDynamicMesh3 normals are (C - A) x (B - A) --
-				// see AppendWall. The counter-clockwise winding that reads as "up"
-				// everywhere else turns the cell inside out.
-				Mesh.AppendTriangle(TopVerts[0], TopVerts[2], TopVerts[1]);
-				Mesh.AppendTriangle(TopVerts[0], TopVerts[3], TopVerts[2]);
-
-				Mesh.AppendTriangle(BottomVerts[0], BottomVerts[1], BottomVerts[2]);
-				Mesh.AppendTriangle(BottomVerts[0], BottomVerts[2], BottomVerts[3]);
-
-				// A FACE WHEREVER THIS CELL STANDS PROUD OF ITS NEIGHBOUR, which is
-				// not the same question as whether the neighbour is there at all.
-				//
-				// THIS USED TO SKIP EVERY PRESENT NEIGHBOUR, on the reasoning that
-				// between two iced cells there is nothing to see. True only while
-				// the layer is flat. The moment a spell melts a bowl into it the
-				// cells have DIFFERENT tops, and the step between them is a face
-				// nobody drew -- so the terrace it cut was open at the side and you
-				// could see, and walk, straight into the middle of the rock.
-				//
-				// The exposed band is whatever part of this cell's span the
-				// neighbour's own span does not cover. An absent neighbour covers
-				// nothing, which is the old behaviour falling out of the general
-				// rule rather than sitting beside it as a case.
-				static const FIntPoint Steps[4] = { {0, -1}, {1, 0}, {0, 1}, {-1, 0} };
-
-				// FRESH VERTICES PER BAND rather than the cap's, so the lip of
-				// every terrace is a HARD edge -- see AppendWall, which does the
-				// same for the same reason. Sharing them averaged the cap's upward
-				// normal into the wall's sideways one and rounded a cut in rock
-				// into a slump.
-				auto AppendBand = [&](int32 CornerA, int32 CornerB, double FromZ, double ToZ)
+				// A FAN IS ENOUGH: clipping a square by the contour leaves a convex
+				// piece in every one of the sixteen cases, the hexagon above
+				// included.
+				for (int32 At = 1; At + 1 < PolyCount; ++At)
 				{
-					if (ToZ - FromZ <= UE_DOUBLE_SMALL_NUMBER)
+					// Wound backwards from the outline's own direction, which is
+					// what points a cap UP here.
+					Mesh.AppendTriangle(TopIndex[0], TopIndex[At + 1], TopIndex[At]);
+
+					// And the underside is the outline's winding untouched, so it
+					// faces DOWN. A slab whose floor pointed up is invisible from
+					// below and lets you see into it through the walls.
+					Mesh.AppendTriangle(BottomIndex[0], BottomIndex[At], BottomIndex[At + 1]);
+				}
+
+				for (int32 At = 0; At < PolyCount; ++At)
+				{
+					const FCellVertex& A = Poly[At];
+					const FCellVertex& B = Poly[(At + 1) % PolyCount];
+
+					// A SEGMENT LYING ALONG ONE OF THE QUAD'S OWN SIDES IS NOT A
+					// SILHOUETTE. The quad across that side shares both of its
+					// endpoints and covers exactly the same stretch of it, so a
+					// face here would be an interior wall buried in solid
+					// material -- which is what the old box rule drew at every
+					// cell boundary, and why a melted slab was full of them. Only
+					// the segments the contour cut across the middle of a quad are
+					// the edge of anything.
+					if ((A.OnSides & B.OnSides) != 0)
 					{
-						return;
+						continue;
 					}
 
-					const FVector2D& PA = Corners[CornerA];
-					const FVector2D& PB = Corners[CornerB];
-
-					const int32 TA = AppendSurfaceVertex(Mesh, Origin, PA.X, PA.Y, ToZ);
-					const int32 TB = AppendSurfaceVertex(Mesh, Origin, PB.X, PB.Y, ToZ);
-					const int32 BA = AppendSurfaceVertex(Mesh, Origin, PA.X, PA.Y, FromZ);
-					const int32 BB = AppendSurfaceVertex(Mesh, Origin, PB.X, PB.Y, FromZ);
+					// FRESH VERTICES, never the cap's, so the lip is a HARD edge --
+					// see AppendWall, which does the same for the same reason.
+					// Sharing them averages the cap's upward normal into the
+					// wall's sideways one and rounds a cut in rock into a slump.
+					const int32 TA = AppendSurfaceVertex(Mesh, Origin, A.At.X, A.At.Y, A.Top);
+					const int32 TB = AppendSurfaceVertex(Mesh, Origin, B.At.X, B.At.Y, B.Top);
+					const int32 BA = AppendSurfaceVertex(Mesh, Origin, A.At.X, A.At.Y, A.Bottom);
+					const int32 BB = AppendSurfaceVertex(Mesh, Origin, B.At.X, B.At.Y, B.Bottom);
 
 					Mesh.AppendTriangle(TA, BB, BA);
 					Mesh.AppendTriangle(TA, TB, BB);
-				};
-
-				for (int32 Side = 0; Side < 4; ++Side)
-				{
-					const int32 NeighbourX = X + Steps[Side].X;
-					const int32 NeighbourY = Y + Steps[Side].Y;
-
-					const bool bInside = NeighbourX >= 0 && NeighbourX < Field.CountX
-						&& NeighbourY >= 0 && NeighbourY < Field.CountY;
-
-					const int32 NeighbourAt = bInside ? Field.Index(NeighbourX, NeighbourY) : 0;
-					const bool bNeighbour = bInside && Present[NeighbourAt];
-
-					// COLLAPSED ONTO THIS CELL'S FLOOR when there is no neighbour,
-					// so the two bands below come out as the one full-height face
-					// the silhouette wants without a branch of their own.
-					const double NeighbourTop = bNeighbour ? TopOf[NeighbourAt] : BottomZ;
-					const double NeighbourBottom = bNeighbour ? BottomOf[NeighbourAt] : BottomZ;
-
-					const int32 A = Side;
-					const int32 B = (Side + 1) % 4;
-
-					// Standing above the neighbour: the riser of a terrace.
-					AppendBand(A, B, FMath::Max(BottomZ, NeighbourTop), TopZ);
-
-					// And hanging below it, which is the same step seen from a cell
-					// melted from underneath rather than from on top.
-					AppendBand(A, B, BottomZ, FMath::Min(TopZ, NeighbourBottom));
 				}
 			}
 		}
@@ -838,7 +1106,7 @@ namespace
 }
 
 void BuildFieldMesh(UDynamicMeshComponent* Component, const FARPGSolidField& Field,
-	const FVector2D& Origin)
+	const FVector2D& Origin, const FARPGSurfaceFacets& Facets)
 {
 	using namespace UE::Geometry;
 
@@ -860,10 +1128,10 @@ void BuildFieldMesh(UDynamicMeshComponent* Component, const FARPGSolidField& Fie
 
 	const int32 Cells = Field.CountX * Field.CountY;
 
-	TArray<bool> Present;
+	TArray<float> Fill;
 	TArray<double> BottomOf;
 	TArray<double> TopOf;
-	Present.SetNumUninitialized(Cells);
+	Fill.SetNumUninitialized(Cells);
 	BottomOf.SetNumUninitialized(Cells);
 	TopOf.SetNumUninitialized(Cells);
 
@@ -872,13 +1140,22 @@ void BuildFieldMesh(UDynamicMeshComponent* Component, const FARPGSolidField& Fie
 		for (int32 X = 0; X < Field.CountX; ++X)
 		{
 			const int32 At = Field.Index(X, Y);
-			Present[At] = Field.IsSolid(X, Y);
-			BottomOf[At] = Field.Bottom[At] * 0.1;
-			TopOf[At] = Field.Top[At] * 0.1;
+
+			// THE FIELD ALREADY KNOWS WHERE IT ENDS, to a fraction of a cell, and
+			// says so as one number -- the outline it was cut with and the holes
+			// melted through it, whichever is nearer. See SolidityAt.
+			Fill[At] = Field.SolidityAt(X, Y);
+
+			// AND WHAT AN EMPTY CELL'S HEIGHT OUGHT TO READ AS, which is not the
+			// one it stores. See SurfaceTopAt -- this is the same pair of calls
+			// TopAt interpolates, so the surface drawn here is the surface every
+			// query answers from.
+			BottomOf[At] = Field.SurfaceBottomAt(X, Y);
+			TopOf[At] = Field.SurfaceTopAt(X, Y);
 		}
 	}
 
-	BuildCellLayer(Mesh, Field, Origin, Present, BottomOf, TopOf);
+	BuildCellLayer(Mesh, Field, Origin, Fill, BottomOf, TopOf, Facets);
 
 	FMeshNormals::QuickComputeVertexNormals(Mesh);
 
@@ -887,7 +1164,8 @@ void BuildFieldMesh(UDynamicMeshComponent* Component, const FARPGSolidField& Fie
 }
 
 void BuildFilmMesh(UDynamicMeshComponent* Component, const FARPGSolidField& Field,
-	const FVector2D& Origin, float MinimumFilm, TArrayView<const FARPGWallRun> Runs)
+	const FVector2D& Origin, float MinimumFilm, const FARPGSurfaceFacets& Facets,
+	TArrayView<const FARPGWallRun> Runs)
 {
 	using namespace UE::Geometry;
 
@@ -912,10 +1190,10 @@ void BuildFilmMesh(UDynamicMeshComponent* Component, const FARPGSolidField& Fiel
 
 	const int32 Cells = Field.CountX * Field.CountY;
 
-	TArray<bool> Present;
+	TArray<float> Fill;
 	TArray<double> BottomOf;
 	TArray<double> TopOf;
-	Present.SetNumUninitialized(Cells);
+	Fill.SetNumUninitialized(Cells);
 	BottomOf.SetNumUninitialized(Cells);
 	TopOf.SetNumUninitialized(Cells);
 
@@ -924,6 +1202,7 @@ void BuildFilmMesh(UDynamicMeshComponent* Component, const FARPGSolidField& Fiel
 	// the flow solver stops moving at, so the drawn film and the simulated one
 	// agree about where the edge of the wet is.
 	const double Floor = FMath::Max(0.f, MinimumFilm);
+	const float Band = FMath::Max(1.f, Field.CellSize);
 
 	for (int32 Y = 0; Y < Field.CountY; ++Y)
 	{
@@ -932,18 +1211,33 @@ void BuildFilmMesh(UDynamicMeshComponent* Component, const FARPGSolidField& Fiel
 			const int32 At = Field.Index(X, Y);
 			const double Depth = Field.Wet.IsValidIndex(At) ? Field.Wet[At] : 0.0;
 
-			Present[At] = Field.IsSolid(X, Y) && Depth > Floor;
+			// WET, AND ON ROCK, taken as a minimum for the same reason the slab's
+			// own two boundaries are -- lava stops either because it has run out or
+			// because the rock under it has, and the nearer edge is the one you
+			// see. Without the second half a film would mesh straight out over the
+			// hole a fireball opened underneath it.
+			Fill[At] = FMath::Min(Field.SolidityAt(X, Y),
+				static_cast<float>(FMath::Clamp(Depth - Floor, -Band, Band)));
 
-			// ON TOP OF THE ROCK, so the film sits in whatever bowl the rock was
-			// cut into and its own top is the rock's plus how deep it lies. Both
-			// read the same heightfield, so lava cannot drift off the surface it
-			// is lying on.
-			BottomOf[At] = Field.Top[At] * 0.1;
-			TopOf[At] = BottomOf[At] + Depth;
+			// ON TOP OF THE ROCK, and on the rock's OWN reading of where its top
+			// is -- the same call the slab's mesh is built from, so the lava
+			// cannot end up hovering above the stone or sunk into it.
+			//
+			// A DRY CELL CONTRIBUTES NO DEPTH, which is what makes the film taper
+			// to nothing at its rim rather than ending in a cliff: the surface is
+			// interpolated between samples, and the sample just past the wet is
+			// the rock itself.
+			BottomOf[At] = Field.SurfaceTopAt(X, Y);
+			TopOf[At] = BottomOf[At] + (Field.IsSolid(X, Y) ? Depth : 0.0);
 		}
 	}
 
-	BuildCellLayer(Mesh, Field, Origin, Present, BottomOf, TopOf);
+	// THE SLAB'S OWN FACETS, not the fluid's, and that is not a mix-up. Relief
+	// displaces the lattice by a hash of the corner index, so handing the film the
+	// same settings makes it break over exactly the same bumps the rock does --
+	// which is the only way a layer lying on a broken surface stays in contact
+	// with it.
+	BuildCellLayer(Mesh, Field, Origin, Fill, BottomOf, TopOf, Facets);
 
 	// AND OVER THE EDGE. Everything above lies on cell TOPS, which is the whole of
 	// what a heightfield can hold -- z = f(x, y) has no room for a vertical face,
@@ -965,7 +1259,15 @@ void BuildFilmMesh(UDynamicMeshComponent* Component, const FARPGSolidField& Fiel
 		}
 
 		const int32 At = Field.Index(Cell.X, Cell.Y);
-		const double RockTop = Field.Top[At] * 0.1;
+
+		// LIFTED WITH THE ROCK IT HANGS FROM. The face this sheet is drawn against
+		// was displaced by the same hash of the same sample -- see BuildLattice --
+		// so reading the stored height here would leave the top of a run of lava
+		// floating a few centimetres off the lip it just went over.
+		const double RockTop = Field.Top[At] * 0.1
+			+ (Facets.Relief > 0.f
+				? CornerNoise(Cell.X, Cell.Y, 3u) * Facets.Relief
+				: 0.0);
 
 		if (RockTop - Run.Front <= UE_DOUBLE_SMALL_NUMBER)
 		{

@@ -264,6 +264,142 @@ bool FARPGMagicGatePassesTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGMagicGatePrimitivesTest,
+	"ARPG.Magic.Gating.AnUntrainedCasterCannotPairEvenTwoPrimitives",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGMagicGatePrimitivesTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGMagicTestUtils;
+	FTestWorld Scope;
+
+	// THE CASE THE SHIPPED DATA ACTUALLY PRESENTS, and the one every other gate
+	// test here misses: they all raise Complexity to 2 to have something to gate
+	// ON, so the arithmetic was only ever exercised where it was obviously meant
+	// to bite. Every primitive in DA_Element_* is complexity 1 and a character
+	// who has never cast is level 0 in all of them -- and 0 >= 1 is false, so the
+	// gate refuses the pairing that is supposed to be the player's first.
+	FRig Rig = BuildCasterRig(Scope.World, /*FireLevel=*/0.f, /*WaterLevel=*/0.f);
+	Rig.Fire->Complexity = 1;
+	Rig.Water->Complexity = 1;
+
+	Rig.Magic->ToggleElement(EARPGElementSlot::North);
+	Rig.Magic->ToggleElement(EARPGElementSlot::West);
+
+	// PINNED AS THE BEHAVIOUR, not reported as the bug. The gate means what it
+	// says -- an untrained element is one you cannot yet combine -- and casting
+	// fire solo to level 1 is how the pairing is earned. What was missing was
+	// any way to try the recipe without earning it first, which is the next test.
+	TestEqual(TEXT("Two untrained primitives do not pair"),
+		Rig.Magic->GetActiveCount(), 1);
+	TestNull(TEXT("So nothing resolves"), Rig.Magic->GetResolvedCombination());
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGMagicGateIgnoredTest,
+	"ARPG.Magic.Gating.TheDebugBypassAllowsAnyPairingAndChangesNothingElse",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGMagicGateIgnoredTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGMagicTestUtils;
+	FTestWorld Scope;
+
+	// The worst case the gate would refuse: a complete novice reaching for two
+	// elements it thinks are beyond them.
+	FRig Rig = BuildCasterRig(Scope.World, /*FireLevel=*/0.f, /*WaterLevel=*/0.f);
+	Rig.Fire->Complexity = 3;
+	Rig.Water->Complexity = 3;
+
+	Rig.Magic->bIgnoreComplexityGate = true;
+
+	Rig.Magic->ToggleElement(EARPGElementSlot::North);
+	Rig.Magic->ToggleElement(EARPGElementSlot::West);
+
+	TestEqual(TEXT("With the gate off, any pairing is allowed"),
+		Rig.Magic->GetActiveCount(), 2);
+	TestSamePtr(TEXT("And the combination resolves"),
+		Rig.Magic->GetResolvedCombination(), Rig.Steam);
+
+	// WHAT IT MUST NOT TOUCH, and the whole reason this is not just
+	// bDebugForceMaxLevel. That flag would also have opened this gate, by
+	// reporting every element at level 4 -- and would have maxed the damage
+	// multiplier and the cosmetic power window alongside, so the spell you cast
+	// while trying a recipe is not the spell that ships. This changes what is
+	// ALLOWED and nothing about what it does.
+	Rig.Steam->BaseDamage = 40.f;
+
+	FARPGDischargeTypeSettings Burst;
+	Burst.DamageMultiplier = 1.f;
+	Burst.MaxChargeDamage = 0.f;
+	Rig.Magic->DischargeSettings.Add(EARPGDischargeType::Burst, Burst);
+	Rig.Magic->MasteryPowerBonus = 0.5f;
+
+	const FARPGDischargeContext Context = Rig.Magic->BuildDischargeContext(
+		EARPGDischargeType::Burst, FVector::ZeroVector, FVector::ForwardVector, 0.f);
+
+	TestEqual(TEXT("The spell is the untrained one"), Context.ComputedDamage, 40.f);
+
+	// The bare floor of the power window, with none of MasteryPowerBonus added --
+	// which is the whole 0.5 that a level-4 caster gets on top of it.
+	TestEqual(TEXT("And carries none of a master's power"),
+		Context.PowerFraction, Rig.Magic->MinPower);
+
+	// And turning it back off restores the gate, so a session that switched it on
+	// to try something is not stuck with it.
+	Rig.Magic->ClearSelection();
+	Rig.Magic->bIgnoreComplexityGate = false;
+
+	Rig.Magic->ToggleElement(EARPGElementSlot::North);
+	Rig.Magic->ToggleElement(EARPGElementSlot::West);
+
+	TestEqual(TEXT("Switched back off, the gate bites again"),
+		Rig.Magic->GetActiveCount(), 1);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGMagicGateRefundTest,
+	"ARPG.Magic.Gating.AnElementRefusedByTheGateCostsNothing",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGMagicGateRefundTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGMagicTestUtils;
+	FTestWorld Scope;
+
+	FRig Rig = BuildCasterRig(Scope.World, /*FireLevel=*/0.f, /*WaterLevel=*/0.f);
+	Rig.Fire->Complexity = 1;
+	Rig.Water->Complexity = 1;
+	Rig.Fire->ActivationCost = 10.f;
+	Rig.Water->ActivationCost = 10.f;
+
+	Rig.Magic->ToggleElement(EARPGElementSlot::North);
+
+	TestEqual(TEXT("Setup: the first element readied"), Rig.Magic->GetActiveCount(), 1);
+	TestEqual(TEXT("And was paid for"), Rig.Mana(), 90.f);
+
+	Rig.Magic->ToggleElement(EARPGElementSlot::West);
+
+	// THE GATE RUNS BEFORE THE TILL. Charging first meant a refused pairing took
+	// the mana and gave back nothing at all -- no element in the mix, no
+	// combination, and the only feedback a resource the player cannot see
+	// draining. A block should be information, not a fine.
+	TestEqual(TEXT("The gate refused it"), Rig.Magic->GetActiveCount(), 1);
+	TestEqual(TEXT("And it cost nothing"), Rig.Mana(), 90.f);
+
+	// Still charged for everything that DOES ready, which is what the rule was
+	// about in the first place.
+	Rig.Magic->bIgnoreComplexityGate = true;
+	Rig.Magic->ToggleElement(EARPGElementSlot::West);
+
+	TestEqual(TEXT("An element that is allowed still joins"), Rig.Magic->GetActiveCount(), 2);
+	TestEqual(TEXT("And is still paid for"), Rig.Mana(), 80.f);
+
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGMagicMasteryTest,
 	"ARPG.Magic.Gating.MasteryScalesDamageButNotPoise",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

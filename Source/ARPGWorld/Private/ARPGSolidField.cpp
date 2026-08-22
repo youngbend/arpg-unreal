@@ -53,16 +53,157 @@ float FARPGSolidField::ThicknessAt(int32 X, int32 Y) const
 	return FMath::Max(0.f, (Top[At] - Bottom[At]) * ToCm);
 }
 
+float FARPGSolidField::InsetAt(int32 X, int32 Y) const
+{
+	const bool bOnGrid = X >= 0 && Y >= 0 && X < CountX && Y < CountY;
+
+	// ONE CELL EITHER SIDE is the whole range the plane carries -- see Edge -- so
+	// it is also the range everything off the end of it saturates to.
+	const float Band = FMath::Max(1.f, CellSize);
+
+	if (!bOnGrid)
+	{
+		return -Band;
+	}
+
+	// NO OUTLINE MEANS NOTHING TO BE OUTSIDE OF. A field that never had the plane
+	// -- one adopted from an older save, or a bare struct a test built by hand --
+	// falls back to letting thickness alone decide, which is exactly the cell rule
+	// this replaced.
+	if (Edge.Num() != Top.Num())
+	{
+		return Band;
+	}
+
+	return FMath::Clamp(-Edge[Index(X, Y)] * ToCm, -Band, Band);
+}
+
+float FARPGSolidField::SolidityAt(int32 X, int32 Y) const
+{
+	const float Band = FMath::Max(1.f, CellSize);
+
+	// AGAINST THE SAME FLOOR IsSolid USES, so the drawn edge and the walkable one
+	// are answers to one question. Clamped into the band alongside the inset for
+	// the same reason it is: a thickness of metres would otherwise swamp a
+	// distance of centimetres in the minimum below and the outline would stop
+	// being able to cut anything.
+	const float Material = FMath::Clamp(ThicknessAt(X, Y) - MinimumLayer, -Band, Band);
+
+	return FMath::Min(InsetAt(X, Y), Material);
+}
+
+float FARPGSolidField::SolidityAtWorld(const FVector2D& World) const
+{
+	if (!IsValidField() || CellSize <= 0.f)
+	{
+		return -1.f;
+	}
+
+	// THE SAME INTERPOLATION THE MESH IS CUT WITH. Cell values sit at cell
+	// CENTRES, so the four surrounding a point are the four whose centres box it
+	// in -- which is the floor of the point in cell coordinates, not the cell it
+	// happens to be inside.
+	const FVector2D Cell = (World - Origin) / CellSize;
+
+	const int32 X = FMath::FloorToInt32(Cell.X);
+	const int32 Y = FMath::FloorToInt32(Cell.Y);
+
+	const float TX = static_cast<float>(Cell.X) - X;
+	const float TY = static_cast<float>(Cell.Y) - Y;
+
+	const float Low = FMath::Lerp(SolidityAt(X, Y), SolidityAt(X + 1, Y), TX);
+	const float High = FMath::Lerp(SolidityAt(X, Y + 1), SolidityAt(X + 1, Y + 1), TX);
+
+	return FMath::Lerp(Low, High, TY);
+}
+
 bool FARPGSolidField::IsSolidAt(const FVector2D& World) const
 {
-	const FIntPoint Cell = CellAt(World);
-	return Cell.X >= 0 && IsSolid(Cell.X, Cell.Y);
+	return SolidityAtWorld(World) > 0.f;
+}
+
+float FARPGSolidField::BorrowedAt(const TArray<int16>& Plane, int32 X, int32 Y) const
+{
+	if (!IsValidField() || Plane.Num() != Top.Num()
+		|| X < 0 || Y < 0 || X >= CountX || Y >= CountY)
+	{
+		return 0.f;
+	}
+
+	if (IsSolid(X, Y))
+	{
+		return Plane[Index(X, Y)] * ToCm;
+	}
+
+	// THE FOUR SHARING A SIDE, and only the ones with material in them. See
+	// SurfaceTopAt for why an empty cell's own stored height is the one number
+	// that must not be read here.
+	static const FIntPoint Neighbours[4] = { {1, 0}, {-1, 0}, {0, 1}, {0, -1} };
+
+	float Sum = 0.f;
+	int32 Count = 0;
+
+	for (const FIntPoint& Step : Neighbours)
+	{
+		const int32 NX = X + Step.X;
+		const int32 NY = Y + Step.Y;
+
+		if (NX < 0 || NY < 0 || NX >= CountX || NY >= CountY || !IsSolid(NX, NY))
+		{
+			continue;
+		}
+
+		Sum += Plane[Index(NX, NY)] * ToCm;
+		++Count;
+	}
+
+	// Nothing anywhere near it has material either, so there is no height to
+	// borrow and its own is as good an answer as exists.
+	return Count > 0 ? Sum / Count : Plane[Index(X, Y)] * ToCm;
+}
+
+float FARPGSolidField::SurfaceTopAt(int32 X, int32 Y) const
+{
+	return BorrowedAt(Top, X, Y);
+}
+
+float FARPGSolidField::SurfaceBottomAt(int32 X, int32 Y) const
+{
+	return BorrowedAt(Bottom, X, Y);
 }
 
 float FARPGSolidField::TopAt(const FVector2D& World) const
 {
-	const FIntPoint Cell = CellAt(World);
-	return Cell.X >= 0 ? Top[Index(Cell.X, Cell.Y)] * ToCm : 0.f;
+	if (!IsValidField() || CellSize <= 0.f)
+	{
+		return 0.f;
+	}
+
+	// OFF THE SLAB IS STILL ZERO. Everything that asks this pairs it with a
+	// containment test, and answering with a neighbour's height for a point
+	// nowhere near the slab would give a caller a surface to stand on that is not
+	// there.
+	if (CellAt(World).X < 0)
+	{
+		return 0.f;
+	}
+
+	// THE SAME FOUR SAMPLES, IN THE SAME ORDER, AS THE MESHER'S -- see
+	// SolidityAtWorld, which interpolates the shape exactly as this interpolates
+	// the height. Cell values sit at cell CENTRES, so the four surrounding a point
+	// are the four whose centres box it in.
+	const FVector2D Cell = (World - Origin) / CellSize;
+
+	const int32 X = FMath::FloorToInt32(Cell.X);
+	const int32 Y = FMath::FloorToInt32(Cell.Y);
+
+	const float TX = static_cast<float>(Cell.X) - X;
+	const float TY = static_cast<float>(Cell.Y) - Y;
+
+	const float Low = FMath::Lerp(SurfaceTopAt(X, Y), SurfaceTopAt(X + 1, Y), TX);
+	const float High = FMath::Lerp(SurfaceTopAt(X, Y + 1), SurfaceTopAt(X + 1, Y + 1), TX);
+
+	return FMath::Lerp(Low, High, TY);
 }
 
 void FARPGSolidField::Refresh()
@@ -233,6 +374,7 @@ bool FARPGSolidField::NetSerialize(FArchive& Ar, UPackageMap* Map, bool& bOutSuc
 		{
 			Top.Reset();
 			Bottom.Reset();
+			Edge.Reset();
 		}
 		return true;
 	}
@@ -251,14 +393,28 @@ bool FARPGSolidField::NetSerialize(FArchive& Ar, UPackageMap* Map, bool& bOutSuc
 			Bottom.SetNumZeroed(Cells);
 		}
 
+		// A THIRD PLANE, AND THE CHEAPEST OF THE THREE. Edge is clamped to one
+		// cell either side of the outline, so it is one run for the whole interior,
+		// one for the whole exterior, and detail only along the band between --
+		// a perimeter's worth of cells against an area's. Sending the shape costs
+		// less than sending the heights it holds.
+		if (Edge.Num() != Cells)
+		{
+			// A slab with no outline plane is meshed by the cell rule instead, so
+			// a uniform interior is the reading that changes nothing.
+			Edge.Init(static_cast<int16>(-FMath::Max(1.f, CellSize) * 10.f), Cells);
+		}
+
 		WriteRuns(Ar, Top);
 		WriteRuns(Ar, Bottom);
+		WriteRuns(Ar, Edge);
 
 		return true;
 	}
 
 	ReadRuns(Ar, Top, Cells);
 	ReadRuns(Ar, Bottom, Cells);
+	ReadRuns(Ar, Edge, Cells);
 
 	// The totals are not sent -- they are pure functions of the cells -- so a
 	// receiver puts them back itself. Cheaper than the bytes it saves, and it
@@ -543,6 +699,7 @@ void FARPGSolidField::BuildFrom(const TArray<FVector2D>& Ring, float InCellSize,
 {
 	Top.Reset();
 	Bottom.Reset();
+	Edge.Reset();
 	CountX = 0;
 	CountY = 0;
 
@@ -563,19 +720,38 @@ void FARPGSolidField::BuildFrom(const TArray<FVector2D>& Ring, float InCellSize,
 
 	Top.SetNumZeroed(CountX * CountY);
 	Bottom.SetNumZeroed(CountX * CountY);
+	Edge.SetNumZeroed(CountX * CountY);
 
 	// ZERO IS THE UNDERSIDE the slab started at, and everything vertical is
 	// relative to it -- which is what lets the whole field ride up and down on the
 	// buoyancy without a single cell being rewritten.
 	const int16 Surface = Clamped(Thickness * ToMm);
 
+	// See Edge: further than a cell away says nothing the mesher can use, and
+	// clamping is what leaves the interior and the exterior as one run each.
+	const float Band = CellSize * ToMm;
+
 	for (int32 Y = 0; Y < CountY; ++Y)
 	{
 		for (int32 X = 0; X < CountX; ++X)
 		{
-			if (ARPGFluidGeometry::PolygonContains(Ring, CentreOf(X, Y)))
+			const FVector2D Centre = CentreOf(X, Y);
+			const int32 At = Index(X, Y);
+
+			const double Distance =
+				ARPGFluidGeometry::PolygonSignedDistance(Ring, Centre);
+
+			Edge[At] = Clamped(FMath::Clamp(
+				static_cast<float>(Distance) * ToMm, -Band, Band));
+
+			// STILL A WHOLE CELL OR NONE. The material is uniform right up to the
+			// outline and then stops -- a fresh slab has a vertical edge, not a
+			// bevel -- so what the distance above buys is where the mesher CUTS,
+			// not a thickness that fades out. Filling by cell centre keeps every
+			// volume, area and buoyancy answer exactly what it was.
+			if (Distance <= 0.0)
 			{
-				Top[Index(X, Y)] = Surface;
+				Top[At] = Surface;
 			}
 		}
 	}
@@ -591,13 +767,32 @@ bool FARPGSolidField::Resolidify(const TArray<FVector2D>& Ring, float SurfaceZ, 
 	}
 
 	const int16 NewTop = Clamped(SurfaceZ * ToMm);
+	const float Band = CellSize * ToMm;
+	const bool bHasEdge = Edge.Num() == Top.Num();
 	bool bGained = false;
 
 	for (int32 Y = 0; Y < CountY; ++Y)
 	{
 		for (int32 X = 0; X < CountX; ++X)
 		{
-			if (!ARPGFluidGeometry::PolygonContains(Ring, CentreOf(X, Y)))
+			const double Distance =
+				ARPGFluidGeometry::PolygonSignedDistance(Ring, CentreOf(X, Y));
+
+			// THE OUTLINE GROWS WITH THE SLAB, as the smaller of the two distances
+			// -- which is what a union of two regions is when each is written as a
+			// distance to its own edge. Ice refreezing around a floe genuinely
+			// extends the shape, and leaving the old outline in place would have
+			// the mesher cut the new material off at the line the ORIGINAL freeze
+			// stopped at.
+			if (bHasEdge)
+			{
+				const int16 Now = Clamped(FMath::Clamp(
+					static_cast<float>(Distance) * ToMm, -Band, Band));
+
+				Edge[Index(X, Y)] = FMath::Min(Edge[Index(X, Y)], Now);
+			}
+
+			if (Distance > 0.0)
 			{
 				continue;
 			}
@@ -686,6 +881,120 @@ double FARPGSolidField::MeltBowl(const FVector2D& At, float Radius, float Depth)
 
 	if (Removed > 0.0)
 	{
+		Refresh();
+	}
+
+	return Removed;
+}
+
+void FARPGSolidField::RebuildBand()
+{
+	if (!IsValidField() || Edge.Num() != Top.Num())
+	{
+		return;
+	}
+
+	const float Band = CellSize * ToMm;
+
+	// HALF A CELL is where the boundary between a solid cell and an empty one
+	// actually runs, and half a cell is also all the precision a plane clamped to
+	// one cell either side can carry. So the rebuilt band is deliberately
+	// cell-quantised: it is the honest reading of the occupancy it was derived
+	// from, and it is only ever reached once erosion has taken a whole cell --
+	// see Erode, which leaves the outline the slab froze with alone until then.
+	const int16 Rim = Clamped(CellSize * 0.5f * ToMm);
+
+	static const FIntPoint Neighbours[4] = { {1, 0}, {-1, 0}, {0, 1}, {0, -1} };
+
+	TArray<int16> Rebuilt;
+	Rebuilt.SetNumUninitialized(Edge.Num());
+
+	for (int32 Y = 0; Y < CountY; ++Y)
+	{
+		for (int32 X = 0; X < CountX; ++X)
+		{
+			const bool bSolid = IsSolid(X, Y);
+			bool bBorders = false;
+
+			for (const FIntPoint& Step : Neighbours)
+			{
+				const int32 NX = X + Step.X;
+				const int32 NY = Y + Step.Y;
+
+				const bool bNeighbourSolid = NX >= 0 && NY >= 0
+					&& NX < CountX && NY < CountY && IsSolid(NX, NY);
+
+				bBorders |= bNeighbourSolid != bSolid;
+			}
+
+			Rebuilt[Index(X, Y)] = bBorders
+				? (bSolid ? -Rim : Rim)
+				: Clamped(bSolid ? -Band : Band);
+		}
+	}
+
+	Edge = MoveTemp(Rebuilt);
+}
+
+double FARPGSolidField::Erode(float Distance)
+{
+	// NO OUTLINE, NOTHING TO PULL IN. A field with no Edge plane is meshed by the
+	// cell rule and has no sub-cell boundary to move -- see InsetAt.
+	if (!IsValidField() || Distance <= 0.f || Edge.Num() != Top.Num())
+	{
+		return 0.0;
+	}
+
+	const double CellArea = static_cast<double>(CellSize) * CellSize;
+	const float Band = CellSize * ToMm;
+	const int16 Step = Clamped(Distance * ToMm);
+
+	double Removed = 0.0;
+
+	for (int32 Cell = 0; Cell < Top.Num(); ++Cell)
+	{
+		// ONLY WHAT THE BAND CAN SEE. Edge is clamped to one cell either side, so
+		// everything further in than that is saturated at the same value and knows
+		// only "deep inside" -- and adding to a saturated cell is how a single
+		// erosion of more than one cell took the entire slab at once. The interior
+		// waits its turn; the band comes to it as the rim goes.
+		if (Edge[Cell] <= -Band)
+		{
+			continue;
+		}
+
+		// POSITIVE IS OUTSIDE, so adding moves the cell further out and the zero
+		// crossing -- which is where the mesher cuts -- travels inward.
+		Edge[Cell] = Clamped(FMath::Clamp(
+			static_cast<float>(Edge[Cell]) + Step, -Band, Band));
+
+		if (Edge[Cell] < 0)
+		{
+			continue;
+		}
+
+		// AND THE CELL ITSELF GOES WITH IT once its centre is outside. The drawn
+		// contour is sub-cell, but area, volume, buoyancy and standing all read
+		// whole cells -- so leaving the material here would have a floe keep its
+		// weight and its footing well past the edge it is drawn with.
+		const float Before = FMath::Max(0.f, (Top[Cell] - Bottom[Cell]) * ToCm);
+		if (Before <= 0.f)
+		{
+			continue;
+		}
+
+		Top[Cell] = Bottom[Cell];
+		Removed += Before * CellArea;
+	}
+
+	if (Removed > 0.0)
+	{
+		// THE RIM MOVED A WHOLE CELL, so the band has to move with it -- the cells
+		// behind the ones just taken are the new edge and are still saturated at
+		// "deep inside". Only done when something was actually removed, so a floe
+		// that is merely creeping inward within its band keeps the precise outline
+		// it froze with.
+		RebuildBand();
 		Refresh();
 	}
 

@@ -102,8 +102,24 @@ void AARPGDischargeEffect::ConfigureReactionVolume()
 	}
 
 	Collider->SetSphereRadius(ReactionRadius);
-	Collider->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
 
+	// EVERYTHING THE VOLUME IS, BEFORE THE COLLIDER CAN BE SEEN. Switching
+	// collision on is not a passive setting -- it makes the engine refresh the
+	// component's overlaps there and then, and any it finds fire
+	// OnComponentBeginOverlap synchronously, inside the SetCollisionEnabled call.
+	//
+	// SO ORDER IS THE WHOLE BUG. With the assignments below made AFTER that call,
+	// as they were, a spell that spawned already overlapping something announced
+	// itself carrying no element and no energy: the solver read an inert volume,
+	// bailed at its first guard, and the pair was never looked at again -- because
+	// BEGIN-overlap only fires on arrival, and by the next frame the two were
+	// already overlapping. Nothing retries. An emanation cast over a puddle is
+	// exactly that case, and it did nothing at all.
+	//
+	// A projectile hid this completely. Its volume travels, so it meets things
+	// after BeginPlay has long finished and is fully armed by the time it does.
+	// Only a spell born inside what it should react with was affected -- which is
+	// every emanation, every cloak, and any burst cast at your own feet.
 	Volume->Element = Context.PrimaryElement;
 
 	// THE SAME NUMBER AS THE DAMAGE, which is the whole reason ComputedDamage is
@@ -115,6 +131,10 @@ void AARPGDischargeEffect::ConfigureReactionVolume()
 	// The caster, not this actor -- reaction damage attributes the same way hit
 	// damage does, and self-attribution would give kill credit to the projectile.
 	Volume->SourceActor = Context.Caster;
+
+	// LAST, so the first overlap anyone hears about is of a volume that already
+	// knows what it is.
+	Collider->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
 }
 
 void AARPGDischargeEffect::BeginPlay()

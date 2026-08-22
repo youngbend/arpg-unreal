@@ -82,7 +82,8 @@ void AARPGSolidBody::RebuildFilm()
 	const UARPGFluidDefinition* Fluid = Definition ? Definition->MeltsInto : nullptr;
 
 	ARPGFluidGeometry::BuildFilmMesh(Film, Field, Field.SolidCentroid(),
-		Fluid ? Fluid->MinimumFilm : 0.f, WallRuns);
+		Fluid ? Fluid->MinimumFilm : 0.f,
+		Definition ? Definition->Facets : FARPGSurfaceFacets(), WallRuns);
 
 	// THE FLUID'S MATERIAL, not the slab's: what is running down a pillar of earth
 	// is lava, and drawing it in rock would make the whole point of it invisible.
@@ -193,6 +194,12 @@ void AARPGSolidBody::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLi
 
 void AARPGSolidBody::RebuildFromRing()
 {
+	// THE MESH IS CURRENT AS OF HERE, whatever asked for it -- a spell, a
+	// refreeze, or the ambient melt that had been saving up. Cleared in the one
+	// place that makes it true rather than at each caller, where it is one line
+	// somebody adding a third melt path would not know to write.
+	UndrawnMelt = 0.f;
+
 	// THE TOTALS ARE TRANSIENT, so a client that has just received the field has
 	// the cells and none of the sums. Rebuilding is a write-time cost and this is
 	// only ever reached on a write -- the per-frame tick reads the cache and never
@@ -202,7 +209,8 @@ void AARPGSolidBody::RebuildFromRing()
 
 	if (!Definition || !Field.IsValidField() || Field.SolidCellCount() == 0)
 	{
-		ARPGFluidGeometry::BuildFieldMesh(Surface, FARPGSolidField(), FVector2D::ZeroVector);
+		ARPGFluidGeometry::BuildFieldMesh(Surface, FARPGSolidField(), FVector2D::ZeroVector,
+			FARPGSurfaceFacets());
 		Surface->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 		return;
 	}
@@ -232,7 +240,7 @@ void AARPGSolidBody::RebuildFromRing()
 
 	Volume->SurfaceHeightOffset = Definition->Thickness;
 
-	ARPGFluidGeometry::BuildFieldMesh(Surface, Field, Centre);
+	ARPGFluidGeometry::BuildFieldMesh(Surface, Field, Centre, Definition->Facets);
 
 	// AND WHATEVER IS LYING ON IT. A spell that cuts the rock is usually the same
 	// spell that leaves a film in the cut, and both arrive in the same write.
@@ -711,14 +719,58 @@ double AARPGSolidBody::MeltAt(const FVector2D& Where, float Radius, float Depth)
 
 double AARPGSolidBody::MeltUniformly(float FromTop, float FromBottom)
 {
+	// THE SHAPE IS WHAT HAS TO BE DRAWN PROMPTLY, not the thickness. A cell that
+	// has stopped being solid is a hole opening or a rim retreating -- something
+	// with an outline, which the player sees the instant it happens. A slab that
+	// is a millimetre thinner everywhere is not, and asking for a full rebuild and
+	// a collision cook for one is what made a melting floe cost a frame.
+	const int32 Before = Field.SolidCellCount();
+
 	const double Removed = Field.MeltUniform(FromTop, FromBottom);
 
+	if (Removed <= 0.0)
+	{
+		return 0.0;
+	}
+
+	UndrawnMelt += FMath::Max(0.f, FromTop) + FMath::Max(0.f, FromBottom);
+
+	if (Field.SolidCellCount() != Before || UndrawnMelt >= UndrawnMeltLimit)
+	{
+		RebuildFromRing();
+	}
+
+	return Removed;
+}
+
+double AARPGSolidBody::MeltInward(float Distance)
+{
+	const double Removed = Field.Erode(Distance);
+
+	// ALWAYS DRAWN, unlike a thinning. Erosion only ever removes whole cells, so
+	// anything it did at all is a change to the silhouette.
 	if (Removed > 0.0)
 	{
 		RebuildFromRing();
 	}
 
 	return Removed;
+}
+
+void AARPGSolidBody::GroundOnBed(float BedHeight)
+{
+	FloatsOn = nullptr;
+	bAground = true;
+
+	// DRAFT IS HOW FAR UNDER ITS RESTING HEIGHT THE SLAB IS SITTING, and a slab
+	// on the floor is at its resting height by definition. Cleared rather than
+	// left, or Rise would spend the next second pulling a slab that is already
+	// home the rest of the way there.
+	Draft = 0.f;
+	GroundHeight = BedHeight;
+
+	const FVector2D World = GetWorldCentre();
+	SetActorLocation(FVector(World.X, World.Y, GroundHeight));
 }
 
 bool AARPGSolidBody::ConsumeSurfaceArea(double Area)
