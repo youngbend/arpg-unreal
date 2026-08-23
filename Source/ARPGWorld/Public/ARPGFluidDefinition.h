@@ -76,7 +76,7 @@ public:
 	// tune "how thick is lava" inside the earth asset, and a second solid that
 	// melted into lava would need the same numbers copied and kept in step.
 	//
-	// A slab reads these through its own MeltsInto, so it never has to know.
+	// A slab reads these through its own BreaksInto, so it never has to know.
 
 	/**
 	 * How much of the available head the film moves per second.

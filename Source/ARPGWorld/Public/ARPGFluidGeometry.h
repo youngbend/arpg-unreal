@@ -3,9 +3,6 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "ARPGSolidField.h"
-#include "ARPGSurfaceFacets.h"
-#include "ARPGWallRun.h"
 
 class UDynamicMeshComponent;
 
@@ -55,11 +52,12 @@ namespace ARPGFluidGeometry
 	/**
 	 * Distance from a point to the ring's nearest edge, negative inside it.
 	 *
-	 * WHAT A GRID NEEDS IN ORDER NOT TO BE A STAIRCASE. Asking a cell whether its
-	 * centre is inside throws away everything about where the outline ran between
-	 * one centre and the next; asking how FAR keeps it, and two neighbours with
-	 * opposite signs then say exactly where the edge crossed. See
-	 * FARPGSolidField::Edge, which is this sampled onto a grid.
+	 * HOW FAR OFF THE SLAB A POINT IS, which a body made of a polygon can answer
+	 * exactly -- see AARPGSolidBody::DistanceToEdge, which is this and nothing
+	 * else. To the nearest SEGMENT rather than the nearest vertex: a ring's
+	 * vertices are metres apart on a long river bank and centimetres apart where a
+	 * spell clipped it, and a vertex-only distance would call a point resting
+	 * against the first of those far outside.
 	 *
 	 * Inside-ness comes from PolygonContains rather than from a winding test of
 	 * its own, so the sign here and the answer there cannot disagree about a
@@ -125,6 +123,22 @@ namespace ARPGFluidGeometry
 		TArray<FVector2D>& OutRing, TArray<TArray<FVector2D>>& OutHoles);
 
 	/**
+	 * Subtraction keeping the outer ring AND any hole the cut opened.
+	 *
+	 * WHAT A BITE OUT OF THE MIDDLE ACTUALLY IS. SubtractRings keeps the largest
+	 * outer ring and throws the rest away, which is right for a liquid -- water
+	 * flows back over a gap cut in it -- and wrong for anything solid: a fireball
+	 * landing in the middle of an earth wall takes a piece OUT, and dropping the
+	 * hole means the wall is drawn untouched and the spell did nothing visible.
+	 *
+	 * Also what freezing does to the water it takes: ice occupies the region it
+	 * froze from, so the pool genuinely loses that ground rather than shrinking
+	 * uniformly somewhere else.
+	 */
+	ARPGWORLD_API void SubtractWithHoles(const TArray<FVector2D>& A, const TArray<FVector2D>& B,
+		TArray<FVector2D>& OutRing, TArray<TArray<FVector2D>>& OutHoles);
+
+	/**
 	 * Scales the ring about its centroid until it encloses the target area.
 	 *
 	 * Uniform rather than an inward offset, because an offset erodes thin necks
@@ -178,65 +192,20 @@ namespace ARPGFluidGeometry
 	 */
 	using FBedSampler = TFunction<double(const FVector2D& World)>;
 
+	// THE TOP ON ITS OWN. Bed moves the whole body, both caps together, because a
+	// puddle following a ramp is a sheet down the ramp rather than a wedge. A
+	// TopRelief moves only the upper surface, which is how a slab gets a DISH cut
+	// into it -- the underside stays where it was and the slab is genuinely
+	// thinner where it was struck.
+	//
+	// Both are sampled per vertex, so what they can express is limited only by how
+	// finely the cap is tessellated -- see DetailSpacing. Nothing about this shape
+	// is a prism; it was only ever drawn as one.
+
 	ARPGWORLD_API void BuildSlabMesh(UDynamicMeshComponent* Component,
 		const TArray<FVector2D>& Ring, const TArray<FVector2D>& Hole,
 		const FVector2D& Origin, double BottomZ, double TopZ,
-		const FBedSampler& Bed = FBedSampler(), double DetailSpacing = 0.0);
+		const FBedSampler& Bed = FBedSampler(), double DetailSpacing = 0.0,
+		const FBedSampler& TopRelief = FBedSampler());
 
-	/**
-	 * The sixth call, and the one with a CEILING: a heightfield as a mesh.
-	 *
-	 * Where BuildSlabMesh draws a polygon extruded to a flat thickness, this draws
-	 * a field whose top and bottom vary per cell -- a floe with a bowl melted into
-	 * it, a step where new ice froze at a lower waterline, a hole where the two
-	 * surfaces met.
-	 *
-	 * WHY IT MATTERS FOR COST, and this is the whole reason a floe stopped being a
-	 * polygon. A slab mesh is retriangulated from an outline that gains vertices
-	 * every time it is clipped or offset, so a long-lived floe grows without
-	 * bound -- the Godot version measured fifty vertices becoming seven thousand
-	 * over eighteen melt ticks. A field cannot: its triangle count is at most a
-	 * fixed few per cell, forever, no matter how many fireballs land on it.
-	 *
-	 * A GRID IS NOT A LOOK, though it was drawn as one for a long time. Cells were
-	 * meshed as boxes, which put a staircase around every slab and terraces down
-	 * every melted bowl -- detail the field never had and the player could see.
-	 * They are meshed as SAMPLES now: joined into a surface, with the silhouette
-	 * cut where the material actually runs out rather than at the nearest cell
-	 * boundary. Facets asks for some of the grid back, which is what rock wants --
-	 * see FARPGSurfaceFacets. The default asks for none.
-	 *
-	 * Emitted in the component's LOCAL space; the field's own heights already are.
-	 */
-	ARPGWORLD_API void BuildFieldMesh(UDynamicMeshComponent* Component,
-		const FARPGSolidField& Field, const FVector2D& Origin,
-		const FARPGSurfaceFacets& Facets = FARPGSurfaceFacets());
-
-	/**
-	 * The seventh: what is LYING ON that heightfield, drawn as its own surface.
-	 *
-	 * A slab melted by a spell hands its fluid back onto its own top -- lava down
-	 * a pillar of earth, meltwater down a floe -- and the field carries how deep
-	 * that film lies on every cell. Nothing drew it, so the whole journey from
-	 * "the fireball hit" to "a pool formed at the foot" happened invisibly, and a
-	 * bowl in the middle of a slab (which keeps its melt rather than shedding it)
-	 * showed nothing at all, ever.
-	 *
-	 * The same surface rule as BuildFieldMesh, run over Top to Top-plus-film
-	 * instead of Bottom to Top. The wet stops where the depth falls to
-	 * MinimumFilm -- the same number the flow solver stops moving at -- or where
-	 * the rock under it stops, whichever comes first.
-	 *
-	 * PASS THE SLAB'S OWN FACETS, not the fluid's. They displace the lattice by a
-	 * hash of each sample, so a film given anything else would break over
-	 * different bumps than the rock it is lying on and float clear of it.
-	 *
-	 * NO COLLISION BEHIND THIS. What you stand on is the rock; the lava on top of
-	 * it is something you are standing in, which the volume component already
-	 * says. Emitted in the component's LOCAL space, like the field it lies on.
-	 */
-	ARPGWORLD_API void BuildFilmMesh(UDynamicMeshComponent* Component,
-		const FARPGSolidField& Field, const FVector2D& Origin, float MinimumFilm,
-		const FARPGSurfaceFacets& Facets = FARPGSurfaceFacets(),
-		TArrayView<const FARPGWallRun> Runs = {});
 }

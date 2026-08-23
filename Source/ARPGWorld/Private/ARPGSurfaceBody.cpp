@@ -202,6 +202,45 @@ bool AARPGSurfaceBody::ConsumeSurfaceArea(double Area)
 	return false;
 }
 
+bool AARPGSurfaceBody::ConsumeSurfaceRegion(const TArray<FVector2D>& Region)
+{
+	const double Taken = ARPGFluidGeometry::PolygonArea(Region);
+
+	if (Taken <= 0.0 || Ring.Num() < 3)
+	{
+		return false;
+	}
+
+	const double Before = GetArea();
+
+	TArray<FVector2D> Cut;
+	TArray<TArray<FVector2D>> Holes;
+	ARPGFluidGeometry::SubtractWithHoles(Ring, Region, Cut, Holes);
+
+	if (Cut.Num() < 3)
+	{
+		return true; // nothing left of it
+	}
+
+	const double After = ARPGFluidGeometry::PolygonArea(Cut);
+
+	// THE CUT DID NOT REACH THE OUTLINE, so the region came out of the middle and
+	// the boolean expressed it as a hole this body does not keep. The ground is
+	// still gone; take it the only other way there is.
+	if (After >= Before - UE_DOUBLE_SMALL_NUMBER)
+	{
+		return ConsumeSurfaceArea(Taken);
+	}
+
+	if (After < GetMinimumArea())
+	{
+		return true;
+	}
+
+	SetRing(Cut);
+	return false;
+}
+
 void AARPGSurfaceBody::OnElementalReaction_Implementation(float Consumed, float Remaining,
 	UARPGMagicElement* Product)
 {

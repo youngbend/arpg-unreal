@@ -212,7 +212,8 @@ void AARPGLaunchSlabProjectile::InitializeFromContext(const FARPGDischargeContex
 	// SIZED FROM THE ROCK THAT WENT. A thrown wall is a bigger boulder, not a
 	// different spell -- so the volume decides the radius and the cap decides how
 	// much bigger a spell is allowed to get for free.
-	const double SolidVolume = Slab->Field.SolidVolume();
+	const double SolidVolume = Slab->GetArea()
+		* (Slab->Definition ? Slab->Definition->Thickness : 0.f);
 	const double AsSphere = FMath::Pow(FMath::Max(1.0, SolidVolume) * 3.0 / (4.0 * PI), 1.0 / 3.0);
 
 	const float Conjured = FMath::Max(1.f, Radius);
@@ -245,15 +246,17 @@ void AARPGLaunchSlabProjectile::InitializeFromContext(const FARPGDischargeContex
 	}
 
 	// TAKE THE ROCK WITH IT, rather than a note of how big it was. The field is
-	// snapshotted whole, so what lands is what was thrown -- melt scars and all --
-	// and the mesh is baked ONCE here and never touched again. Everything that
-	// makes a mesh the wrong representation for a slab standing in the world is an
-	// argument about repeated boolean editing; a mesh built once and discarded has
-	// none of it, and it is the only thing that can tumble.
-	Carried = Slab->Field;
+	// snapshotted whole, so what lands is the shape that was thrown -- every break
+	// it had taken included -- and the mesh is baked ONCE here and never touched
+	// again. It is also the only thing in the system that can TUMBLE: a slab
+	// standing in the world is an outline with a thickness and has no way to
+	// express pitch or roll, where a mesh in flight is free to.
+	Carried = Slab->GetOutline();
+	CarriedHole = Slab->GetHole();
 	CarriedDefinition = Slab->Definition;
 
-	ARPGFluidGeometry::BuildFieldMesh(Carriage, Carried, Carried.SolidCentroid());
+	ARPGFluidGeometry::BuildSlabMesh(Carriage, Carried, CarriedHole, FVector2D::ZeroVector,
+		/*BottomZ=*/0.f, CarriedDefinition ? CarriedDefinition->Thickness : 0.f);
 
 	if (UMaterialInterface* Rock = Slab->GetSurfaceMaterial())
 	{
@@ -296,7 +299,7 @@ AARPGSolidBody* AARPGLaunchSlabProjectile::PutDown(const FVector& Where)
 	// put back. A conjured boulder has neither and still puts nothing down, which
 	// is what the launch flag was standing in for; asking the carried slab itself
 	// says the same thing without a second copy of the fact that can disagree.
-	if (bPutDown || !bLandsAsSlab || !CarriedDefinition || Carried.SolidCellCount() == 0
+	if (bPutDown || !bLandsAsSlab || !CarriedDefinition || Carried.Num() < 3
 		|| !World || World->GetNetMode() == NM_Client)
 	{
 		return nullptr;
@@ -321,10 +324,10 @@ AARPGSolidBody* AARPGLaunchSlabProjectile::PutDown(const FVector& Where)
 		return nullptr;
 	}
 
-	// THE FIELD ITSELF, not a ring it was built from. Setup seeds from an outline
-	// and would hand back a fresh unmarked slab; adopting the snapshot is what
-	// makes the pillar that lands the pillar that was thrown.
-	Landed->AdoptField(CarriedDefinition, Carried, Where,
+	// ADOPTED, not seeded. Setup recentres a fresh outline and squares it up, which
+	// is right when a slab is being made and wrong when one is being put back:
+	// what lands has to be the shape and the angle that left.
+	Landed->AdoptOutline(CarriedDefinition, Carried, CarriedHole, Where,
 		static_cast<float>(GetActorRotation().Yaw));
 
 	Fluids->RegisterSolid(Landed);

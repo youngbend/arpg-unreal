@@ -95,16 +95,7 @@ def facets(spec):
     style.set_editor_property("relief", spec.get("facet_relief", 0.0))
     style.set_editor_property("spread", spec.get("facet_spread", 0.0))
 
-    flat = spec.get("facet_flat", False)
-    for candidate in ("flat_shaded", "b_flat_shaded"):
-        try:
-            style.set_editor_property(candidate, flat)
-            break
-        except Exception:
-            continue
-    else:
-        log("could not set the facet flat-shading flag -- check the bindings")
-
+    style.set_editor_property("grain", spec.get("facet_grain", 60.0))
     return style
 
 
@@ -385,10 +376,9 @@ SOLIDS = [
         "thickness": 30.0,
         # The whole point of the phase gate: a floe two players can stand on.
         "standable": True,
-        # Slower than the water under it evaporates, so a frozen pool outlives an
-        # unfrozen one -- which is what makes freezing a way to KEEP ground.
-        "melt_rate": 0.5,
-        "melts_into": "DA_Fluid_Water",
+        "breaks_into": "DA_Fluid_Water",
+        # Narrow, so one hit drills a floe rather than dishing the whole sheet.
+        "break_radius": 90.0,
         "minimum_area": 2500.0,
         # Twice water's, so a fireball opens a hole in a floe rather than
         # clearing it: ice takes more energy to shift per unit of ground than the
@@ -396,32 +386,12 @@ SOLIDS = [
         # meltable AT ALL -- a slab used to carry no energy, so the reaction
         # solver bailed at its zero-energy guard and fire did nothing to ice.
         "energy_per_area": 0.002,
-        # 25cm cells, up from the 20 this started at and the 12 it briefly was.
-        #
-        # RESOLUTION STOPPED BUYING SHAPE. A slab keeps a signed distance to the
-        # polygon it froze from and the mesher cuts at the zero crossing, so the
-        # outline follows the water to well under a centimetre at any of these
-        # sizes -- chord error across one cell on a 3m floe is 0.26cm at 25.
-        # Before that was true, cell size was the only knob the shape had.
-        #
-        # AND IT IS THE ONLY THING A FLOE COSTS. Cell count is triangles,
-        # collision cook and the heaviest payload the game replicates, and it goes
-        # with the SQUARE of this. Measured on a full-power 5m emanation floe,
-        # rebuilding and re-cooking one costs 27ms at 12cm cells, 10ms at 20 and
-        # 5ms at 30 -- and a melting floe rebuilds whenever its shape changes.
-        # Twelve was a dropped frame per floe.
-        #
-        # What is left for resolution to decide is how fine a hole can be, which
-        # is a quarter of a metre here. That is the trade; it is the number to
-        # move if ice ever needs finer carving than that.
-        "cell_size": 25.0,
 
         # SMOOTH, and by omission rather than by setting anything -- ice froze out
         # of a water surface and its job is to reproduce that surface. See
         # FARPGSurfaceFacets, whose default is exactly this.
         # Narrow and deep enough that one fireball drills through a 30cm slab
         # rather than dishing it.
-        "melt_radius": 90.0,
         # --- Floating ---
         #
         # Archimedes, with two knobs traded for feel. Real ice is 0.00092 and
@@ -459,10 +429,6 @@ SOLIDS = [
         "thickness": 120.0,
         "standable": True,
 
-        # PERMANENT. Zero is the documented obsidian answer -- the weather tick
-        # skips such a slab entirely -- and it is also what keeps the body budget
-        # from culling a wall the player raised on purpose. See IsPermanent.
-        "melt_rate": 0.0,
         # BUT FIRE STILL TURNS IT TO LAVA, and this is the pair of independent
         # questions doing its job: time cannot take an earth wall, a spell can,
         # and what a spell leaves behind is molten rock.
@@ -471,7 +437,9 @@ SOLIDS = [
         # matters twice. The lava runs down the pillar through the film instead of
         # appearing at its foot, and the reaction ledger stops the product
         # depositing a second helping of the same lava at the same point.
-        "melts_into": "DA_Fluid_Lava",
+        "breaks_into": "DA_Fluid_Lava",
+        # Broader than ice: a fireball scars a pillar rather than boring through it.
+        "break_radius": 70.0,
 
         "minimum_area": 2500.0,
 
@@ -482,11 +450,6 @@ SOLIDS = [
         # a fight, cover that cannot is a wall the encounter is now behind.
         "energy_per_area": 0.02,
 
-        # Coarser than ice. A pillar is a couple of metres across and takes hits
-        # rather than intricate melting, so it does not need 20cm resolution --
-        # and cell count is what a slab costs to draw, cook and replicate.
-        "cell_size": 40.0,
-        "melt_radius": 70.0,
 
         # ROCK IS NOT A GRID, and drawn honestly from one it reads as masonry --
         # a pillar of perfectly rectangular segments, which is the complaint this
@@ -497,6 +460,8 @@ SOLIDS = [
         # lumps in it, well short of the third of the thickness where a fresh
         # slab starts reading as rubble.
         "facet_relief": 9.0,
+        # Boulder-scale lumps on a 2m pillar: a handful across it, not gravel.
+        "facet_grain": 70.0,
         # AND SPREAD IS THE HALF THAT MATTERS. Relief alone gives a rectangular
         # grid with a bumpy top, which is still visibly a grid; sliding the
         # samples a third of a cell sideways leaves neither the top nor the
@@ -504,7 +469,6 @@ SOLIDS = [
         "facet_spread": 0.33,
         # Hard normals, so it reads as planes meeting at edges. Stone fractures;
         # it does not curve.
-        "facet_flat": True,
 
         # DENSER THAN ANY FLUID HERE, so if one is ever raised in water it rests
         # on the bed instead of bobbing -- one comparison in the same Archimedes
@@ -528,18 +492,13 @@ SOLIDS = [
         # breaks a charge and blocks a line rather than hiding you.
         "thickness": 60.0,
         "standable": True,
-        "melt_rate": 0.0,
-        "melts_into": "DA_Fluid_Lava",
+        "breaks_into": "DA_Fluid_Lava",
+        # Broader than ice: a fireball scars a pillar rather than boring through it.
+        "break_radius": 70.0,
         "minimum_area": 2500.0,
         # Half the pillar's. A wall is thinner, covers far more ground, and
         # should be the thing that comes down first.
         "energy_per_area": 0.01,
-        # COARSER AGAIN, and this one matters. An emanation is metres across in
-        # every direction, and cell count goes with AREA -- a 6m wall at 20cm
-        # cells is 900 cells, at 60cm it is 100. The wall is a slab, not a
-        # sculpture.
-        "cell_size": 60.0,
-        "melt_radius": 70.0,
 
         # THE SAME ROCK, and the relief scales with the slab rather than with the
         # cell: this one is half the pillar's thickness, so it gets half the
@@ -548,8 +507,8 @@ SOLIDS = [
         # adjustment -- on 60cm cells it is simply a bigger displacement, which is
         # right for a coarser wall.
         "facet_relief": 5.0,
+        "facet_grain": 90.0,
         "facet_spread": 0.33,
-        "facet_flat": True,
 
         "density": 0.0025,
         "occupant_mass": 80.0,
@@ -575,25 +534,13 @@ SOLIDS = [
         "thickness": 25.0,
         "standable": True,
 
-        # PERMANENT, both ways, and these are the two independent questions the
-        # solid definition exists to keep apart. MeltRate 0: time does not take
-        # it. EnergyPerArea 0: neither does a spell -- volcanic glass is the one
-        # thing in this game that, once made, is simply part of the level.
-        #
-        # A reaction against a zero-energy surface is refused early rather than
-        # computed and discarded, so this is cheap as well as absolute.
-        "melt_rate": 0.0,
         "energy_per_area": 0.0,
         # AND NOTHING TO GIVE BACK. Rock that formed on lava is not frozen lava:
         # break it and you get rubble, not a flow. Null is the documented answer
         # and the reason ReturnMeltedFluid checks for it first.
-        "melts_into": None,
+        "breaks_into": None,
 
         "minimum_area": 2500.0,
-        # Finer than earth. A crust is thin and its edge against the flow is the
-        # thing you look at, where a pillar is a block that takes hits.
-        "cell_size": 25.0,
-        "melt_radius": 70.0,
 
         # FACETED, BUT BARELY LIFTED. Volcanic glass fractures into planes, so it
         # wants the hard normals and the broken-up outline as much as earth does
@@ -601,8 +548,9 @@ SOLIDS = [
         # pillar would read as a crust with holes worn in it. Almost all of the
         # break-up here is sideways.
         "facet_relief": 1.5,
+        # Finer than earth: volcanic glass fractures small.
+        "facet_grain": 35.0,
         "facet_spread": 0.3,
-        "facet_flat": True,
 
         # LIGHTER THAN THE LAVA UNDER IT, so a crust floats -- which is both what
         # real obsidian does (2.4 against basalt magma's 2.7) and the only thing
@@ -755,13 +703,10 @@ def main():
         solid.set_editor_property("element", element(spec["element"]))
         solid.set_editor_property("thickness", spec["thickness"])
         set_bool(solid, "standable", spec["standable"])
-        solid.set_editor_property("melt_rate", spec["melt_rate"])
         solid.set_editor_property("minimum_area", spec["minimum_area"])
         solid.set_editor_property("energy_per_area", spec["energy_per_area"])
-        solid.set_editor_property("cell_size", spec["cell_size"])
         solid.set_editor_property("facets", facets(spec))
-        solid.set_editor_property("edge_melt_scale", spec.get("edge_melt_scale", 6.0))
-        solid.set_editor_property("melt_radius", spec["melt_radius"])
+        solid.set_editor_property("break_radius", spec.get("break_radius", 90.0))
         solid.set_editor_property("density", spec["density"])
         solid.set_editor_property("occupant_mass", spec["occupant_mass"])
         solid.set_editor_property("load_response", spec["load_response"])
@@ -773,9 +718,9 @@ def main():
         # Melting RETURNS its area to the fluid it came from rather than the
         # water simply vanishing when a floe goes. Null is right for obsidian,
         # which is permanent rock; ice points back at water.
-        melts_into = spec.get("melts_into")
-        if melts_into:
-            solid.set_editor_property("melts_into", fluids[melts_into])
+        breaks_into = spec.get("breaks_into")
+        if breaks_into:
+            solid.set_editor_property("breaks_into", fluids[breaks_into])
 
         save(solid, "{}/{}".format(FLUID_DIR, spec["name"]))
         solids[spec["name"]] = solid

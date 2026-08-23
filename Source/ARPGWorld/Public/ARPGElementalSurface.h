@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "ARPGFluidGeometry.h"
 #include "UObject/Interface.h"
 #include "ARPGElementalSurface.generated.h"
 
@@ -67,6 +68,24 @@ public:
 	 *         and always returns false.
 	 */
 	virtual bool ConsumeSurfaceArea(double Area) = 0;
+
+	/**
+	 * Takes a NAMED REGION out of the body, rather than an amount from wherever.
+	 *
+	 * WHERE IT WENT IS USUALLY THE WHOLE POINT. Freezing turns a particular patch
+	 * of water into ice, and a spell breaks the part of a wall it actually hit --
+	 * so taking the area off uniformly leaves the ice sitting on water that never
+	 * receded, and a wall that shrinks evenly no matter where it was struck.
+	 *
+	 * Defaults to the amount, which is right for anything that has no shape to cut
+	 * -- a river is bottomless and refuses either way.
+	 *
+	 * @param Region a world-space polygon. @return as ConsumeSurfaceArea.
+	 */
+	virtual bool ConsumeSurfaceRegion(const TArray<FVector2D>& Region)
+	{
+		return ConsumeSurfaceArea(ARPGFluidGeometry::PolygonArea(Region));
+	}
 
 	/**
 	 * Takes a volume of fluid back INTO the body, and says whether it did.

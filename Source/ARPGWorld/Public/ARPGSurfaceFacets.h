@@ -6,80 +6,83 @@
 #include "ARPGSurfaceFacets.generated.h"
 
 /**
- * How a heightfield is SKINNED -- how much of the grid underneath it the player
- * is allowed to see.
+ * How rough a slab's surface is drawn, over and above the outline it has.
  *
- * NOT A PROPERTY OF THE FIELD, which is why this is its own struct rather than
- * four more members on FARPGSolidField. Two slabs with byte-identical cells
- * should be able to read as ice and as rock; what differs is entirely how the
- * mesher chooses to interpolate between the cells it was given, and none of it
- * is simulated, replicated, or asked about by anything that is not drawing.
+ * NOT A PROPERTY OF THE SHAPE. A slab is an outline extruded to a thickness, and
+ * that is the truth every query answers from -- what you stand on, what you can
+ * walk off, how much is left to break. This only decides how much the DRAWN
+ * surface is allowed to wander off it, so two slabs with identical outlines can
+ * read as ice and as rock.
  *
- * ZERO IS SMOOTH, and smooth is the honest reading of the data: heights sampled
- * at the corners between cells, interpolated across each cell, with the
- * silhouette cut wherever the material actually runs out. That is right for ice,
- * which froze out of a water surface and should reproduce its outline.
+ * ZERO IS FLAT, and flat is honest for ice: a floe is a frozen water surface and
+ * a water surface is level. Rock is not, and a pillar of earth drawn as a flat
+ * extrusion reads as poured concrete -- so the two numbers below break its top up
+ * and its edges in, before it is meshed and without the simulation ever knowing.
  *
- * ROCK IS NOT SMOOTH AND IS NOT A GRID EITHER. A pillar of earth drawn honestly
- * from a 40cm grid is a set of perfectly rectangular segments, which reads as
- * masonry rather than as stone -- so the two knobs below break the lattice up
- * before it is meshed. They displace the lattice, NOT the field: the simulation
- * still has the heights it had, and the same corner displaced by the same amount
- * every time means nothing swims when a spell rebuilds the mesh.
+ * IT COSTS TRIANGLES, which is the reason it is a choice rather than always on.
+ * A flat slab is a triangulated outline -- a few dozen triangles for a whole floe
+ * -- and relief needs a grid of interior vertices for the top to bend over.
  */
 USTRUCT(BlueprintType)
 struct ARPGWORLD_API FARPGSurfaceFacets
 {
 	GENERATED_BODY()
 
-	// EditAnywhere rather than EditDefaultsOnly, on all three, and it is the
+	// EditAnywhere rather than EditDefaultsOnly, on all of these, and it is the
 	// containing property that decides where this is really editable -- the solid
-	// definition holds it as EditDefaultsOnly and that is the gate that counts.
-	// A member marked EditDefaultsOnly inside a struct is refused on any INSTANCE
-	// of that struct, which includes the one the asset generator builds to hand
-	// to set_editor_property, so the whole struct became unwritable from Python.
+	// definition holds it as EditDefaultsOnly and that is the gate that counts. A
+	// member marked EditDefaultsOnly inside a struct is refused on any INSTANCE of
+	// that struct, which includes the one the asset generator builds to hand to
+	// set_editor_property, so the whole struct became unwritable from Python.
 
 	/**
-	 * How far the top of the slab is broken up and down, in cm.
+	 * How far the surface is broken up and down, in cm.
 	 *
-	 * THE WHOLE COLUMN MOVES, top and bottom together, so a cell keeps exactly
-	 * the thickness the simulation gave it. Displacing the two faces
-	 * independently thins the slab wherever the two happened to oppose, and at a
-	 * cell already down to its last centimetre that is a hole nobody melted.
+	 * THE WHOLE COLUMN MOVES, top and underside together, so the slab keeps
+	 * exactly the thickness it was given -- the mesher lifts both caps by the same
+	 * amount. Displacing them independently would thin the slab wherever the two
+	 * happened to oppose.
 	 *
-	 * Keep it under about a third of the thickness. Past that a fresh slab reads
-	 * as rubble rather than as one piece of rock.
+	 * Keep it under about a fifth of the thickness. Past that a slab starts
+	 * reading as rubble rather than as one piece of rock, and on something thin --
+	 * a crust of obsidian -- it reads as holes.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Facets",
 		meta = (ClampMin = "0.0"))
 	float Relief = 0.f;
 
 	/**
-	 * How far the lattice corners slide sideways, as a fraction of a cell.
+	 * How far apart the bumps are, in cm. Also what decides the tessellation.
 	 *
-	 * WHAT ACTUALLY KILLS THE MINECRAFT LOOK, and it is worth more than Relief:
-	 * relief alone gives a rectangular grid with a bumpy top, which still reads
-	 * as a grid. Sliding the corners turns every quad into an irregular
-	 * quadrilateral, so neither the top surface nor the silhouette has an
-	 * axis-aligned edge left in it.
+	 * THE SURFACE IS SAMPLED, NOT HASHED. Vertices land wherever the triangulator
+	 * puts them, and two of them can be a centimetre apart -- so a height taken
+	 * straight from a hash of the position would give neighbours unrelated answers
+	 * and the top would come out as spikes. A lattice this far apart, interpolated
+	 * smoothly between its points, is what makes it read as rock instead.
 	 *
-	 * Clamped below a half because a corner that crosses its neighbour turns the
-	 * cell inside out.
+	 * Interior vertices are placed at half this, so the cost of relief goes with
+	 * the SQUARE of how fine it is. Big grain is cheap and boulder-like; small
+	 * grain is expensive and gravelly.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Facets",
-		meta = (ClampMin = "0.0", ClampMax = "0.45"))
-	float Spread = 0.f;
+		meta = (ClampMin = "1.0"))
+	float Grain = 60.f;
 
 	/**
-	 * Hard normals: every triangle gets its own, so the surface reads as planes
-	 * meeting at edges rather than as a curve.
+	 * How far the outline's own vertices are nudged, as a fraction of the edge
+	 * they sit on.
 	 *
-	 * FALLS OUT OF NOT SHARING VERTICES rather than being computed separately.
-	 * The mesher's smooth path reuses one vertex wherever cells meet, so the
-	 * normal solver averages the faces around it; this path gives every triangle
-	 * its own three, so each one's normal is its own face and nothing is averaged
-	 * with anything. Costs vertices, which is why it is a choice.
+	 * WHAT KEEPS A RAISED WALL FROM BEING A RECTANGLE. Relief roughens the top and
+	 * leaves the silhouette perfectly straight, which from the side is still
+	 * masonry. Nudging the vertices breaks the outline itself, so the shape reads
+	 * as broken stone rather than as something cut.
+	 *
+	 * APPLIED ONCE, WHEN THE SLAB IS MADE, and then it IS the outline -- what you
+	 * see and what you can stand on are the same polygon, as they are for
+	 * everything else here. Kept well under a half because a vertex that crosses
+	 * its neighbour turns the polygon inside out.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Facets")
-	bool bFlatShaded = false;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Facets",
+		meta = (ClampMin = "0.0", ClampMax = "0.4"))
+	float Spread = 0.f;
 };

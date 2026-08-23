@@ -299,17 +299,6 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "ARPG|Fluid")
 	void RetireBody(AARPGSurfaceBody* Body);
 
-	/**
-	 * Tells whichever side is a slab WHERE a reaction touched it.
-	 *
-	 * The reaction hook reports how much energy was spent and nothing about where.
-	 * For a puddle that is complete -- a liquid loses ground uniformly. For ice it
-	 * is the whole behaviour, because melting at the point of impact is what makes
-	 * a fireball cut an angle out of one edge instead of thinning the whole floe.
-	 */
-	UFUNCTION(BlueprintCallable, Category = "ARPG|Fluid")
-	void NoteReactionContact(UARPGElementalVolumeComponent* A, UARPGElementalVolumeComponent* B,
-		FVector Contact);
 
 	// --- Not paying for the same fluid twice -----------------------------------
 	//
@@ -326,6 +315,17 @@ public:
 	// whether it was already covered.
 
 	/** Starts a fresh reaction. Called by the reaction solver before it consumes. */
+	/**
+	 * Tells any slab in this pair where the reaction touched it.
+	 *
+	 * OnElementalReaction has no room in its signature for a position, and every
+	 * projectile in the game would carry the cost of adding one for the sake of the
+	 * one body that cares. Left on the slab on the way past instead -- see
+	 * AARPGSolidBody::NoteContactAt.
+	 */
+	void NoteReactionContact(UARPGElementalVolumeComponent* A, UARPGElementalVolumeComponent* B,
+		FVector Contact);
+
 	void OpenReactionLedger();
 
 	/**

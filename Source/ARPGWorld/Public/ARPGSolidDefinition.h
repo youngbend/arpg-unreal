@@ -47,52 +47,34 @@ public:
 	bool bStandable = true;
 
 	/**
-	 * How fast time alone takes this, in cm of thickness per second. 0 is
-	 * permanent -- obsidian is rock, not frozen lava.
+	 * What the slab leaves behind when a spell breaks it, if anything.
 	 *
-	 * ONE OF TWO INDEPENDENT QUESTIONS, and they are worth keeping apart. This one
-	 * is "does the world wear it away". The other is "can something MELT it", which
-	 * is EnergyPerArea: a slab with no energy density is not a body a reaction can
-	 * eat, however much fire is thrown at it. Obsidian answers no to both; ice
-	 * answers yes to both; a magical ward might sit still forever and still be
-	 * broken by a big enough spell.
+	 * Null is right for obsidian, which is permanent rock rather than frozen lava.
+	 * Ice points back at water, so breaking a floe returns the ground it lost to a
+	 * puddle rather than the material simply vanishing.
+	 *
+	 * NOTHING TAKES A SLAB WITH TIME any more, so this is only ever reached by a
+	 * reaction. Ambient melting used to be the other caller and was the one that
+	 * had to be told NOT to deposit -- a floe thinning in the sun over a minute
+	 * leaving a puddle out of nowhere at the instant the last of it went.
 	 */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Melting",
-		meta = (ClampMin = "0.0"))
-	float MeltRate = 0.5f;
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Breaking")
+	TObjectPtr<UARPGFluidDefinition> BreaksInto;
 
 	/**
-	 * What the slab turns back into as it melts, if anything.
+	 * How broad a bowl one impact cuts into the slab, in cm.
 	 *
-	 * Null is right for obsidian, which is permanent rock rather than frozen
-	 * lava. Ice points back at water, so a floe melting returns its area to the
-	 * pool it came from rather than the fluid simply vanishing.
+	 * THE ENERGY DECIDES HOW DEEP; this decides how WIDE, and the two together are
+	 * what make a hit at the edge take an angled bite while the same hit in the
+	 * middle drills through. Narrow and deep punches holes; wide and shallow
+	 * dishes the surface and leaves the slab standing.
+	 *
+	 * Also the floor on how fine the top is tessellated, since a bowl nobody put
+	 * vertices inside of cannot be seen.
 	 */
-	/**
-	 * How much faster the RIM retreats than the faces thin.
-	 *
-	 * A SLAB THAT ONLY THINS NEVER GOES AWAY GRACEFULLY. Ambient warmth used to
-	 * take the two faces and nothing else, so a floe held its exact plan while it
-	 * got thinner -- and since every cell was equally thick, every cell reached
-	 * zero on the same tick. What the player saw was a full-size sheet that
-	 * existed in one frame and not the next.
-	 *
-	 * An edge is exposed on its side as well as its faces, so it goes first, and
-	 * a real floe visibly retreats long before it thins through. Several times the
-	 * face rate is what makes a slab reach its minimum area -- and be retired --
-	 * while there is still thickness to see, which is the whole difference between
-	 * melting away and blinking out.
-	 *
-	 * Zero disables it and restores the pure thinning. Scaled off MeltRate rather
-	 * than authored in cm/s so that a permanent solid, whose MeltRate is zero, is
-	 * permanent in plan too without a second thing to remember.
-	 */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Melting",
-		meta = (ClampMin = "0.0"))
-	float EdgeMeltScale = 6.f;
-
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Melting")
-	TObjectPtr<UARPGFluidDefinition> MeltsInto;
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Breaking",
+		meta = (ClampMin = "1.0"))
+	float BreakRadius = 90.f;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Body",
 		meta = (ClampMin = "0.0"))
@@ -100,7 +82,7 @@ public:
 
 	/**
 	 * How much energy a unit of this slab's area is worth, which is what lets a
-	 * fire spell MELT it rather than merely waiting for MeltRate to.
+	 * spell BREAK it.
 	 *
 	 * A slab used to carry no energy at all -- "a thing you stand on, not a body
 	 * you react with" -- and the consequence was that the reaction solver bailed
@@ -111,54 +93,23 @@ public:
 	 * ground than the same ground of open water, so one fireball opens a hole
 	 * rather than clearing the floe.
 	 *
-	 * ZERO MEANS NOTHING CAN MELT IT. That is the setting for permanent rock, and
-	 * it is a separate question from MeltRate -- see that field.
+	 * ZERO MEANS NOTHING CAN BREAK IT. That is the setting for permanent rock --
+	 * obsidian, once made, is simply part of the level.
 	 */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Body",
 		meta = (ClampMin = "0.0"))
 	float EnergyPerArea = 0.002f;
 
 	/**
-	 * How coarse the slab's heightfield is, in cm.
+	 * How rough the slab is DRAWN, over and above the outline it has -- see
+	 * FARPGSurfaceFacets.
 	 *
-	 * THE ONLY RESOLUTION KNOB a floe has, and the one that decides what it costs:
-	 * triangles, collision cook and replication all scale with the cell count, and
-	 * the cell count is the slab's area over the square of this. Smaller reads
-	 * smoother and costs quadratically more.
-	 *
-	 * Also the floor on detail: a bowl melted narrower than a cell shows up as one
-	 * cell going down, and a hole cannot be finer than this.
-	 */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Body",
-		meta = (ClampMin = "5.0"))
-	float CellSize = 20.f;
-
-	/**
-	 * How much of the grid the player is allowed to see -- see FARPGSurfaceFacets.
-	 *
-	 * THE OTHER HALF OF WHAT A SLAB LOOKS LIKE, and the half CellSize cannot buy.
-	 * Resolution decides how much detail the field can HOLD; this decides how the
-	 * mesher interpolates between the samples it has, and the two are independent:
-	 * a smooth reading of a coarse grid beats a blocky reading of a fine one, and
-	 * costs nothing extra.
-	 *
-	 * Default is smooth, which is ice's answer and the honest one. Rock overrides
-	 * it, because rock drawn honestly from a grid is masonry.
+	 * Default is flat, which is ice's answer and the honest one: a floe is a
+	 * frozen water surface and a water surface is level. Rock overrides it,
+	 * because rock drawn as a flat extrusion reads as poured concrete.
 	 */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Body")
 	FARPGSurfaceFacets Facets;
-
-	/**
-	 * How wide a bowl one fire impact melts, in cm.
-	 *
-	 * The energy decides how DEEP; this decides how broad, and the two together
-	 * are what make a fireball at the edge take an angled bite while the same one
-	 * in the middle drills through. Narrow and deep punches holes; wide and
-	 * shallow dishes the surface.
-	 */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Melting",
-		meta = (ClampMin = "1.0"))
-	float MeltRadius = 90.f;
 
 	// --- Floating ---------------------------------------------------------------
 	//

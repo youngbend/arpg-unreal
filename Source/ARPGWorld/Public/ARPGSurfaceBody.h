@@ -70,6 +70,23 @@ public:
 	virtual float GetSurfaceLevelAt(const FVector2D& At) const override;
 	virtual bool ConsumeSurfaceArea(double Area) override;
 
+	/**
+	 * Cuts the region out of the outline, and only falls back to shrinking when
+	 * the cut left the outline alone.
+	 *
+	 * A BITE WHERE IT HAPPENED. Freezing the edge of a puddle should leave the
+	 * puddle with a piece missing, not a smaller puddle in the same shape -- which
+	 * is what the ice visibly sitting on unreceded water was.
+	 *
+	 * THE FALLBACK IS NOT A GIVE-UP. A region taken out of the MIDDLE leaves the
+	 * outline exactly as it was and a hole the boolean hands back; a pool has no
+	 * hole to keep, and correctly so -- water flows around a floe rather than
+	 * standing away from it. The ground still has to be accounted for, so that
+	 * case shrinks. See AARPGSolidBody, which does keep the hole because a slab
+	 * with a piece out of the middle has a piece out of the middle.
+	 */
+	virtual bool ConsumeSurfaceRegion(const TArray<FVector2D>& Region) override;
+
 	/** NO by default -- a slab of ice is not something you can pour water into. */
 	virtual bool AbsorbSurfaceVolume(double InVolume) override { return false; }
 

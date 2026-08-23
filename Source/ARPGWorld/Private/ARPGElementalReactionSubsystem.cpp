@@ -127,7 +127,28 @@ void UARPGElementalReactionSubsystem::Resolve(UARPGElementalVolumeComponent* A,
 		const UARPGElementalVolumeComponent* Beneath)
 	{
 		const AARPGSolidBody* Slab = Rider ? Cast<AARPGSolidBody>(Rider->GetOwner()) : nullptr;
-		return Slab && Beneath && Slab->FloatsOn.GetObject() == Beneath->GetOwner();
+		if (!Slab || !Beneath)
+		{
+			return false;
+		}
+
+		// THE COMPONENT OR THE ACTOR, because a surface can be either and this
+		// compared against only one of them.
+		//
+		// FindSurface hands back the VOLUME when the volume itself implements the
+		// interface -- which is what a reservoir does -- and the OWNING ACTOR
+		// otherwise, which is what an ordinary puddle is. FloatsOn is whichever of
+		// those the freeze happened to be given, so testing it against the owner
+		// alone was right for a puddle and never true for a river.
+		//
+		// WHAT THAT COST: a bottomless surface cannot be used up, so nothing else
+		// was ever going to stop the cascade. Freezing a river made a floe; the
+		// floe was an ice volume lying on water the guard failed to recognise it
+		// was riding, so it froze another patch; that one froze another. The game
+		// stopped inside a single frame, spawning slabs until it ran out of
+		// memory -- 620 of them in the log before it was killed.
+		const UObject* On = Slab->FloatsOn.GetObject();
+		return On == Beneath || On == Beneath->GetOwner();
 	};
 
 	if (RidesTheOther(A, B) || RidesTheOther(B, A))
@@ -349,10 +370,10 @@ void UARPGElementalReactionSubsystem::Resolve(UARPGElementalVolumeComponent* A,
 	AActor* SourceActor = A->SourceActor ? A->SourceActor.Get() : B->SourceActor.Get();
 
 	// WHERE, for anything that cares. A puddle does not -- a liquid loses ground
-	// uniformly -- but a slab of ice melts at the point the fireball struck it,
-	// and OnElementalReaction has no room to say so. Left here rather than
-	// threaded through the hook's signature, which every projectile would then
-	// carry for the sake of one case.
+	// uniformly -- but a slab loses the piece that was actually struck, and
+	// OnElementalReaction has no room to say so. Left here rather than threaded
+	// through the hook's signature, which every projectile would then carry for the
+	// sake of one case.
 	UARPGFluidSurfaceSubsystem* Fluids = GetWorld()->GetSubsystem<UARPGFluidSurfaceSubsystem>();
 
 	if (Fluids)

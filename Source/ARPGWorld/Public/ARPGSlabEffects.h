@@ -4,7 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "ARPGPlaceholderEffect.h"
-#include "ARPGSolidField.h"
+#include "ARPGSurfaceFacets.h"
 #include "ARPGSlabEffects.generated.h"
 
 class AARPGSolidBody;
@@ -42,7 +42,7 @@ enum class EARPGSlabShape : uint8
  * flash, the sound -- and then dies on its ordinary lifetime. What it raised
  * stays, because it is a separate body that was never owned by the spell. That
  * split is the whole reason a slab did not need a new actor type: an
- * AARPGSolidBody with MeltRate 0 is already a permanent thing standing in the
+ * AARPGSolidBody is already a permanent thing standing in the
  * world that reacts, is walked on, and replicates as an outline.
  *
  * NOTHING HERE IS ABOUT EARTH. Point Definition at any solid and this raises it.
@@ -180,7 +180,11 @@ public:
 	 * sort of detail nobody articulates and everybody notices.
 	 */
 	UPROPERTY(Transient)
-	FARPGSolidField Carried;
+	TArray<FVector2D> Carried;
+
+	/** The gap through what is being carried, if it had one. */
+	UPROPERTY()
+	TArray<FVector2D> CarriedHole;
 
 	UPROPERTY(Transient)
 	TObjectPtr<UARPGSolidDefinition> CarriedDefinition;

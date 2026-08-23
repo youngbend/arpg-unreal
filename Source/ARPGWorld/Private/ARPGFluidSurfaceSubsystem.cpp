@@ -732,6 +732,25 @@ bool UARPGFluidSurfaceSubsystem::TrySolidify(UARPGElementalVolumeComponent* A,
 
 	const float SurfaceHeight = Surface->GetSurfaceLevelAt(Centre);
 
+	// NOT WHERE THERE IS ALREADY ICE. Freezing what is already frozen is not a
+	// thing that can happen, and refusing it here is a hard floor under a whole
+	// class of runaway: a slab is itself a body lying on the surface it froze
+	// from, so anything that lets one act as an agent again freezes another patch,
+	// and that one freezes another. On a BOTTOMLESS surface -- a river, which by
+	// definition cannot be used up -- there is nothing else left to stop it, and
+	// what that looked like was the game stopping inside a single frame while it
+	// spawned slabs until it ran out of memory.
+	//
+	// The rider guard in UARPGElementalReactionSubsystem::Resolve is what should
+	// catch this, and does. This is here because it was not enough on its own once
+	// and the failure mode is a hang rather than a wrong answer.
+	//
+	// Cheap: it walks the live solids, and there are usually none.
+	if (IsCoveredBySolid(FVector(Centre.X, Centre.Y, SurfaceHeight)))
+	{
+		return false;
+	}
+
 	AARPGSolidBody* Solid = World->SpawnActor<AARPGSolidBody>(
 		AARPGSolidBody::StaticClass(),
 		FTransform(FVector(Centre.X, Centre.Y, SurfaceHeight)), Params);
@@ -746,7 +765,26 @@ bool UARPGFluidSurfaceSubsystem::TrySolidify(UARPGElementalVolumeComponent* A,
 	// stops. Set before Setup, which is what first places it.
 	Solid->FloatsOn = Cast<UObject>(Surface);
 
-	Solid->Setup(SolidDefinition, SolidifiedRing, SurfaceHeight);
+	// AND THE GAP IT FROZE AROUND. IntersectWithHoles has always handed these back
+	// and this has always thrown them away -- a slab could not hold one, so
+	// freezing over a pool with a gap in it produced solid ice. An outline can,
+	// and the largest is the one worth keeping: a clip against a single round
+	// agent produces at most one gap of any size.
+	const TArray<FVector2D>* Largest = nullptr;
+	double LargestArea = 0.0;
+
+	for (const TArray<FVector2D>& Gap : Holes)
+	{
+		const double GapArea = ARPGFluidGeometry::PolygonArea(Gap);
+		if (GapArea > LargestArea)
+		{
+			LargestArea = GapArea;
+			Largest = &Gap;
+		}
+	}
+
+	Solid->Setup(SolidDefinition, SolidifiedRing, SurfaceHeight,
+		Largest ? *Largest : TArray<FVector2D>());
 
 	// Immediately, so a plug frozen across a river is anchored on the frame it
 	// forms rather than drifting for a quarter of a second first.
@@ -754,10 +792,11 @@ bool UARPGFluidSurfaceSubsystem::TrySolidify(UARPGElementalVolumeComponent* A,
 
 	ActiveSolids.Add(Solid);
 
-	// The fluid is genuinely used up -- unless it is bottomless, which is the
-	// surface's own answer to give. A puddle shrinks and may be finished by this;
-	// a river takes nothing and is never finished.
-	if (Surface->ConsumeSurfaceArea(SolidifiedArea))
+	// THE REGION, not merely the amount. Ice occupies exactly the patch it froze
+	// from, so the water has to lose that patch -- taking the area off uniformly
+	// left a puddle the same shape as before with the new floe sitting on top of
+	// water that had never receded. A river is bottomless and refuses either way.
+	if (Surface->ConsumeSurfaceRegion(SolidifiedRing))
 	{
 		// THE ICE IS NOT A RIDER THAT LOST ITS WATER -- IT IS WHAT THE WATER
 		// BECAME, and that distinction is the whole of this branch.
@@ -881,15 +920,10 @@ void UARPGFluidSurfaceSubsystem::RetireBody(AARPGSurfaceBody* Body)
 	//
 	// The two ways a slab reaches nothing are not the same event. A reaction melts
 	// it, and the water for that is deposited by the reaction, at the point of
-	// contact, as it happens -- see ReturnMeltedFluid. Ambient melting is the other,
-	// and it is meant to return nothing at all: a floe thinning in the sun over a
-	// minute should leave dry ground, not a puddle appearing out of nowhere at the
-	// instant the last of it goes.
-	//
-	// Depositing here could not tell those apart, and got both wrong: it fired for
-	// the ambient case that wanted nothing, and for the reaction case it offered a
-	// second helping sized by whatever sliver was left -- which, being under
-	// MinimumArea by definition, was refused anyway.
+	// contact, as it happens. Nothing else takes a slab at all now that ambient
+	// melting is gone, so there is no second case for this to get wrong -- and a
+	// second helping here would be sized by whatever sliver was left, which is
+	// under MinimumArea by definition and would be refused anyway.
 	ActiveSolids.Remove(Solid);
 	Solid->Destroy();
 }
@@ -1214,52 +1248,21 @@ void UARPGFluidSurfaceSubsystem::TickWeather(float DeltaTime)
 		Pool->SetRing(Next);
 	}
 
+	// NOTHING TAKES A SLAB WITH TIME. Ambient melting used to live here -- a floe
+	// thinned from both faces and retreated at the rim four times a second, and
+	// every one of those ticks rebuilt its mesh and re-cooked its collision. It
+	// went when solids stopped being heightfields: a slab is an outline extruded
+	// to a thickness now, and an outline has nothing to thin. A floe stays until
+	// something breaks it.
+	//
+	// The register is still swept, because a slab destroyed elsewhere leaves a
+	// stale entry and nothing else would notice.
 	for (int32 Index = ActiveSolids.Num() - 1; Index >= 0; --Index)
 	{
-		AARPGSolidBody* Solid = ActiveSolids[Index];
-		if (!IsValid(Solid) || !Solid->Definition)
+		if (!IsValid(ActiveSolids[Index]))
 		{
 			ActiveSolids.RemoveAt(Index);
-			continue;
 		}
-
-		if (FMath::IsNearlyZero(Solid->Definition->MeltRate))
-		{
-			continue; // permanent -- obsidian is rock, not frozen lava
-		}
-
-		// AMBIENT MELT IS A THINNING FIRST. Both faces at once, because a floe in
-		// water melts from underneath as much as from above -- and every hole in it
-		// widens for free, since a hole is just the cells where the two faces have
-		// already met.
-		const float Thinning = Solid->Definition->MeltRate * DeltaTime;
-		Solid->MeltUniformly(Thinning * 0.5f, Thinning * 0.5f);
-
-		// AND A RETREAT SECOND, which for a long time was missing entirely. A slab
-		// that only thins keeps its full plan until every cell reaches zero on the
-		// same tick and the whole sheet disappears between two frames. The rim is
-		// exposed on its side as well, so it goes faster -- see EdgeMeltScale --
-		// and the floe shrinks to its minimum area while there is still thickness
-		// to see.
-		//
-		// STILL NOT AN OFFSET OF AN OUTLINE. It is one addition per cell against
-		// the stored distance the field already keeps, so the pathology that made
-		// this a thinning in the first place has nowhere to happen. See
-		// FARPGSolidField::Erode.
-		if (Solid->Definition->EdgeMeltScale > 0.f)
-		{
-			Solid->MeltInward(Thinning * Solid->Definition->EdgeMeltScale);
-		}
-
-		if (Solid->GetArea() < Solid->Definition->MinimumArea)
-		{
-			RetireBody(Solid);
-			continue;
-		}
-
-		// A floe that has narrowed enough to come free of the banks COMES FREE.
-		// Here rather than per frame: this is the tick that changes its shape, and
-		// it costs a containment probe per direction.
-		Solid->UpdateAnchoring();
 	}
 }
+

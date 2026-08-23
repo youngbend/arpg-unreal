@@ -4,19 +4,101 @@
 
 #include "CoreMinimal.h"
 #include "ARPGSurfaceBody.h"
-#include "ARPGSolidField.h"
-#include "ARPGWallRun.h"
+#include "ARPGSurfaceFacets.h"
 #include "ARPGSolidBody.generated.h"
 
 class UARPGSolidDefinition;
 
 /**
- * A slab frozen out of a fluid -- an ice floe, a crust of obsidian. Port of
- * Godot's FluidSolid.
+ * A bowl cut into the top of a slab, where something hit it.
  *
- * KEEPS ITS HOLES, unlike a pool. A liquid flows back over a hole cut in it; a
- * solid does not, and a floe with a melted-through gap is a floe with a gap you
- * can fall into. See ARPGFluidGeometry::IntersectWithHoles.
+ * A SLAB IS NOT A PRISM, and saying it was is the mistake this exists to undo.
+ * An outline extruded to a uniform thickness is a choice about how to DRAW the
+ * shape, not a limit of what a mesh can hold -- a mesh models a sphere perfectly
+ * well, so it models a dish in a slab perfectly well. The upper surface is a
+ * height function sampled per vertex; all it took was tessellating the cap and
+ * telling it what height to be.
+ *
+ * A PARABOLOID, deepest at the middle and tapering to nothing at the rim, which
+ * is what makes a hit at the edge of a slab cut it away at an angle while the
+ * same hit in the middle leaves a bowl. Deep enough and the bowl reaches the
+ * underside, at which point the material is genuinely gone and the OUTLINE has to
+ * lose it too -- see AARPGSolidBody::BreakAt, which is where the dish stops being
+ * a dish and becomes a hole.
+ *
+ * KEPT AS A LIST rather than baked into the mesh, so the mesh is rebuilt from the
+ * outline and these every time and never accumulates. That is the property the
+ * heightfield had and repeated boolean editing does not: cost is the base shape
+ * plus a bounded number of bowls, however many spells have landed.
+ */
+USTRUCT(BlueprintType)
+struct ARPGWORLD_API FARPGSlabBite
+{
+	GENERATED_BODY()
+
+	/** Where it landed, in the slab's own frame. */
+	UPROPERTY()
+	FVector2D At = FVector2D::ZeroVector;
+
+	/** How broad the bowl is, in cm. */
+	UPROPERTY()
+	float Radius = 0.f;
+
+	/** How deep at the middle, in cm. */
+	UPROPERTY()
+	float Depth = 0.f;
+
+	/** How far into the slab this bowl reaches at a point, in cm. Zero outside it. */
+	float DepthAt(const FVector2D& Where) const
+	{
+		if (Radius <= 0.f || Depth <= 0.f)
+		{
+			return 0.f;
+		}
+
+		const float DistanceSq = static_cast<float>(FVector2D::DistSquared(Where, At));
+		const float RadiusSq = Radius * Radius;
+
+		if (DistanceSq >= RadiusSq)
+		{
+			return 0.f;
+		}
+
+		// The same falloff the heightfield's MeltBowl used, so a hit reads the way
+		// it always did: a dish rather than a stamped-out cylinder.
+		return Depth * (1.f - DistanceSq / RadiusSq);
+	}
+};
+
+/**
+ * A slab of something solid: an ice floe, an earth wall, a crust of obsidian.
+ *
+ * AN OUTLINE WITH A THICKNESS, and that is the whole model. The shape is the
+ * polygon the slab was made with -- the exact region where a freezing spell
+ * overlapped a body of water, or the footprint a spell raised out of the ground
+ * -- extruded to a uniform depth. Nothing quantises it, so a floe reproduces the
+ * water it froze out of exactly, at whatever resolution the clip produced.
+ *
+ * THIS REPLACED A HEIGHTFIELD, and the trade is worth stating plainly because
+ * the heightfield was not a mistake. A grid of cells could hold things a polygon
+ * cannot: a bowl melted into the top at an angle, a hole punched clean through,
+ * a step where new ice froze at the waterline a load had pushed the surface down
+ * to. Those are real and they are gone. What they cost was a resolution -- every
+ * shape rounded to the grid it was stored on, a rebuild and a collision cook
+ * whenever anything changed it, and the heaviest payload in the game on the
+ * wire. A slab that only ever needs to BE a shape does not need any of that.
+ *
+ * SO NOTHING MELTS. Ambient warmth no longer takes a slab at all; a floe stays
+ * until something breaks it. Breaking is the one thing that still changes a
+ * slab's shape, and it is the same operation a puddle already uses -- the
+ * outline shrinks about its centre and the body goes when there is too little
+ * left to be one. See ConsumeSurfaceArea.
+ *
+ * THE OUTLINE IS IN THE SLAB'S OWN FRAME, not the world's, which is what lets a
+ * floe drift and turn without the mesh being rebuilt: moving it is a transform
+ * on the actor and the polygon never learns anything happened. Columns are
+ * vertical, so yaw is the only rotation this shape can afford -- a floe spins on
+ * the water, it does not tumble.
  */
 UCLASS()
 class ARPGWORLD_API AARPGSolidBody : public AARPGSurfaceBody
@@ -28,25 +110,6 @@ public:
 
 	virtual void Tick(float DeltaTime) override;
 
-protected:
-	/**
-	 * Climbs a rooted slab out of the ground. Nothing else moves it.
-	 *
-	 * Separate from the buoyancy path rather than a branch inside it: a floe is
-	 * being pushed around by a surface every frame forever, and a raised slab is
-	 * doing one thing once and then standing still.
-	 */
-	void Rise(float DeltaTime);
-
-	/**
-	 * Turns a drifting slab with the shear in the current under it.
-	 *
-	 * @param Centre world XY of the slab. @param Flow the current carrying it.
-	 */
-	void Spin(float DeltaTime, const FVector2D& Centre, const FVector2D& Flow);
-
-public:
-
 	UPROPERTY(ReplicatedUsing = OnRep_Body, BlueprintReadOnly, Category = "ARPG|Fluid")
 	TObjectPtr<UARPGSolidDefinition> Definition;
 
@@ -54,9 +117,10 @@ public:
 	 * The body of water this froze out of, and therefore the one it rides.
 	 *
 	 * A floe is not an independent object: it asks this for the waterline under
-	 * it, for the current carrying it, and for where the water stops. Null means
-	 * it is aground -- the water went and the ice did not, which the subsystem
-	 * treats as the end of it.
+	 * it, for the current carrying it, and for where the water stops. NULL MEANS
+	 * ROOTED -- a wall raised out of the ground has never floated on anything, and
+	 * a slab that froze the last of its own puddle is standing on the bed. Neither
+	 * settles, drifts, nor asks the ground for a waterline it does not have.
 	 */
 	UPROPERTY(BlueprintReadOnly, Category = "ARPG|Fluid")
 	TScriptInterface<IARPGElementalSurface> FloatsOn;
@@ -65,16 +129,14 @@ public:
 	 * Wedged against the shore, and so going nowhere.
 	 *
 	 * A spell that freezes the entire width of a river makes a PLUG, not a raft:
-	 * it is braced on both banks and the current cannot take it. Recomputed as the
-	 * floe melts, so one that has narrowed enough to come free does.
+	 * it is braced on both banks and the current cannot take it.
 	 */
 	UPROPERTY(BlueprintReadOnly, Category = "ARPG|Fluid")
 	bool bAnchored = false;
 
 	/**
-	 * Too heavy for what it formed on, so it is resting on the bed rather than
-	 * riding. Not a failure -- a crust denser than its own fluid sinks, and the
-	 * same equation says so.
+	 * Resting on the bed rather than riding, because it is too heavy for what it
+	 * formed on -- or because the fluid it formed on is gone.
 	 */
 	UPROPERTY(BlueprintReadOnly, Category = "ARPG|Fluid")
 	bool bAground = false;
@@ -90,289 +152,190 @@ public:
 	/**
 	 * Recomputes whether the shore has hold of it.
 	 *
-	 * Not per frame: it changes only as the floe melts or drifts, and it costs a
-	 * containment probe per direction. The subsystem's weather tick is where it
-	 * happens, beside the melting that is the main reason it would change.
+	 * Not per frame: it changes only as the floe drifts or is broken, and it costs
+	 * a containment probe per direction.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "ARPG|Fluid")
 	void UpdateAnchoring();
 
-	/**
-	 * WHAT THE SLAB ACTUALLY IS. See FARPGSolidField.
-	 *
-	 * The outline it froze with was only the seed; from then on the ice is a
-	 * heightfield, because everything interesting that happens to a floe happens
-	 * in the third dimension -- a bowl melted at an angle into one edge, a step
-	 * where new ice formed at the waterline a load had pushed the surface down to,
-	 * a hole where the top met the bottom.
-	 */
+	// --- Where the slab is, and which way round --------------------------------
+
+	/** World XY of the outline's own coordinate origin. */
 	UPROPERTY(ReplicatedUsing = OnRep_Body, BlueprintReadOnly, Category = "ARPG|Fluid")
-	FARPGSolidField Field;
+	FVector2D SlabOrigin = FVector2D::ZeroVector;
 
-	/**
-	 * Melts a bowl into the slab at a world point, deepest at the centre.
-	 *
-	 * WHERE IT WAS HIT, which is the whole difference between ice and a puddle: a
-	 * liquid loses ground uniformly because it has no third dimension to lose it
-	 * in, and a slab does. At the edge the bowl runs off the side and leaves an
-	 * angled cut; in the middle, deep enough, it opens a hole.
-	 *
-	 * @return volume of ice removed, in cubic cm.
-	 */
-	UFUNCTION(BlueprintCallable, Category = "ARPG|Fluid")
-	double MeltAt(const FVector2D& Where, float Radius, float Depth);
-
-	/** Thins the slab from both faces at once. Ambient warmth, and holes widen free. */
-	UFUNCTION(BlueprintCallable, Category = "ARPG|Fluid")
-	double MeltUniformly(float FromTop, float FromBottom);
-
-	/**
-	 * Pulls the slab's outline in, taking the rim with it. See FARPGSolidField::Erode.
-	 *
-	 * The other half of ambient melting, and the half that makes a floe SHRINK
-	 * rather than only thin. Without it every cell reaches zero thickness on the
-	 * same tick and the whole sheet vanishes between two frames.
-	 */
-	UFUNCTION(BlueprintCallable, Category = "ARPG|Fluid")
-	double MeltInward(float Distance);
-
-	/**
-	 * Takes the slab off the water and stands it on the bed.
-	 *
-	 * WHAT A FROZEN-SOLID PUDDLE IS. Freezing the last of a pool leaves ice where
-	 * the water was and no water under it, so the slab is not floating on anything
-	 * -- and a floe placed at the WATERLINE with no buoyancy tick to settle it
-	 * hangs in the air by exactly the depth the puddle had. GroundHeight tracks
-	 * the surface a slab rides; for one that rides nothing it has to be the floor.
-	 *
-	 * Null FloatsOn is how this codebase says rooted, so this is the same state a
-	 * raised earth wall is in -- see AARPGRaiseSlabEffect.
-	 */
-	void GroundOnBed(float BedHeight);
-
-	/**
-	 * Puts a melted volume of this slab back into the world as fluid.
-	 *
-	 * REACTIONS ONLY. Ambient melting calls MeltUniformly directly and discards
-	 * what it removed, on purpose: a floe thinning in the sun should leave the
-	 * world no wetter than it found it. Fire through ice is the case that leaves
-	 * water, because it happened somewhere the player was looking.
-	 *
-	 * @param MeltedVolume cubic cm of SLAB. Converted by the two densities.
-	 * @param At world XY where it melted, so the water appears at the hole.
-	 */
-	void ReturnMeltedFluid(double MeltedVolume, const FVector2D& At);
-
-	// --- Runoff -----------------------------------------------------------------
-
-	/**
-	 * Runs the film over the slab and puts down whatever came off the edge.
-	 *
-	 * TICKED WHEREVER THE SLAB IS, floating or rooted, because water running off a
-	 * floe is the same water running off a tower. Costs nothing at all when the
-	 * slab is dry, which is nearly always -- HasWet is a cached read.
-	 */
-	void TickRunoff(float DeltaTime);
-
-	/** Height of whatever the slab is standing on or floating in. */
-	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
-	float GroundBelow() const;
-
-	/** Fluid currently on the slab, in cubic cm. */
-	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
-	double GetFilmVolume() const { return Field.WetVolume(); }
-
-	/**
-	 * Runoff held back because it was not yet worth a body, in cubic cm.
-	 *
-	 * The film sheds in dribbles by design and every deposit is a polygon merge or
-	 * an actor spawn, so it is batched. Visible for the tests, which would
-	 * otherwise have to infer it from a puddle that has not appeared yet.
-	 */
-	/**
-	 * Everything this slab has melted that is not yet in a pool.
-	 *
-	 * THE BATCH AND THE WALL BOTH, because "pending" means the world has not got
-	 * it yet -- and volume held in a run creeping down the face is exactly as
-	 * undelivered as volume waiting to be worth a deposit. Reporting only the
-	 * batch would let a test watch the whole journey and conclude nothing was in
-	 * flight.
-	 */
-	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
-	double GetPendingRunoff() const;
-
-	/** How much is on the face right now, on its way down. */
-	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
-	double GetWallVolume() const;
-
-	/** The runs currently on the outside of the slab. */
-	const TArray<FARPGWallRun>& GetWallRuns() const { return WallRuns; }
-
-	/**
-	 * Where the last reaction touched this slab, in world XY.
-	 *
-	 * THE HOOK CANNOT CARRY A POSITION. OnElementalReaction reports how much
-	 * energy was spent and nothing about where, which is fine for a puddle -- a
-	 * liquid loses ground uniformly wherever it was hit -- and is the entire
-	 * difference for a slab, because melting WHERE the fireball landed is the
-	 * behaviour. The reaction solver knows the contact point and leaves it here on
-	 * its way past; the hook takes it and clears it.
-	 */
-	void NoteContactAt(const FVector2D& Where) { PendingContact = Where; bHasPendingContact = true; }
-
-	// --- Where the field is, and which way round --------------------------------
-	//
-	// THE FIELD IS NOT IN WORLD SPACE, and until now it accidentally was. Its
-	// cells were addressed by world XY, which worked only because the actor's
-	// rotation was always identity -- a latent coupling rather than a decision,
-	// and the one thing standing between a floe and turning as it drifts.
-	//
-	// A HEIGHTFIELD CAN YAW PERFECTLY WELL. Columns run along world Z, so spinning
-	// about the up axis leaves every one of them vertical; it is pitch and roll
-	// that a heightfield cannot survive. A floe spins on the water, it does not
-	// tumble, so yaw is exactly the rotation this shape can afford -- see
-	// AARPGLaunchSlabProjectile for the case that genuinely needs tumbling.
-	//
-	// The mesh was always built in field space relative to the centroid, so it
-	// needed no change at all: the component's own transform carries the yaw.
-
-	/** World XY of the field's own coordinate origin. */
+	/** Degrees the outline is turned by, about the up axis. */
 	UPROPERTY(ReplicatedUsing = OnRep_Body, BlueprintReadOnly, Category = "ARPG|Fluid")
-	FVector2D FieldOrigin = FVector2D::ZeroVector;
+	float SlabYaw = 0.f;
 
-	/** Degrees the field is turned by, about the up axis. */
-	UPROPERTY(ReplicatedUsing = OnRep_Body, BlueprintReadOnly, Category = "ARPG|Fluid")
-	float FieldYaw = 0.f;
-
-	/** World XY of a point in the field's frame. */
+	/** World XY of a point in the slab's frame. */
 	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
 	FVector2D ToWorld(const FVector2D& Local) const
 	{
-		return FieldOrigin + Local.GetRotated(FieldYaw);
+		return SlabOrigin + Local.GetRotated(SlabYaw);
 	}
 
-	/** The field's frame, from a world XY. */
+	/** The slab's frame, from a world XY. */
 	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
-	FVector2D ToField(const FVector2D& World) const
+	FVector2D ToLocal(const FVector2D& World) const
 	{
-		return (World - FieldOrigin).GetRotated(-FieldYaw);
+		return (World - SlabOrigin).GetRotated(-SlabYaw);
 	}
 
-	/** A DIRECTION into the field's frame -- turned, not moved. */
+	/** A DIRECTION into the slab's frame -- turned, not moved. */
 	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
-	FVector2D DirToField(const FVector2D& World) const { return World.GetRotated(-FieldYaw); }
+	FVector2D DirToLocal(const FVector2D& World) const { return World.GetRotated(-SlabYaw); }
 
-	/** World XY of whatever is left of the slab. What the actor sits at. */
+	/** World XY of the middle of the slab. What the actor sits at. */
 	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
-	FVector2D GetWorldCentre() const { return ToWorld(Field.SolidCentroid()); }
+	FVector2D GetWorldCentre() const;
 
 	/**
 	 * Gap between a world point and the slab's edge, or 0 inside it.
 	 *
-	 * TO THE SLAB, NOT TO ITS ORIGIN. A wall is long and its origin is its
-	 * centroid, so measuring to the actor would tell a caster standing at one end
-	 * of one that they were nowhere near it. Here rather than in the subsystem so
-	 * the frame conversion has exactly one home.
+	 * TO THE SLAB, NOT TO ITS ORIGIN. A wall is long and its origin is its middle,
+	 * so measuring to the actor would tell a caster standing at one end of one
+	 * that they were nowhere near it.
 	 */
 	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
 	double DistanceToEdge(const FVector2D& World) const;
 
-	/** Thins the whole slab, and reports when there is too little left to be one. */
+	/**
+	 * Takes ground off the slab, and reports when there is too little left.
+	 *
+	 * BREAKING IS THE ONLY THING THAT CHANGES A SLAB'S SHAPE now that nothing
+	 * melts, and it is the same operation a puddle uses: the outline keeps its
+	 * shape and shrinks about its centre. That is exactly right here for a reason
+	 * it is only approximately right for a liquid -- a spell does not cut a
+	 * region out of a wall and leave a ring standing on nothing; it knocks a wall
+	 * down, and a smaller wall is what is left.
+	 */
+	/**
+	 * The ground the slab actually covers: its outline LESS its hole.
+	 *
+	 * A hit in the middle takes nothing off the outline -- the whole of what it did
+	 * shows up as a gap -- so a slab that measured itself by its outline alone would
+	 * keep its full area, its full buoyancy and its full footing no matter how much
+	 * of the middle had been shot out of it, and could never be worn down to
+	 * nothing by hits that all landed inside it.
+	 */
+	virtual double GetArea() const override;
+
 	virtual bool ConsumeSurfaceArea(double Area) override;
 
 	/**
-	 * Is there slab at this point?
+	 * Cuts the region out of the slab, KEEPING whatever hole that opens.
 	 *
-	 * THE FIELD, NOT THE RING. A slab's shape is its cells: Setup seeds them from
-	 * an outline and everything afterwards -- a melt, a refreeze, a hole through
-	 * it -- happens to the cells, with no polygon kept in step. The base class
-	 * answers this from Ring, which for a slab is empty, so every point on every
-	 * slab read as outside and FindSolidAt never found one.
-	 *
-	 * Not the same question as IsStandableAt, which also asks whether the
-	 * definition means the slab to be walked on at all.
+	 * The one place a solid and a liquid part company about erosion. A puddle with
+	 * a piece taken out of its middle closes over it, so the base class drops the
+	 * hole and shrinks instead; a wall with a piece taken out of its middle has a
+	 * piece taken out of its middle, and you can see through it.
 	 */
+	virtual bool ConsumeSurfaceRegion(const TArray<FVector2D>& Region) override;
+
+	/**
+	 * Where the last reaction touched this slab, in world XY.
+	 *
+	 * THE HOOK CANNOT CARRY A POSITION. OnElementalReaction reports how much energy
+	 * was spent and nothing about where, which is fine for a puddle -- a liquid
+	 * loses ground uniformly wherever it was hit -- and is the entire difference for
+	 * a slab, because losing ground WHERE the fireball landed is the behaviour. The
+	 * reaction solver knows the contact point and leaves it here on its way past;
+	 * the hook takes it and clears it.
+	 */
+	void NoteContactAt(const FVector2D& Where) { PendingContact = Where; bHasPendingContact = true; }
+
+	virtual void OnElementalReaction_Implementation(float Consumed, float Remaining,
+		UARPGMagicElement* Product) override;
+
+	/** Inside the outline, and not inside the hole. */
 	virtual bool ContainsPoint(FVector WorldPoint) const override;
 
-	virtual double GetArea() const override;
+	/** The same question, and also whether the definition means it to be walked on. */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
+	bool IsStandableAt(FVector WorldPoint) const;
 
-	/** Nothing takes it with time, so nothing should take it for room either. */
-	virtual bool IsPermanent() const override;
+	/** NOTHING TAKES A SLAB WITH TIME any more, so nothing should take it for room. */
+	virtual bool IsPermanent() const override { return true; }
+
+	/** The outline in WORLD space, for anything clipping against this slab. */
+	virtual TArray<FVector2D> GetSurfaceFootprint(const FVector2D& Centre,
+		double Radius) const override;
+
+	virtual bool IsSurfaceAt(const FVector2D& At) const override;
+
+	virtual float GetSurfaceEnergyDensity() const override;
 
 	/**
 	 * Starts the slab buried and lets it climb out. What a spell that RAISES one
 	 * calls instead of leaving it standing there from the first frame.
-	 *
-	 * Depth is how far under its resting height to begin -- its own thickness
-	 * hides it completely. Costs nothing after it arrives.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "ARPG|Fluid")
 	void BeginBuried(float Depth);
 
 	/**
-	 * Adopts a field wholesale, rather than building one from an outline.
+	 * Takes the slab off the water and stands it on the bed.
 	 *
-	 * WHAT LANDS IS WHAT WAS THROWN. Setup seeds a field from a ring, which is
-	 * right when a slab is being made and wrong when one is being put back: a
-	 * pillar that was carved by two fireballs before it was picked up should come
-	 * down carved. This is the other door into the same object.
+	 * WHAT A FROZEN-SOLID PUDDLE IS. Freezing the last of a pool leaves ice where
+	 * the water was and no water under it, so the slab rides nothing -- and one
+	 * placed at the WATERLINE with no buoyancy tick to settle it hangs in the air
+	 * by exactly the depth the puddle had.
 	 */
-	UFUNCTION(BlueprintCallable, Category = "ARPG|Fluid")
-	void AdoptField(UARPGSolidDefinition* InDefinition, const FARPGSolidField& InField,
-		const FVector& Where, float Yaw);
+	void GroundOnBed(float BedHeight);
 
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
-	void Setup(UARPGSolidDefinition* InDefinition, const TArray<FVector2D>& InRing,
-		float InGroundHeight);
-
-	/** Inside the outline AND not inside a hole. */
-	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
-	bool IsStandableAt(FVector WorldPoint) const;
-
-	virtual float GetSurfaceEnergyDensity() const override;
-
 	/**
-	 * The top of the slab HERE, which after a spell has landed on it is not one
-	 * number: a bowl melted into the middle is centimetres lower than the rim
-	 * around it, and the field has said so all along.
-	 */
-	virtual float GetSurfaceLevelAt(const FVector2D& At) const override;
-
-	/**
-	 * What has melted and is lying on top of the rock, drawn as its own surface.
+	 * Makes the slab, from the outline it is to have.
 	 *
-	 * SEPARATE FROM Surface, not a second material on it, for two reasons that
-	 * both come down to the film being a different KIND of thing. It is drawn
-	 * with the FLUID's material rather than the solid's -- lava, not the earth it
-	 * is running down -- and it carries no collision, because what you stand on
-	 * is the rock underneath and what the lava does to you is the volume
-	 * component's business. It also changes far more often than the rock does:
-	 * the film moves every tick while it drains, and the slab it lies on is
-	 * rebuilt only when a spell cuts it.
+	 * The ring is in WORLD space -- it came from clipping one surface against
+	 * another -- and is recentred into the slab's own frame here, so everything
+	 * afterwards can move the slab without touching the polygon.
 	 */
-	UPROPERTY(VisibleAnywhere, Category = "Components")
-	TObjectPtr<UDynamicMeshComponent> Film;
-
-	/** Redraws the film. Cheap when dry, which is nearly always. */
-	void RebuildFilm();
-
-	/** Puts what just left a rim onto the face, to make its own way down. */
-	void ShedOntoTheWall(const FVector2D& ShedAt, double Shed);
-
-	/** Advances everything on the face, and banks whatever reached the bottom. */
-	void TickWallRuns(float DeltaTime, const UARPGFluidDefinition& Fluid);
-
-	/** How much film is actually being drawn. Zero on rock nobody has melted. */
-	int32 GetFilmTriangleCount() const;
+	void Setup(UARPGSolidDefinition* InDefinition, const TArray<FVector2D>& InRing,
+		float InGroundHeight, const TArray<FVector2D>& InHole = TArray<FVector2D>());
 
 	/**
-	 * The drawn film as a plain primitive, for anything that only wants its
-	 * bounds. Here for the same reason GetSurfaceComponent is -- so a caller
-	 * needs no dependency on GeometryFramework to ask where the lava reaches.
+	 * Adopts an outline wholesale, keeping the frame it is given.
+	 *
+	 * WHAT LANDS IS WHAT WAS THROWN. Setup recentres and squares up a fresh slab,
+	 * which is right when one is being made and wrong when one is being put back:
+	 * a pillar picked up and thrown should come down the shape and the angle it
+	 * left as.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "ARPG|Fluid")
+	void AdoptOutline(UARPGSolidDefinition* InDefinition, const TArray<FVector2D>& InRing,
+		const TArray<FVector2D>& InHole, const FVector& Where, float Yaw);
+
+	/** The outline, in the slab's own frame. */
+	const TArray<FVector2D>& GetOutline() const { return Ring; }
+
+	/** The gap through it, if it froze around one or something broke through. */
+	const TArray<FVector2D>& GetHole() const { return Hole; }
+
+	/** The bowls cut into its top. */
+	const TArray<FARPGSlabBite>& GetBites() const { return Bites; }
+
+	/**
+	 * How far the top has been cut down at a world point, in cm.
+	 *
+	 * Never past the slab's own thickness: below that there is nothing left to
+	 * take, and what happens instead is a hole -- see BreakAt.
 	 */
 	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
-	UPrimitiveComponent* GetFilmComponent() const;
+	float BiteDepthAt(const FVector2D& World) const;
+
+	/**
+	 * Cuts a bowl into the slab at a world point, and opens a hole where it goes
+	 * clean through.
+	 *
+	 * @return the plan area the slab lost, which is nothing at all for a dish that
+	 *         did not break through.
+	 */
+	double BreakAt(const FVector2D& Where, float Radius, float Depth);
+
+	/** The top of the slab HERE, which after a spell has landed is not one number. */
+	virtual float GetSurfaceLevelAt(const FVector2D& At) const override;
 
 protected:
 	virtual void RebuildFromRing() override;
@@ -380,7 +343,24 @@ protected:
 	virtual double GetMinimumArea() const override;
 	virtual float GetVerticalOffset() const override { return -Draft; }
 	virtual UMaterialInterface* ResolveSurfaceMaterial() const override;
+	virtual const TArray<FVector2D>& GetMeshHole() const override { return Hole; }
+	virtual ARPGFluidGeometry::FBedSampler GetBedSampler() const override;
 
+	/** The bowls, as the height function the mesher cuts the top down by. */
+	ARPGFluidGeometry::FBedSampler GetTopRelief() const;
+	virtual double GetBedDetailSpacing() const override;
+
+	/**
+	 * Climbs a rooted slab out of the ground. Nothing else moves it.
+	 *
+	 * Separate from the buoyancy path rather than a branch inside it: a floe is
+	 * being pushed around by a surface every frame forever, and a raised slab is
+	 * doing one thing once and then standing still.
+	 */
+	void Rise(float DeltaTime);
+
+	/** Turns a drifting slab with the shear in the current under it. */
+	void Spin(float DeltaTime, const FVector2D& Centre, const FVector2D& Flow);
 
 	/** The depth it WANTS to be riding at, from Archimedes and what is aboard. */
 	float ComputeTargetDraft() const;
@@ -388,8 +368,61 @@ protected:
 	/** How many things are standing on the slab right now. */
 	int32 CountOccupants() const;
 
-	/** Does the water continue past the floe's edge in this direction? */
+	/** Does the fluid continue past the slab's edge in this direction? */
 	bool HasRoomToward(const FVector2D& Direction) const;
+
+	/** How far the outline reaches from a point along a direction, in its own frame. */
+	double SupportDistance(const FVector2D& From, const FVector2D& Direction) const;
+
+	/**
+	 * The gap through the slab, in its own frame.
+	 *
+	 * KEPT, unlike a pool's. A liquid flows back over a hole cut in it; a solid
+	 * does not, and a floe with a gap you can fall through is a floe with a gap.
+	 * One ring rather than a list because that is what the mesher can draw and
+	 * what a clip against a single agent can produce.
+	 */
+	UPROPERTY(ReplicatedUsing = OnRep_Body, BlueprintReadOnly, Category = "ARPG|Fluid")
+	TArray<FVector2D> Hole;
+
+	/**
+	 * The bowls cut into the top, in the slab's own frame.
+	 *
+	 * BOUNDED, and that is the whole reason this is a list of a dozen floats
+	 * rather than a mesh that has been edited a dozen times. A new hit close to an
+	 * old one DEEPENS it instead of appending -- which is also what makes
+	 * concentrated fire break through where scattered fire only dishes -- and past
+	 * the cap the shallowest is dropped. So the mesh is always the outline plus at
+	 * most a few bowls, however long the fight goes on.
+	 */
+	UPROPERTY(ReplicatedUsing = OnRep_Body, BlueprintReadOnly, Category = "ARPG|Fluid")
+	TArray<FARPGSlabBite> Bites;
+
+	/** How many bowls a slab is worth drawing. */
+	static constexpr int32 MaxBites = 12;
+
+	/**
+	 * Puts the VOLUME a spell broke off back into the world as fluid.
+	 *
+	 * A VOLUME, not an area, and mass is what is conserved across the change. Rock
+	 * is denser than the lava it melts into, so a cubic metre of wall is not a cubic
+	 * metre of lava -- it is the volume of lava that weighs the same. The two
+	 * densities that decide whether a slab floats are the two that decide how much
+	 * fluid it is worth, which is the point of them being densities.
+	 */
+	void ReturnBrokenFluid(double SolidVolume);
+
+	/** Cuts a region out of the outline. The geometry, without the accounting. */
+	bool CutRegion(const TArray<FVector2D>& Region);
+
+	/**
+	 * How much material a bowl of this shape takes out of a slab this thick.
+	 *
+	 * A paraboloid removes half the cylinder around it -- until it is deeper than
+	 * the slab, at which point the underside truncates it and what is left is
+	 * a cylinder with a dimple in the top.
+	 */
+	static double BowlVolume(float Radius, float Depth, float Thickness);
 
 	int32 OccupantCount = 0;
 
@@ -401,45 +434,4 @@ protected:
 
 	UPROPERTY(Transient)
 	float OccupantPoll = 0.f;
-
-	/**
-	 * Everything currently making its way down the outside.
-	 *
-	 * NOT REPLICATED, on the same rule as the film it came from: this is the
-	 * journey, and what matters at the end of it is a pool, which replicates
-	 * already. A client sees the lava arrive rather than watching it crawl -- the
-	 * cost of sending a per-slab list of runs at tick rate buys a detail nobody
-	 * away from the wall can see.
-	 */
-	UPROPERTY(Transient)
-	TArray<FARPGWallRun> WallRuns;
-
-	/** Runoff waiting to be worth a deposit, and where it ran off. */
-	UPROPERTY(Transient)
-	double PendingRunoff = 0.0;
-
-	UPROPERTY(Transient)
-	FVector2D RunoffAt = FVector2D::ZeroVector;
-
-	/**
-	 * Ambient melting that has happened but has not been drawn yet, in cm.
-	 *
-	 * BECAUSE A REBUILD IS THE EXPENSIVE THING A SLAB DOES, and ambient melting
-	 * asked for one four times a second forever. A 5m floe at 20cm cells is 2800
-	 * cells and roughly 8000 triangles, and rebuilding plus re-cooking collision
-	 * measured over 10ms -- a dropped frame, four times a second, per floe. What
-	 * it bought was a tenth of a millimetre of thinning: the weather tick moves
-	 * the field by MeltRate * 0.25s, which for ice is 1.25mm.
-	 *
-	 * So the melt lands in the cells every tick -- the simulation never lags the
-	 * truth -- and the MESH waits until there is something to see. Anything that
-	 * changes the slab's shape rather than its thickness still rebuilds at once;
-	 * see MeltUniformly.
-	 */
-	UPROPERTY(Transient)
-	float UndrawnMelt = 0.f;
-
-	/** How much ambient thinning is worth a rebuild, in cm. */
-	static constexpr float UndrawnMeltLimit = 0.5f;
-
 };
