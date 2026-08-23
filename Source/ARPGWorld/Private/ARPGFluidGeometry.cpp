@@ -205,6 +205,41 @@ double PolygonSignedDistance(const TArray<FVector2D>& Ring, const FVector2D& Poi
 	return PolygonContains(Ring, Point) ? -Nearest : Nearest;
 }
 
+FVector2D ClosestPointOnPolygon(const TArray<FVector2D>& Ring, const FVector2D& Point)
+{
+	if (Ring.Num() < 3 || PolygonContains(Ring, Point))
+	{
+		return Point;
+	}
+
+	FVector2D Nearest = Ring[0];
+	double Best = TNumericLimits<double>::Max();
+
+	for (int32 Index = 0, Previous = Ring.Num() - 1; Index < Ring.Num(); Previous = Index++)
+	{
+		const FVector2D& A = Ring[Previous];
+		const FVector2D& B = Ring[Index];
+
+		const FVector2D Along = B - A;
+		const double LengthSq = Along.SizeSquared();
+
+		const double T = LengthSq > UE_DOUBLE_SMALL_NUMBER
+			? FMath::Clamp(FVector2D::DotProduct(Point - A, Along) / LengthSq, 0.0, 1.0)
+			: 0.0;
+
+		const FVector2D On = A + Along * T;
+		const double Distance = FVector2D::DistSquared(Point, On);
+
+		if (Distance < Best)
+		{
+			Best = Distance;
+			Nearest = On;
+		}
+	}
+
+	return Nearest;
+}
+
 FBox2D PolygonBounds(const TArray<FVector2D>& Ring)
 {
 	FBox2D Bounds(ForceInit);

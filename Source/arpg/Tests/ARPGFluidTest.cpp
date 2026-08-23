@@ -3369,6 +3369,97 @@ bool FARPGFireOnEarthTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGReactionOnTheRimTest,
+	"ARPG.World.Fluid.Slabs.AHitOnTheRimLandsOnTheRimAndNotBesideIt",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGReactionOnTheRimTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+	UARPGElementalReactionSubsystem* Reactions =
+		Scope.World->GetSubsystem<UARPGElementalReactionSubsystem>();
+
+	UARPGMagicElement* Earth = MakeElement(GetTransientPackage(), TAG_Element_Earth);
+	UARPGMagicElement* Fire = MakeElement(GetTransientPackage(), TAG_Element_Fire);
+	UARPGMagicElement* Lava = MakeElement(GetTransientPackage(), TAG_Element_Lava);
+
+	UARPGFluidDefinition* LavaDefinition = MakeLava(GetTransientPackage(), Lava);
+
+	UARPGSolidDefinition* EarthDefinition = MakeEarth(Earth);
+	EarthDefinition->BreaksInto = LavaDefinition;
+	EarthDefinition->BreakRadius = 70.f;
+
+	UARPGMagicCombinationTable* Table = NewObject<UARPGMagicCombinationTable>();
+	UARPGMagicCombinationEntry* ToLava = NewObject<UARPGMagicCombinationEntry>(Table);
+	ToLava->RequiredElements.AddTag(TAG_Element_Fire);
+	ToLava->RequiredElements.AddTag(TAG_Element_Earth);
+	ToLava->Result = Lava;
+	ToLava->Mode = EARPGReactionMode::Auto;
+	ToLava->Scope = static_cast<int32>(EARPGCombinationScope::Collision);
+	Table->Entries.Add(ToLava);
+
+	Fluids->Definitions = { LavaDefinition };
+	Fluids->Solids = { EarthDefinition };
+	Fluids->CombinationTable = Table;
+	Reactions->CombinationTable = Table;
+
+	MakeGround(Scope.World, 0.f);
+
+	AARPGSolidBody* Slab = RaiseSlab(Scope.World, Fluids, EarthDefinition,
+		FVector2D::ZeroVector, 200.0);
+
+	const float Top = Slab->GetSurfaceHeight();
+
+	// THE CASE THAT WAS WRONG. A fireball touches the rim of a slab while its own
+	// CENTRE is still out over the floor -- a sphere meets a polygon before its
+	// middle crosses the edge -- so everything anchored on that centre happened
+	// beside the wall instead of on it.
+	const FVector Struck(260, 0, Top);
+	TestFalse(TEXT("Setup: the spell's centre is off the slab"),
+		Slab->IsStandableAt(Struck));
+
+	UARPGElementalVolumeComponent* Ball = MakeShard(Scope.World, Fire, Struck, 90.f);
+	Ball->SetEnergy(80.f);
+
+	Reactions->Resolve(Slab->Volume, Ball);
+
+	const FVector Contact = Reactions->GetLastContactPoint();
+
+	// ON THE SLAB, not out over the floor beside it.
+	TestTrue(TEXT("The contact is pulled onto the thing it struck"),
+		Slab->IsStandableAt(FVector(Contact.X, Contact.Y, Top)));
+
+	// AND AT THE ROCK'S OWN HEIGHT. The trigger box is deliberately a metre of
+	// headroom taller than the slab, and falling back to the top of it is what
+	// made the whole reaction look like it happened in the air.
+	TestEqual(TEXT("At the height of the rock rather than the top of its trigger box"),
+		static_cast<float>(Contact.Z), Top, 5.f);
+
+	// --- and therefore ---------------------------------------------------------
+
+	TestEqual(TEXT("The bowl is cut in the rock"), Slab->GetBites().Num(), 1);
+	TestTrue(TEXT("Where the spell hit it"),
+		Slab->BiteDepthAt(FVector2D(Contact.X, Contact.Y)) > 0.f);
+
+	TestEqual(TEXT("And it leaves one body of lava"), Fluids->GetPools().Num(), 1);
+
+	if (Fluids->GetPools().Num() == 1)
+	{
+		// NEAR THE CRATER. It used to appear wherever the spell's centre happened
+		// to be, which for a rim hit is off the edge of the slab entirely.
+		const FVector2D Pooled = ARPGFluidGeometry::PolygonCentroid(
+			Fluids->GetPools()[0]->GetRing());
+
+		TestTrue(TEXT("Lying where the rock melted"),
+			FVector2D::Distance(Pooled, FVector2D(Contact.X, Contact.Y)) < 150.0);
+	}
+
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFluidNoRowTest,
 	"ARPG.World.Fluid.Solidify.WithoutARowNothingFreezes",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

@@ -66,6 +66,19 @@ namespace ARPGFluidGeometry
 	ARPGWORLD_API double PolygonSignedDistance(const TArray<FVector2D>& Ring,
 		const FVector2D& Point);
 
+	/**
+	 * The point ON the ring nearest a given one, or the point itself when inside.
+	 *
+	 * WHERE SOMETHING ACTUALLY HIT. A spell's volume is a sphere and a body is a
+	 * polygon, so the two meet while the sphere's CENTRE is still outside -- it
+	 * touched the rim, and the rim is where the contact is. Taking the centre
+	 * unmodified puts the event beside the thing it struck, which for anything
+	 * that then carves, deposits or scorches at that point is a spell landing
+	 * where it visibly did not.
+	 */
+	ARPGWORLD_API FVector2D ClosestPointOnPolygon(const TArray<FVector2D>& Ring,
+		const FVector2D& Point);
+
 	/** Axis-aligned bounds, for a trigger box that only has to be generous. */
 	ARPGWORLD_API FBox2D PolygonBounds(const TArray<FVector2D>& Ring);
 

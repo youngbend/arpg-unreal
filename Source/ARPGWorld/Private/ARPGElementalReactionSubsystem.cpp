@@ -2,6 +2,7 @@
 
 #include "ARPGElementalReactionSubsystem.h"
 #include "ARPGElementalSurface.h"
+#include "ARPGFluidGeometry.h"
 #include "ARPGWorldAuthority.h"
 #include "ARPGConductionSubsystem.h"
 #include "ARPGDischargeContext.h"
@@ -336,6 +337,47 @@ void UARPGElementalReactionSubsystem::Resolve(UARPGElementalVolumeComponent* A,
 	{
 		Contact = Incoming->GetVolumeLocation();
 
+		// ...AND ONTO IT, not merely beside it. The two met while the incoming
+		// volume's centre was still OUTSIDE the body -- a sphere touches a polygon
+		// before its middle crosses the edge -- so a fireball that visibly struck
+		// the corner of a wall reports a contact out over the floor.
+		//
+		// WHAT THAT COST, all from the one number: the bowl was carved at a point
+		// off the end of the slab and so never appeared in the rock; the lava it
+		// melted was deposited there too, in a puddle beside the wall rather than
+		// under the crater; and the height below, finding no surface at a point
+		// that was not on the body, fell back to the top of the trigger BOX --
+		// which is deliberately a metre of headroom above the rock, and is why the
+		// whole reaction looked like it happened in the air.
+		//
+		// Clamping first makes all three come out right, and costs a walk of the
+		// footprint's edges.
+		if (const AActor* Struck = Larger->GetOwner())
+		{
+			if (const IARPGElementalSurface* Face = Cast<IARPGElementalSurface>(Struck))
+			{
+				const FVector2D Where(Contact.X, Contact.Y);
+				const TArray<FVector2D> Footprint =
+					Face->GetSurfaceFootprint(Where, Reach(Incoming));
+
+				FVector2D On = ARPGFluidGeometry::ClosestPointOnPolygon(Footprint, Where);
+
+				// AND A FINGER'S WIDTH INSIDE, when it had to be moved at all. The
+				// nearest point on a polygon lies exactly ON its edge, and every
+				// containment test in this system is an even-odd ray cast -- which
+				// is entitled to answer either way for a point sitting precisely on
+				// the line. A contact that is on the slab has to READ as on the
+				// slab to the very next thing that asks.
+				if (!On.Equals(Where))
+				{
+					On += (On - Where).GetSafeNormal() * 2.0;
+				}
+
+				Contact.X = On.X;
+				Contact.Y = On.Y;
+			}
+		}
+
 		// ...and put it ON THE SURFACE. The surface sits inside a much taller box,
 		// so the projectile's own centre can be half a metre off the thing it
 		// visibly hit. Landing where the surface actually is costs one query and
@@ -411,11 +453,15 @@ float UARPGElementalReactionSubsystem::SurfaceHeightUnder(
 	{
 		if (const IARPGElementalSurface* Surface = Cast<IARPGElementalSurface>(Owner))
 		{
+			// ASKED WHETHER THE POINT IS ON IT ONLY TO REPORT IT, not to decide.
+			// A body that knows its own height knows it better than the box does
+			// even a little way outside its outline, and the box's answer is the
+			// top of a metre of deliberate headroom -- so falling back to that
+			// was how a contact just off the rim ended up in the air. The caller
+			// clamps the point onto the footprint first, so this is now the
+			// ordinary path rather than the lucky one.
 			const FVector2D Where(At.X, At.Y);
-			if (Surface->IsSurfaceAt(Where))
-			{
-				return Surface->GetSurfaceLevelAt(Where);
-			}
+			return Surface->GetSurfaceLevelAt(Where);
 		}
 	}
 
