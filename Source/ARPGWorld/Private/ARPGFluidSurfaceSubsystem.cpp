@@ -4,6 +4,7 @@
 #include "ARPGDischargeContext.h"
 #include "ARPGDischargeEffect.h"
 #include "ARPGElementalVolumeComponent.h"
+#include "ARPGFluidRegion.h"
 #include "ARPGSurfaceBody.h"
 #include "ARPGSolidBody.h"
 #include "ARPGFluidDefinition.h"
@@ -176,7 +177,16 @@ UARPGSolidDefinition* UARPGFluidSurfaceSubsystem::FindSolidDefinition(FGameplayT
 // Depositing
 // ---------------------------------------------------------------------------
 
-AARPGFluidPool* UARPGFluidSurfaceSubsystem::Deposit(FVector WorldPosition, float Radius,
+void UARPGFluidSurfaceSubsystem::PourIntoField(const FVector2D& Where, float NearZ,
+	double Volume, float MaxRadius, UARPGFluidDefinition* Definition)
+{
+	if (FARPGFluidField* Field = FindField(Definition))
+	{
+		Field->PourVolume(Where, NearZ, Volume, MaxRadius);
+	}
+}
+
+AARPGFluidRegion* UARPGFluidSurfaceSubsystem::Deposit(FVector WorldPosition, float Radius,
 	FGameplayTag ElementTag)
 {
 	UARPGFluidDefinition* Definition = FindDefinition(ElementTag);
@@ -192,13 +202,28 @@ AARPGFluidPool* UARPGFluidSurfaceSubsystem::Deposit(FVector WorldPosition, float
 		return nullptr;
 	}
 
-	const TArray<FVector2D> Footprint = ARPGFluidGeometry::MakeCircle(
-		FVector2D(WorldPosition.X, WorldPosition.Y), Radius);
+	const FVector2D At(WorldPosition.X, WorldPosition.Y);
 
-	return DepositRing(Footprint, WorldPosition.Z, Definition);
+	// NO CLIPPING, AND NO MERGE PASS. Both were the polygon model working around
+	// having one flat outline per body: ClipToGround pulled a disc back along its
+	// own spokes until every vertex was on ground within a step of the middle, and
+	// DepositRing then hunted for pools near enough to union with. The field needs
+	// neither. It never lays fluid on ground it has not sampled, it will not cross
+	// into a cell with no floor under it, and two pours that touch are one body
+	// because their cells touch.
+	//
+	// WHICH IS ALSO WHY A LEDGE STILL STOPS IT. The head between a cell and one
+	// whose bed is far below is a fall rather than a slope, and the fall is capped
+	// at the fluid's WallSpeed -- so water creeps off a lip rather than teleporting
+	// down it, and refuses entirely where there is no floor at all.
+	const double Volume = static_cast<double>(PI) * Radius * Radius * Definition->Depth;
+
+	PourIntoField(At, WorldPosition.Z, Volume, Radius, Definition);
+
+	return SettleRegionAt(At, WorldPosition.Z, Definition);
 }
 
-AARPGFluidPool* UARPGFluidSurfaceSubsystem::ReturnFluid(FVector2D Where, float GroundHeight,
+AARPGFluidRegion* UARPGFluidSurfaceSubsystem::ReturnFluid(FVector2D Where, float GroundHeight,
 	double Volume, UARPGFluidDefinition* Definition)
 {
 	if (Volume <= 0.0 || !Definition)
@@ -206,39 +231,25 @@ AARPGFluidPool* UARPGFluidSurfaceSubsystem::ReturnFluid(FVector2D Where, float G
 		return nullptr;
 	}
 
-	// INTO A BODY THAT IS ALREADY THERE, by growing it rather than by depositing a
-	// disc on top of it.
+	// A MELT IS THE CASE THE FIELD EXISTS FOR, and the one this whole rewrite was
+	// asked for. A slab hands back the material that melted, at the point it
+	// melted, and it runs from there -- around whatever is standing in the way.
+	// The polygon model could only grow the whole outline uniformly, somewhere the
+	// heat never reached.
 	//
-	// THIS IS THE CASE THAT LOOKS FINE AND LOSES THE WATER. Fluid returns where it
-	// left, so the disc almost always lands INSIDE the pool it is joining -- and a
-	// disc unioned with an outline that already contains it is that same outline.
-	// Merging would have conserved nothing, silently, in the common case.
-	for (AARPGFluidPool* Pool : Pools)
-	{
-		// CONTAINS IS A PLAN QUESTION and this one is not -- see the merge in
-		// DepositRing. Runoff arriving on the floor of a room must not be absorbed
-		// by the puddle on the balcony it happens to be standing under.
-		if (IsValid(Pool) && Pool->Definition == Definition
-			&& Pool->ContainsPoint(FVector(Where.X, Where.Y, GroundHeight))
-			&& FMath::Abs(Pool->GetSurfaceBedAt(Where) - GroundHeight) <= MaxDepositStep)
-		{
-			Pool->AbsorbSurfaceVolume(Volume);
-			return Pool;
-		}
-	}
-
-	// Nowhere to put it but the ground. VOLUME BECOMES AREA THROUGH DEPTH, and
-	// this is the only place in the system that does it: a puddle has no third
-	// dimension of its own -- pour more in and it gets wider, not deeper -- so the
-	// fluid's Depth is exactly the exchange rate between how much of it there is
-	// and how much ground it covers.
+	// AND THERE IS NO LONGER A SECOND PATH. ReturnFluid used to look for a pool
+	// that already contained the point and grow it, precisely because a disc
+	// unioned into an outline that already contained it vanished without trace.
+	// Pouring into cells cannot lose water: it goes where it is put.
 	const double Area = Volume / FMath::Max(1.f, Definition->Depth);
-	const double Radius = FMath::Sqrt(Area / PI);
 
-	return DepositRing(ARPGFluidGeometry::MakeCircle(Where, Radius), GroundHeight, Definition);
+	PourIntoField(Where, GroundHeight, Volume,
+		FMath::Max(static_cast<float>(FMath::Sqrt(Area / PI)), 1.f), Definition);
+
+	return SettleRegionAt(Where, GroundHeight, Definition);
 }
 
-AARPGFluidPool* UARPGFluidSurfaceSubsystem::DepositSwept(FVector From, FVector To, float Radius,
+AARPGFluidRegion* UARPGFluidSurfaceSubsystem::DepositSwept(FVector From, FVector To, float Radius,
 	FGameplayTag ElementTag)
 {
 	UARPGFluidDefinition* Definition = FindDefinition(ElementTag);
@@ -251,10 +262,62 @@ AARPGFluidPool* UARPGFluidSurfaceSubsystem::DepositSwept(FVector From, FVector T
 
 	// The honest footprint of an elongated spell: a stadium, not a disc at each
 	// end. Every forward-elongated discharge in this project sweeps.
-	const TArray<FVector2D> Footprint = ARPGFluidGeometry::MakeStadium(
-		FVector2D(From.X, From.Y), FVector2D(To.X, To.Y), Radius);
+	const FVector2D Start(From.X, From.Y);
+	const FVector2D Finish(To.X, To.Y);
+	const double Length = FVector2D::Distance(Start, Finish);
 
-	return DepositRing(Footprint, FMath::Min(From.Z, To.Z), Definition);
+	const TArray<FVector2D> Footprint = ARPGFluidGeometry::MakeStadium(Start, Finish, Radius);
+	const double Volume = ARPGFluidGeometry::PolygonArea(Footprint) * Definition->Depth;
+
+	// POURED ALONG THE SWEEP rather than as one disc over the middle of it. A
+	// stadium two metres long is not a circle, and laying it as one would put a
+	// dragged spell's water in a puddle at the halfway point.
+	const int32 Pours = FMath::Clamp(FMath::CeilToInt(Length / FMath::Max(1.f, Radius)), 1, 16);
+	const float NearZ = FMath::Min(From.Z, To.Z);
+
+	for (int32 Step = 0; Step < Pours; ++Step)
+	{
+		const double Alpha = (Pours == 1) ? 0.5 : (Step / static_cast<double>(Pours - 1));
+		PourIntoField(FMath::Lerp(Start, Finish, Alpha), NearZ, Volume / Pours, Radius, Definition);
+	}
+
+	return SettleRegionAt(FMath::Lerp(Start, Finish, 0.5), NearZ, Definition);
+}
+
+AARPGFluidRegion* UARPGFluidSurfaceSubsystem::SettleRegionAt(const FVector2D& At,
+	float NearZ, UARPGFluidDefinition* Definition)
+{
+	// RECONCILED ON THE SPOT, rather than leaving the caller to wait a quarter of
+	// a second for the next weather tick. A deposit returns the body the fluid
+	// ended up in, and every caller and every test expects that to be true by the
+	// time the call comes back.
+	ReconcileRegions();
+
+	// AND THE HEIGHT IS PART OF THE QUESTION. Two bodies can stand at the same XY
+	// on different floors -- that is the whole point of layers -- so "which body
+	// did this pour land in" cannot be answered in plan alone. The nearest floor
+	// to where the caller was pouring is the one it poured onto.
+	AARPGFluidRegion* Best = nullptr;
+	float BestGap = TNumericLimits<float>::Max();
+
+	for (AARPGFluidRegion* Region : Regions)
+	{
+		if (!IsValid(Region) || Region->Definition != Definition
+			|| !Region->IsSurfaceAt(At))
+		{
+			continue;
+		}
+
+		const float Gap = FMath::Abs(Region->GetSurfaceBedAt(At) - NearZ);
+
+		if (Gap < BestGap)
+		{
+			BestGap = Gap;
+			Best = Region;
+		}
+	}
+
+	return Best;
 }
 
 bool UARPGFluidSurfaceSubsystem::FindGroundAt(const FVector2D& At, float NearZ,
@@ -270,243 +333,146 @@ bool UARPGFluidSurfaceSubsystem::FindGroundAt(const FVector2D& At, float NearZ,
 	return true;
 }
 
-TArray<FVector2D> UARPGFluidSurfaceSubsystem::ClipToGround(const TArray<FVector2D>& Footprint,
-	float GroundHeight, const AActor* Ignore) const
+void UARPGFluidSurfaceSubsystem::ReconcileRegions()
 {
-	if (Footprint.Num() < 3 || MaxDepositStep <= 0.f)
-	{
-		return Footprint;
-	}
+	// PROXIES ARE MATCHED, NOT RESPAWNED. A floe whose surface was destroyed and
+	// rebuilt every pass would be a floe that fell into the sea four times a
+	// second -- AARPGSolidBody::FloatsOn points at one of these, and so does the
+	// reaction solver's anti-cascade guard.
+	TArray<AARPGFluidRegion*> Kept;
+	TArray<AARPGFluidRegion*> Spare = Regions;
 
-	const FVector2D Centre = ARPGFluidGeometry::PolygonCentroid(Footprint);
+	Spare.RemoveAll([](const AARPGFluidRegion* Region) { return !IsValid(Region); });
 
-	float Middle = GroundHeight;
-	if (!FindGroundAt(Centre, GroundHeight, Middle, Ignore))
-	{
-		// NOTHING UNDER THE MIDDLE means there is no body to trim -- the spell
-		// finished over a hole. Handed back whole so the area test downstream
-		// refuses it as one decision rather than this returning a sliver.
-		return Footprint;
-	}
-
-	// HOW FAR THIS DIRECTION CAN GO BEFORE THE FLOOR STOPS BEING ONE FLOOR.
-	//
-	// WALKED, NOT BISECTED, and that is the whole difference between a body that
-	// follows a ramp and one that cannot leave the flat. The question is not "is
-	// this point level with where I started" -- down a slope nothing is -- but
-	// "did the floor get here without jumping". So the walk carries the last
-	// height it saw and compares each sample against THAT, which a slope passes
-	// however far it runs and a ledge fails at its lip.
-	auto ReachAlong = [&](const FVector2D& Toward)
-	{
-		const double Span = (Toward - Centre).Size();
-		if (Span <= UE_DOUBLE_SMALL_NUMBER)
-		{
-			return Toward;
-		}
-
-		const FVector2D Direction = (Toward - Centre) / Span;
-
-		// Stepped at the same spacing the bed is sampled at, so the trim and the
-		// mesh agree about what counts as a step in the floor rather than one
-		// finding detail the other cannot draw.
-		const double Stride = FMath::Max(10.f, BedSampleSpacing);
-
-		float Last = Middle;
-		FVector2D Reached = Centre;
-
-		for (double Along = Stride; Along <= Span + Stride; Along += Stride)
-		{
-			const FVector2D At = Centre + Direction * FMath::Min(Along, Span);
-
-			float Here = 0.f;
-			if (!FindGroundAt(At, Last, Here, Ignore)
-				|| FMath::Abs(Here - Last) > MaxDepositStep)
-			{
-				return Reached;
-			}
-
-			Last = Here;
-			Reached = At;
-
-			if (Along >= Span)
-			{
-				break;
-			}
-		}
-
-		return Reached;
-	};
-
-	TArray<FVector2D> Clipped;
-	Clipped.Reserve(Footprint.Num());
-
-	for (const FVector2D& Point : Footprint)
-	{
-		Clipped.Add(ReachAlong(Point));
-	}
-
-	return Clipped;
-}
-
-AARPGFluidPool* UARPGFluidSurfaceSubsystem::DepositRing(const TArray<FVector2D>& Raw,
-	float GroundHeight, UARPGFluidDefinition* Definition, const AActor* Ignore)
-{
 	UWorld* World = GetWorld();
-	if (!World || Raw.Num() < 3)
+
+	if (!World)
 	{
-		return nullptr;
+		return;
 	}
 
-	// TRIMMED TO WHAT HOLDS IT before anything else looks at it, so the merge
-	// below joins the shape that will actually be drawn and the area test refuses
-	// what is left rather than what was asked for.
-	const TArray<FVector2D> Footprint = ClipToGround(Raw, GroundHeight, Ignore);
+	TArray<FARPGFluidField::FRegion> Bodies;
 
-	if (Footprint.Num() < 3)
+	for (TPair<TObjectPtr<UARPGFluidDefinition>, TUniquePtr<FARPGFluidField>>& Pair : Fields)
 	{
-		return nullptr;
-	}
+		UARPGFluidDefinition* Definition = Pair.Key;
+		FARPGFluidField& Field = *Pair.Value;
 
-	const FVector2D Centre = ARPGFluidGeometry::PolygonCentroid(Footprint);
-
-	// MERGE rather than stack. Two puddles of the same thing overlapping are one
-	// puddle; leaving them as separate bodies would double their ambient effect
-	// and make the pair react twice to the same spell.
-	//
-	// WHETHER THEY ACTUALLY MEET, which a centroid in a bounding box does not
-	// answer. That was the old test, and it is wrong in both directions: a small
-	// puddle overlapping the RIM of a big one has its centre well outside the big
-	// one's box, and a centre inside a box says nothing about the outlines
-	// touching. So merging worked or did not depending on where the second cast
-	// happened to land, which is exactly as inconsistent as it sounds.
-	auto bMeets = [&](const AARPGFluidPool* Pool)
-	{
-		const TArray<FVector2D>& Ring = Pool->GetRing();
-
-		// Boxes first, so the polygon work below is only ever done for a pool
-		// that could plausibly be touched.
-		const FBox2D Reach = ARPGFluidGeometry::PolygonBounds(Ring)
-			.ExpandBy(Definition->MergeDistance);
-
-		if (!Reach.Intersect(ARPGFluidGeometry::PolygonBounds(Footprint)))
-		{
-			return false;
-		}
-
-		// GROWN BY THE MERGE DISTANCE and then genuinely intersected. Two puddles
-		// a hand's breadth apart are one puddle -- that is what MergeDistance is
-		// for -- and the offset is how "nearly touching" becomes "touching".
-		const TArray<FVector2D> Grown = Definition->MergeDistance > 0.f
-			? ARPGFluidGeometry::OffsetRing(Ring, Definition->MergeDistance)
-			: Ring;
-
-		return ARPGFluidGeometry::PolygonArea(
-			ARPGFluidGeometry::IntersectRings(Grown, Footprint)) > 0.0;
-	};
-
-	// AND AT THE SAME HEIGHT. A PLAN VIEW CANNOT TELL TWO FLOORS APART: overlap
-	// in X and Y was once the whole test, so a puddle cast on the floor of a room
-	// merged into one sitting on the balcony above it -- the ring grew to cover
-	// both, the body stayed at the balcony's height, and the water appeared
-	// nowhere near the spell. Two bodies of the same stuff at two heights are two
-	// bodies, however they look from directly overhead.
-	auto bLevelWith = [&](const AARPGFluidPool* Pool)
-	{
-		return FMath::Abs(Pool->GetSurfaceBedAt(Centre) - GroundHeight) <= MaxDepositStep;
-	};
-
-	AARPGFluidPool* Into = nullptr;
-
-	for (int32 Index = Pools.Num() - 1; Index >= 0; --Index)
-	{
-		AARPGFluidPool* Pool = Pools[Index];
-		if (!IsValid(Pool) || Pool->Definition != Definition
-			|| !bLevelWith(Pool) || !bMeets(Pool))
+		if (!Definition)
 		{
 			continue;
 		}
 
-		Into = Pool;
-		Into->SetRing(ARPGFluidGeometry::MergeRings(Into->GetRing(), Footprint));
-		break;
+		Field.FindRegions(Bodies);
+
+		for (const FARPGFluidField::FRegion& Body : Bodies)
+		{
+			// TOO LITTLE TO BE A BODY. The same floor a pool had, and for the same
+			// reason: without one, a drying puddle would go on being an actor with
+			// an overlap and a mesh long after there was anything to see.
+			if (Body.Area < Definition->MinimumArea)
+			{
+				continue;
+			}
+
+			// MATCHED BY OVERLAP -- see AARPGFluidRegion::GetFingerprint. A proxy
+			// that still has cells in this body IS this body, however much it has
+			// grown, shrunk or changed shape since. Whichever proxy shares the most
+			// with it wins, so when a puddle splits in two the larger half keeps
+			// the actor and whatever was floating on it.
+			int32 Match = INDEX_NONE;
+			int32 BestShared = 0;
+
+			for (int32 Which = 0; Which < Spare.Num(); ++Which)
+			{
+				AARPGFluidRegion* Candidate = Spare[Which];
+
+				if (Candidate->Definition != Definition)
+				{
+					continue;
+				}
+
+				int32 Shared = 0;
+
+				// WALKED OVER THE SMALLER OF THE TWO, because a body that has just
+				// merged with its neighbour is far bigger than either proxy was.
+				const TSet<TPair<FIntPoint, int32>>& Held = Candidate->GetCells();
+
+				for (const TPair<FIntPoint, int32>& Cell : Held)
+				{
+					if (Body.Lookup.Contains(Cell))
+					{
+						++Shared;
+					}
+				}
+
+				if (Shared > BestShared)
+				{
+					BestShared = Shared;
+					Match = Which;
+				}
+			}
+
+			AARPGFluidRegion* Region = nullptr;
+
+			if (Match != INDEX_NONE)
+			{
+				Region = Spare[Match];
+				Spare.RemoveAt(Match);
+			}
+			else
+			{
+				FActorSpawnParameters Params;
+				Params.SpawnCollisionHandlingOverride =
+					ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+				Region = World->SpawnActor<AARPGFluidRegion>(
+					AARPGFluidRegion::StaticClass(),
+					FTransform(FVector(Body.Centroid.X, Body.Centroid.Y, Body.MinBed)), Params);
+			}
+
+			if (!Region)
+			{
+				continue;
+			}
+
+			Region->UpdateFrom(&Field, Body, Definition);
+			Kept.Add(Region);
+		}
 	}
 
-	// AND THEN EVERYTHING THE GROWN OUTLINE NOW REACHES.
-	//
-	// A footprint dropped BETWEEN two puddles belongs to both, and joining only
-	// the first left the second overlapping it as a separate body -- two outlines
-	// crossing, each drawing its own rim through the middle of the other. Which
-	// is the seam running across the water in the report. Bridging is exactly
-	// what a new cast between two puddles is for, so the union has to be taken to
-	// completion rather than one step of it.
-	for (int32 Index = Pools.Num() - 1; Into && Index >= 0; --Index)
+	// WHAT NOTHING MATCHED IS GONE. A puddle that dried up, or one that split and
+	// whose anchor ended up in the half that kept the proxy: either way there is no
+	// water where this actor is, and anything floating on it has nothing to ride.
+	Regions = MoveTemp(Kept);
+
+	// WHAT NOTHING MATCHED IS GONE -- but its riders are re-homed before it goes,
+	// not destroyed with it. A floe sitting on the boundary where two puddles
+	// merged is still floating; it is floating on the body that swallowed the one
+	// it knew about, and destroying it because its landlord changed name would be
+	// the ice vanishing for a bookkeeping reason the player cannot see.
+	for (AARPGFluidRegion* Orphan : Spare)
 	{
-		AARPGFluidPool* Pool = Pools[Index];
-		if (Pool == Into || !IsValid(Pool) || Pool->Definition != Definition)
+		for (AARPGSolidBody* Riding : ActiveSolids)
 		{
-			continue;
+			if (!IsValid(Riding) || Riding->FloatsOn.GetObject() != Orphan)
+			{
+				continue;
+			}
+
+			const FVector2D At = Riding->GetWorldCentre();
+
+			if (AARPGFluidRegion* Instead =
+					FindRegionAt(FVector(At.X, At.Y, Riding->GetSurfaceHeight())))
+			{
+				Riding->FloatsOn = Instead;
+			}
 		}
 
-		const FBox2D Reach = ARPGFluidGeometry::PolygonBounds(Into->GetRing())
-			.ExpandBy(Definition->MergeDistance);
-
-		if (!Reach.Intersect(ARPGFluidGeometry::PolygonBounds(Pool->GetRing()))
-			|| !bLevelWith(Pool))
-		{
-			continue;
-		}
-
-		const TArray<FVector2D> Grown = Definition->MergeDistance > 0.f
-			? ARPGFluidGeometry::OffsetRing(Into->GetRing(), Definition->MergeDistance)
-			: Into->GetRing();
-
-		if (ARPGFluidGeometry::PolygonArea(
-				ARPGFluidGeometry::IntersectRings(Grown, Pool->GetRing())) <= 0.0)
-		{
-			continue;
-		}
-
-		Into->SetRing(ARPGFluidGeometry::MergeRings(Into->GetRing(), Pool->GetRing()));
-		RetireBody(Pool);
+		// Anything still pointing at it genuinely has nothing left to ride.
+		DropRiders(Orphan);
+		Orphan->Destroy();
 	}
-
-	// NOTHING TO JOIN falls through to a body of its own below.
-	if (Into)
-	{
-		return Into;
-	}
-
-	// TOO LITTLE TO BE A BODY. Nothing merged it, so this would be a new pool
-	// already under the floor at which weather destroys it -- spawned, replicated
-	// and gone within a tick.
-	//
-	// Checked HERE and not in the merge above, because being too small to be a
-	// puddle of your own does not stop you adding to one: a light cast into
-	// standing water still enlarges it, and the last of a melting floe still
-	// returns its water to the pool it froze out of. What is refused is only the
-	// body that would have nothing to belong to.
-	if (ARPGFluidGeometry::PolygonArea(Footprint) < Definition->MinimumArea)
-	{
-		return nullptr;
-	}
-
-	FActorSpawnParameters Params;
-	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-
-	AARPGFluidPool* Pool = World->SpawnActor<AARPGFluidPool>(
-		AARPGFluidPool::StaticClass(),
-		FTransform(FVector(Centre.X, Centre.Y, GroundHeight)), Params);
-
-	if (!Pool)
-	{
-		return nullptr;
-	}
-
-	Pool->Setup(Definition, Footprint, GroundHeight);
-	Pools.Add(Pool);
-
-	return Pool;
 }
 
 bool UARPGFluidSurfaceSubsystem::TraceToGround(FVector From, const AActor* Ignore,
@@ -552,11 +518,11 @@ bool UARPGFluidSurfaceSubsystem::TraceToGround(FVector From, const AActor* Ignor
 	// the same reason -- landing on the surface film of a puddle rather than the
 	// bed under it would stack a second body a couple of centimetres above the
 	// first instead of merging with it.
-	for (const AARPGFluidPool* Pool : Pools)
+	for (const AARPGFluidRegion* Region : Regions)
 	{
-		if (IsValid(Pool))
+		if (IsValid(Region))
 		{
-			Params.AddIgnoredActor(Pool);
+			Params.AddIgnoredActor(Region);
 		}
 	}
 
@@ -588,7 +554,7 @@ void UARPGFluidSurfaceSubsystem::HandleDischargeLanded(AARPGDischargeEffect* Eff
 		return;
 	}
 
-	// Pools are replicated actors the server owns -- see HasAuthority. The effect
+	// The field is server-authoritative -- see HasAuthority. The effect
 	// replicates down, so this fires on clients too, and a client depositing its
 	// own copy would leave every puddle in the level doubled.
 	if (!HasAuthority())
@@ -662,7 +628,7 @@ bool UARPGFluidSurfaceSubsystem::TrySolidify(UARPGElementalVolumeComponent* A,
 	}
 
 	// One side has to be a SURFACE -- something with an extent lying there to be
-	// frozen. That used to mean "is literally an AARPGFluidPool", which quietly
+	// frozen. That used to mean "is literally a pool actor", which quietly
 	// restricted freezing to bodies this subsystem had spawned: an authored river,
 	// the case the reservoir idea exists for, failed the cast and fell through to
 	// an ordinary energy trade. See IARPGElementalSurface.
@@ -832,6 +798,7 @@ bool UARPGFluidSurfaceSubsystem::TrySolidify(UARPGElementalVolumeComponent* A,
 		// Only this subsystem's own bodies are its to retire. Anything else that
 		// reports itself used up owns its own lifetime.
 		RetireBody(Cast<AARPGSurfaceBody>(Surface));
+		RetireRegion(Cast<AARPGFluidRegion>(Cast<UObject>(Surface)));
 	}
 
 	// Spent freezing it.
@@ -876,23 +843,34 @@ bool UARPGFluidSurfaceSubsystem::WasFluidReturned(FGameplayTag ElementTag) const
 	return FluidReturnedThisReaction.Contains(ElementTag);
 }
 
-void UARPGFluidSurfaceSubsystem::DropRiders(AARPGFluidPool* Pool)
+void UARPGFluidSurfaceSubsystem::DropRiders(AActor* Body)
 {
 	// ANYTHING FLOATING ON IT GOES TOO. Nothing linked a floe's life to the water
-	// under it, so boiling a pool out from beneath one -- which fire can now do --
-	// left ice hanging in the air over dry ground. A floe is not an independent
-	// object; it is a thing riding a surface, and there is no surface left to
-	// ride. True however the pool went, which is why this is not inlined into the
-	// one path that used to be the only way for a pool to go.
+	// under it, so boiling a pool out from beneath one left ice hanging in the air
+	// over dry ground. A floe is not an independent object; it is a thing riding a
+	// surface, and there is no surface left to ride.
 	for (int32 Index = ActiveSolids.Num() - 1; Index >= 0; --Index)
 	{
 		AARPGSolidBody* Riding = ActiveSolids[Index];
-		if (IsValid(Riding) && Riding->FloatsOn.GetObject() == Pool)
+
+		if (IsValid(Riding) && Riding->FloatsOn.GetObject() == Body)
 		{
 			ActiveSolids.RemoveAt(Index);
 			Riding->Destroy();
 		}
 	}
+}
+
+void UARPGFluidSurfaceSubsystem::RetireRegion(AARPGFluidRegion* Region)
+{
+	if (!IsValid(Region))
+	{
+		return;
+	}
+
+	DropRiders(Region);
+	Regions.Remove(Region);
+	Region->Destroy();
 }
 
 void UARPGFluidSurfaceSubsystem::RetireBody(AARPGSurfaceBody* Body)
@@ -902,13 +880,10 @@ void UARPGFluidSurfaceSubsystem::RetireBody(AARPGSurfaceBody* Body)
 		return;
 	}
 
-	if (AARPGFluidPool* Pool = Cast<AARPGFluidPool>(Body))
-	{
-		Pools.Remove(Pool);
-		DropRiders(Pool);
-		Pool->Destroy();
-		return;
-	}
+	// NO FLUID BRANCH ANY MORE. A body of water is not something anything else
+	// gets to retire: it exists exactly as long as there are connected wet cells
+	// where it is, and ReconcileRegions is the only thing that decides that. What
+	// a reaction does to water is take the water; the actor going is a consequence.
 
 	AARPGSolidBody* Solid = Cast<AARPGSolidBody>(Body);
 	if (!Solid)
@@ -932,15 +907,16 @@ void UARPGFluidSurfaceSubsystem::RetireBody(AARPGSurfaceBody* Body)
 // Queries
 // ---------------------------------------------------------------------------
 
-AARPGFluidPool* UARPGFluidSurfaceSubsystem::FindPoolAt(FVector WorldPosition) const
+AARPGFluidRegion* UARPGFluidSurfaceSubsystem::FindRegionAt(FVector WorldPosition) const
 {
-	for (AARPGFluidPool* Pool : Pools)
+	for (AARPGFluidRegion* Region : Regions)
 	{
-		if (IsValid(Pool) && Pool->ContainsPoint(WorldPosition))
+		if (IsValid(Region) && Region->ContainsPoint(WorldPosition))
 		{
-			return Pool;
+			return Region;
 		}
 	}
+
 	return nullptr;
 }
 
@@ -1184,13 +1160,10 @@ void UARPGFluidSurfaceSubsystem::EnforceBudget()
 			AARPGSurfaceBody* Spent = Register[Smallest];
 			Register.RemoveAt(Smallest);
 
-			// Whatever was riding it goes with it, exactly as when a pool is
-			// retired -- a culled pool leaving its floe over dry ground would be
-			// the one visible artefact this whole economy could produce.
-			if (AARPGFluidPool* Pool = Cast<AARPGFluidPool>(Spent))
-			{
-				DropRiders(Pool);
-			}
+			// Whatever was riding it goes with it -- a culled body leaving its floe
+			// over dry ground would be the one visible artefact this whole economy
+			// could produce.
+			DropRiders(Spent);
 
 			if (IsValid(Spent))
 			{
@@ -1199,53 +1172,313 @@ void UARPGFluidSurfaceSubsystem::EnforceBudget()
 		}
 	};
 
-	Trim(Pools, TEXT("pool"));
 	Trim(ActiveSolids, TEXT("solid"));
+
+	// --- And the same for water ---------------------------------------------
+	//
+	// STILL NEEDED, AND FOR HALF THE OLD REASON. Merging is no longer something
+	// that can be missed -- two bodies of water that touch are one body because
+	// their cells touch -- so the version of this failure where a player got a new
+	// puddle per cast standing in the same spot is gone. What is left is real: a
+	// player walking a field leaves a trail of genuinely disconnected puddles, and
+	// nothing else bounds how many.
+	//
+	// CULLING IS TAKING THE WATER, not destroying the actor. A proxy is a handle;
+	// destroying one would leave every drop exactly where it was with nothing
+	// standing for it, so the budget would look like it worked and the field would
+	// go on holding all of it.
+	if (Regions.Num() > MaxBodiesOfEachKind)
+	{
+		TArray<AARPGFluidRegion*> Sorted = Regions;
+
+		Sorted.Sort([](const AARPGFluidRegion& A, const AARPGFluidRegion& B)
+			{
+				return A.GetArea() < B.GetArea();
+			});
+
+		const int32 Excess = Regions.Num() - MaxBodiesOfEachKind;
+
+		for (int32 Index = 0; Index < Excess && Index < Sorted.Num(); ++Index)
+		{
+			AARPGFluidRegion* Spent = Sorted[Index];
+
+			if (!IsValid(Spent))
+			{
+				continue;
+			}
+
+			UE_LOG(LogARPGWorld, Verbose,
+				TEXT("Over the water budget, so the smallest body goes."));
+
+			// Whatever was riding it goes with it. A culled body leaving its floe
+			// over dry ground would be the one visible artefact this economy could
+			// produce.
+			DropRiders(Spent);
+			Spent->Drain();
+
+			Regions.Remove(Spent);
+			Spent->Destroy();
+		}
+	}
 }
 
 void UARPGFluidSurfaceSubsystem::StepSimulation(float DeltaTime)
 {
 	GatherViewers();
+	TickFields(DeltaTime);
 	TickWeather(DeltaTime);
+
+	// AFTER THE WATER HAS MOVED, because what bodies there are is a question about
+	// where the water is now -- two puddles that met during this step's flow are
+	// one body by the time anything is asked about them.
+	ReconcileRegions();
 	EnforceBudget();
+}
+
+FARPGFluidField* UARPGFluidSurfaceSubsystem::FindField(UARPGFluidDefinition* Definition)
+{
+	if (!Definition)
+	{
+		return nullptr;
+	}
+
+	if (TUniquePtr<FARPGFluidField>* Existing = Fields.Find(Definition))
+	{
+		return Existing->Get();
+	}
+
+	TUniquePtr<FARPGFluidField> Field = MakeUnique<FARPGFluidField>();
+
+	FARPGFluidFieldParams Params;
+	Params.FlowRate = Definition->FlowRate;
+	Params.YieldSlope = Definition->YieldSlope;
+	Params.MinimumFilm = Definition->MinimumFilm;
+	Params.WallSpeed = Definition->WallSpeed;
+	Params.DepositDepth = Definition->Depth;
+
+	// THE SAME NUMBER THE OLD CLIPPER USED. MaxDepositStep is what decided how far
+	// the ground under a footprint could wander before the body stopped rather
+	// than carrying on over it, and it means exactly the same thing here -- the
+	// difference is that a field applies it per cell instead of per spoke.
+	Params.MaxDepositDrop = MaxDepositStep;
+
+	Field->Configure(FieldChunkSize, FieldResolution, Params);
+
+	// THE SAME QUESTION A DEPOSIT ASKS, with the same exclusions -- a puddle must
+	// not find ITSELF, or the floe beside it, and decide that is the ground. Bound
+	// rather than called, so the field stays a plain class that a test can hand a
+	// ramp to instead of a world.
+	Field->SetBedProbe([this](const FVector2D& At, float& OutHeight)
+		{
+			// BARELY ABOVE WHERE IT WAS ASKED, and that is not a detail. The probe
+			// traces DOWNWARD, so every centimetre of headroom is a centimetre in
+			// which it can find a floor that is not the one being asked about --
+			// and half a metre of it meant a spell cast on the ground under a
+			// balcony traced up into the balcony and pooled on top of it.
+			//
+			// The headroom exists only so the trace does not start exactly on the
+			// surface it is looking for. Anything more is the probe answering a
+			// different question from the one the caller asked, and a heightfield
+			// with layers has no way to tell that it did.
+			return FindGroundAt(At, OutHeight + 20.f, OutHeight, nullptr);
+		});
+
+	FARPGFluidField* Raw = Field.Get();
+	Fields.Add(Definition, MoveTemp(Field));
+
+	return Raw;
+}
+
+const FARPGFluidField* UARPGFluidSurfaceSubsystem::FindField(UARPGFluidDefinition* Definition) const
+{
+	if (!Definition)
+	{
+		return nullptr;
+	}
+
+	const TUniquePtr<FARPGFluidField>* Existing = Fields.Find(Definition);
+	return Existing ? Existing->Get() : nullptr;
+}
+
+double UARPGFluidSurfaceSubsystem::GetFieldVolume(FGameplayTag ElementTag) const
+{
+	const FARPGFluidField* Field = FindField(FindDefinition(ElementTag));
+	return Field ? Field->GetTotalVolume() : 0.0;
+}
+
+bool UARPGFluidSurfaceSubsystem::IsFieldBlockedAt(FVector WorldPosition,
+	FGameplayTag ElementTag) const
+{
+	const FARPGFluidField* Field = FindField(FindDefinition(ElementTag));
+	return Field && Field->IsBlockedAt(FVector2D(WorldPosition.X, WorldPosition.Y));
+}
+
+bool UARPGFluidSurfaceSubsystem::IsFieldRoofedAt(FVector WorldPosition,
+	FGameplayTag ElementTag) const
+{
+	const FARPGFluidField* Field = FindField(FindDefinition(ElementTag));
+	return Field && Field->IsRoofedAt(FVector2D(WorldPosition.X, WorldPosition.Y));
+}
+
+float UARPGFluidSurfaceSubsystem::GetFieldDepthAt(FVector WorldPosition,
+	FGameplayTag ElementTag) const
+{
+	const FARPGFluidField* Field = FindField(FindDefinition(ElementTag));
+	return Field ? Field->SampleDepth(FVector2D(WorldPosition.X, WorldPosition.Y)) : 0.f;
+}
+
+void UARPGFluidSurfaceSubsystem::ResetFluid()
+{
+	for (TPair<TObjectPtr<UARPGFluidDefinition>, TUniquePtr<FARPGFluidField>>& Pair : Fields)
+	{
+		Pair.Value->Reset();
+	}
+
+	for (AARPGFluidRegion* Region : Regions)
+	{
+		if (IsValid(Region))
+		{
+			DropRiders(Region);
+			Region->Destroy();
+		}
+	}
+
+	Regions.Reset();
+}
+
+void UARPGFluidSurfaceSubsystem::RasterizeSolidsIntoFields()
+{
+	if (Fields.Num() == 0)
+	{
+		return;
+	}
+
+	for (TPair<TObjectPtr<UARPGFluidDefinition>, TUniquePtr<FARPGFluidField>>& Pair : Fields)
+	{
+		FARPGFluidField& Field = *Pair.Value;
+
+		Field.ClearSolids();
+
+		// GATHERED, THEN POURED, because pouring inside the loop would put water
+		// into ground a slab further down the list is about to occupy -- and the
+		// only symptom would be a puddle that keeps being shoved a second time.
+		struct FSpill
+		{
+			FVector2D Where;
+			float NearZ;
+			float Reach;
+			double Volume;
+		};
+
+		TArray<FSpill> Spills;
+
+		for (AARPGSolidBody* Solid : ActiveSolids)
+		{
+			if (!IsValid(Solid))
+			{
+				continue;
+			}
+
+			const double FromThis = Solid->RasterizeInto(Field);
+
+			if (FromThis <= 0.0)
+			{
+				continue;
+			}
+
+			// WHERE TO PUT IT BACK: the slab's own rim. PourVolume refuses blocked
+			// cells, so a pour centred on the slab lands in a ring around it, which
+			// is where water shoved aside by a wall actually goes.
+			const FBox2D Outline = ARPGFluidGeometry::PolygonBounds(Solid->GetOutline());
+
+			Spills.Add({
+				Solid->GetWorldCentre(),
+				Solid->GetSurfaceHeight(),
+				static_cast<float>(Outline.GetExtent().Size()) + Field.GetCellSize() * 2.f,
+				FromThis });
+		}
+
+		for (const FSpill& Spill : Spills)
+		{
+			Field.PourVolume(Spill.Where, Spill.NearZ, Spill.Volume, Spill.Reach);
+		}
+	}
+}
+
+void UARPGFluidSurfaceSubsystem::TickFields(float DeltaTime)
+{
+	if (Fields.Num() == 0)
+	{
+		return;
+	}
+
+	// BEFORE THE STEPS, not after: a slab that moved this tick has to be where it
+	// is before any water is asked to flow around it, or the water settles into
+	// ground that is about to be occupied and gets displaced right back out.
+	RasterizeSolidsIntoFields();
+
+	// ITS OWN ACCUMULATOR, because the field runs faster than the weather does and
+	// the two rates have nothing to do with each other -- see FieldStepRate. The
+	// base class owns the accumulator for the OUTER rate; this is the inner one.
+	const float Interval = 1.f / FMath::Max(1.f, FieldStepRate);
+
+	FieldAccumulator += DeltaTime;
+
+	// CAPPED, so a hitch does not turn into a hundred catch-up steps and a longer
+	// hitch. Water arriving slightly late after a stall is not something a player
+	// can see; the frame it costs to pretend otherwise is.
+	int32 Budget = 8;
+
+	while (FieldAccumulator >= Interval && Budget-- > 0)
+	{
+		FieldAccumulator -= Interval;
+
+		for (TPair<TObjectPtr<UARPGFluidDefinition>, TUniquePtr<FARPGFluidField>>& Pair : Fields)
+		{
+			Pair.Value->Step(Interval);
+		}
+	}
+
+	if (Budget <= 0)
+	{
+		FieldAccumulator = 0.f;
+	}
 }
 
 void UARPGFluidSurfaceSubsystem::TickWeather(float DeltaTime)
 {
-	for (int32 Index = Pools.Num() - 1; Index >= 0; --Index)
+	// RAIN AND EVAPORATION ARE A DEPTH, NOT AN OFFSET. A pool grew and shrank by
+	// pushing its outline out and in, because an outline was all it had -- which
+	// meant rain filled a puddle by making it WIDER and a drying one narrowed
+	// uniformly from every edge at once, including the edge against a wall.
+	//
+	// On a field it is what it actually is: so many centimetres on or off the
+	// depth of every wet cell, everywhere. A shallow rim dries out first and the
+	// deep middle lasts longest, which is what a drying puddle does and what the
+	// polygon model could not express at any price.
+	//
+	// AND THIS IS THE ONE THING ALLOWED TO CHANGE THE TOTAL -- see
+	// FARPGFluidField::ApplyWeather. The solver conserves mass exactly; weather is
+	// where water is supposed to arrive from and go to.
+	for (TPair<TObjectPtr<UARPGFluidDefinition>, TUniquePtr<FARPGFluidField>>& Pair : Fields)
 	{
-		AARPGFluidPool* Pool = Pools[Index];
-		if (!IsValid(Pool) || !Pool->Definition)
+		const UARPGFluidDefinition* Definition = Pair.Key;
+
+		if (!Definition)
 		{
-			Pools.RemoveAt(Index);
 			continue;
 		}
 
-		// Rain grows, sun shrinks. Both are the SAME operation with opposite
-		// sign, which is the entire reason a body is a polygon.
 		const float Rate = bRaining
-			? Pool->Definition->RainGrowthRate
-			: -Pool->Definition->EvaporationRate;
+			? Definition->RainGrowthRate
+			: -Definition->EvaporationRate;
 
 		if (FMath::IsNearlyZero(Rate))
 		{
 			continue;
 		}
 
-		const TArray<FVector2D> Next = ARPGFluidGeometry::OffsetRing(Pool->GetRing(), Rate * DeltaTime);
-
-		// Below the floor, or eroded away entirely. The floor exists because an
-		// evaporating pool's area approaches zero asymptotically -- without it a
-		// sliver would live forever, costing a rebuild every tick to become
-		// imperceptibly smaller.
-		if (ARPGFluidGeometry::PolygonArea(Next) < Pool->Definition->MinimumArea)
-		{
-			Pools.RemoveAt(Index);
-			Pool->Destroy();
-			continue;
-		}
-
-		Pool->SetRing(Next);
+		Pair.Value->ApplyWeather(Rate, DeltaTime);
 	}
 
 	// NOTHING TAKES A SLAB WITH TIME. Ambient melting used to live here -- a floe

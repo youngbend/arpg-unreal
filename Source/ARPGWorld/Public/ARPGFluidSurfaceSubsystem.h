@@ -4,12 +4,13 @@
 
 #include "CoreMinimal.h"
 #include "GameplayTagContainer.h"
+#include "ARPGFluidField.h"
 #include "ARPGSteppedWorldSubsystem.h"
 #include "ARPGFluidSurfaceSubsystem.generated.h"
 
 class AARPGDischargeEffect;
 class AARPGSurfaceBody;
-class AARPGFluidPool;
+class AARPGFluidRegion;
 class AARPGSolidBody;
 class UARPGElementalVolumeComponent;
 class UARPGFluidDefinition;
@@ -131,11 +132,11 @@ public:
 	 * @return the body the fluid ended up in, new or existing.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "ARPG|Fluid")
-	AARPGFluidPool* Deposit(FVector WorldPosition, float Radius, FGameplayTag ElementTag);
+	AARPGFluidRegion* Deposit(FVector WorldPosition, float Radius, FGameplayTag ElementTag);
 
 	/** The capsule footprint of an elongated spell, rather than a disc. */
 	UFUNCTION(BlueprintCallable, Category = "ARPG|Fluid")
-	AARPGFluidPool* DepositSwept(FVector From, FVector To, float Radius, FGameplayTag ElementTag);
+	AARPGFluidRegion* DepositSwept(FVector From, FVector To, float Radius, FGameplayTag ElementTag);
 
 	/**
 	 * How far below a finished spell this will look for ground to wet.
@@ -180,7 +181,7 @@ public:
 	 * @return the body it ended up in, or null if it was too little to be one.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "ARPG|Fluid")
-	AARPGFluidPool* ReturnFluid(FVector2D Where, float GroundHeight, double Volume,
+	AARPGFluidRegion* ReturnFluid(FVector2D Where, float GroundHeight, double Volume,
 		UARPGFluidDefinition* Definition);
 
 	// --- Solidifying ----------------------------------------------------------
@@ -198,9 +199,16 @@ public:
 
 	// --- Queries --------------------------------------------------------------
 
-	/** The pool whose polygon contains this point, or null. */
+	/**
+	 * The body of fluid standing at this point, or null.
+	 *
+	 * ASKED OF THE CELLS, not of a polygon. A proxy's traced outline encloses any
+	 * pillar the water flowed around -- a fluid keeps no hole -- so a point inside
+	 * the pillar is inside the ring and is not in the water. See
+	 * AARPGFluidRegion::ContainsPoint, which asks the field.
+	 */
 	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
-	AARPGFluidPool* FindPoolAt(FVector WorldPosition) const;
+	AARPGFluidRegion* FindRegionAt(FVector WorldPosition) const;
 
 	/**
 	 * Is this point roofed over by a solid?
@@ -270,9 +278,16 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "ARPG|Fluid")
 	void UnregisterSolid(AARPGSolidBody* Solid);
 
-	/** Every pool currently in the world. */
+	/**
+	 * Every body of fluid currently in the world.
+	 *
+	 * A CONSEQUENCE, NOT A REGISTER. Nothing adds to this: it is rebuilt from the
+	 * connected components of the field every reconcile, so two puddles that grow
+	 * into each other become one entry without anything deciding to merge them,
+	 * and a puddle cut in half by a wall becomes two.
+	 */
 	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
-	const TArray<AARPGFluidPool*>& GetPools() const { return Pools; }
+	const TArray<AARPGFluidRegion*>& GetRegions() const { return Regions; }
 
 	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
 	const TArray<AARPGSolidBody*>& GetSolids() const { return ActiveSolids; }
@@ -298,6 +313,21 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "ARPG|Fluid")
 	void RetireBody(AARPGSurfaceBody* Body);
+
+	/**
+	 * Drops a proxy whose water has just been used up.
+	 *
+	 * NORMALLY THE RECONCILE'S JOB, and this is the exception rather than a second
+	 * owner. A reaction finishes a body off in the middle of a frame -- ice takes
+	 * the last of a puddle, fire boils the last of one -- and everything that
+	 * happens next in that same call, up to and including the caller asking how
+	 * many bodies of water there are, would otherwise be answered by an actor
+	 * standing over dry ground until the next quarter-second tick.
+	 *
+	 * Takes the riders with it, exactly as the reconcile would.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "ARPG|Fluid")
+	void RetireRegion(AARPGFluidRegion* Region);
 
 
 	// --- Not paying for the same fluid twice -----------------------------------
@@ -360,29 +390,135 @@ public:
 	/** Did a body already account for this element during the current reaction? */
 	bool WasFluidReturned(FGameplayTag ElementTag) const;
 
+	// --- The field ------------------------------------------------------------
+	//
+	// RUNNING BESIDE THE POOLS, NOT INSTEAD OF THEM, and only for as long as it
+	// takes to trust it. Every deposit and every return goes into both, so the
+	// field is being exercised by real gameplay while the polygon bodies are still
+	// the ones answering every question -- which means the whole of it can be
+	// wrong without anything breaking, and the tests that say it is right are
+	// about the solver rather than about a game that now depends on it.
+	//
+	// ONE PER ELEMENT. Water and lava sharing a cell is the thing the reaction
+	// solver exists to resolve, and a single grid with a slot each would let the
+	// solver represent it quietly instead.
+
+	/** The field for an element, made on first use. Null for anything that pools nothing. */
+	FARPGFluidField* FindField(UARPGFluidDefinition* Definition);
+
+	/** Read-only, for anything that only wants to look. */
+	const FARPGFluidField* FindField(UARPGFluidDefinition* Definition) const;
+
+	/**
+	 * How wide a chunk of the field is, in cm, and how many cells across.
+	 *
+	 * 3840 over 96 is a FORTY CENTIMETRE cell -- fine enough that a doorway is
+	 * five cells wide and a character standing in a puddle covers four, and coarse
+	 * enough that a ten-metre pool is six hundred cells rather than sixty
+	 * thousand. The chunk is a quarter of the spread solver's, because fire is
+	 * regional and water is local.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Fluid",
+		meta = (ClampMin = "480.0"))
+	float FieldChunkSize = 3840.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Fluid",
+		meta = (ClampMin = "8", ClampMax = "256"))
+	int32 FieldResolution = 96;
+
+	/**
+	 * Field steps per second.
+	 *
+	 * FASTER THAN THE WEATHER TICK, and separately from it, because they are
+	 * different kinds of process: evaporation is a slow physical change nobody can
+	 * see happening at 4Hz, and flow is something a player watches. Twenty is also
+	 * comfortably inside what the cell size will carry -- a forty-centimetre cell
+	 * under twenty centimetres of water passes waves at about 140cm/s, which needs
+	 * a step under 0.28s, and this is 0.05.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARPG|Fluid",
+		meta = (ClampMin = "1.0", ClampMax = "60.0"))
+	float FieldStepRate = 20.f;
+
+	/** Every drop of one element the field is holding, in cubic cm. */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
+	double GetFieldVolume(FGameplayTag ElementTag) const;
+
+	/**
+	 * Would fluid of this element be stopped from entering this point?
+	 *
+	 * NOT THE SAME QUESTION AS IsCoveredBySolid, and the two must not be folded
+	 * together. That one asks whether anything solid is OVERHEAD -- which a
+	 * floating floe is, and which is what stops a bolt reaching the water beneath
+	 * it. This one asks whether the ground is occupied, which a floe's is not:
+	 * water runs under one, and that is the difference between a floe and a plug.
+	 */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
+	bool IsFieldBlockedAt(FVector WorldPosition, FGameplayTag ElementTag) const;
+
+	/**
+	 * The other half of that pair: is anything solid standing over this point?
+	 *
+	 * True for a floe, which blocks nothing and roofs everything. This is what
+	 * IsCoveredBySolid will eventually be answered from -- it is the same question
+	 * asked of a grid rather than of a linear walk over every slab in the world --
+	 * but not yet: IsCoveredBySolid also weighs whether the slab is meant to be
+	 * STOOD on, and a sheet of frost roofs the ground without being footing.
+	 */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
+	bool IsFieldRoofedAt(FVector WorldPosition, FGameplayTag ElementTag) const;
+
+	/** Depth of an element's fluid standing at a point, in cm. */
+	UFUNCTION(BlueprintPure, Category = "ARPG|Fluid")
+	float GetFieldDepthAt(FVector WorldPosition, FGameplayTag ElementTag) const;
+
+	/**
+	 * Empties every field and drops every proxy.
+	 *
+	 * FOR STARTING AGAIN -- a level transition, or a test that wants one puddle
+	 * rather than the one before it plus a new one. NOT a retire: retiring a body
+	 * of water is not something anything gets to do, because a body exists exactly
+	 * as long as there are wet cells where it is. This takes the water, and the
+	 * bodies go because there is nothing left for them to be.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "ARPG|Fluid")
+	void ResetFluid();
+
+	/**
+	 * Restamps every registered slab into every field.
+	 *
+	 * REBUILT WHOLESALE RATHER THAN TRACKED, and at the weather rate rather than
+	 * per frame. A slab drifts, spins, is broken into, is thrown and is put back
+	 * down; keeping an incremental record of which cells each one covered would be
+	 * a second representation of the same shape, kept in step by hand, which is the
+	 * exact failure the whole system is written to avoid. Clearing and restamping
+	 * forty-eight outlines four times a second is cheaper than the bug.
+	 *
+	 * WHATEVER IT DISPLACES IS POURED BACK at the slab's rim, so a wall dropped
+	 * into a puddle pushes the water aside instead of deleting it.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "ARPG|Fluid")
+	void RasterizeSolidsIntoFields();
+
+
 private:
 	UARPGFluidDefinition* FindDefinition(FGameplayTag ElementTag) const;
 	UARPGSolidDefinition* FindSolidDefinition(FGameplayTag ElementTag) const;
 
-	/** Merges a footprint into a nearby body, or spawns one. */
-	AARPGFluidPool* DepositRing(const TArray<FVector2D>& Footprint, float GroundHeight,
-		UARPGFluidDefinition* Definition, const AActor* Ignore = nullptr);
-
 	/**
-	 * Cuts a footprint back to the ground that can actually hold it.
+	 * Brings the proxies into line with what the field actually holds.
 	 *
-	 * Every point is pulled in along its own spoke from the centre until the
-	 * ground under it is within MaxDepositStep of the height the body is being
-	 * laid at. A disc cast on a platform comes back as a disc with a flat side
-	 * along the lip, which is where the water would stop.
-	 *
-	 * WHY SPOKES AND NOT A GRID. A footprint is a circle or a capsule around the
-	 * point the spell finished, so every part of it is visible from the centre --
-	 * which means "how far can this direction go" is the whole question, and it
-	 * costs a handful of traces per point rather than a raster of the whole area.
+	 * THE ONE PLACE THAT DECIDES WHAT BODIES THERE ARE. Merging, splitting,
+	 * spawning and retiring are all the same question here -- which cells are
+	 * connected to which -- and answering it once is what makes MergeDistance,
+	 * DepositRing's bridging pass and ClipToGround all unnecessary rather than
+	 * ported. Two pours that touch are one body because their cells touch.
 	 */
-	TArray<FVector2D> ClipToGround(const TArray<FVector2D>& Footprint, float GroundHeight,
-		const AActor* Ignore) const;
+	void ReconcileRegions();
+
+	/** Reconciles, then hands back the body the fluid just poured ended up in. */
+	AARPGFluidRegion* SettleRegionAt(const FVector2D& At, float NearZ,
+		UARPGFluidDefinition* Definition);
 
 	/**
 	 * A cast spell leaving its element on the ground. THE ONLY THING THAT PUTS A
@@ -402,7 +538,7 @@ private:
 	void TickWeather(float DeltaTime);
 
 	UPROPERTY(Transient)
-	TArray<AARPGFluidPool*> Pools;
+	TArray<AARPGFluidRegion*> Regions;
 
 	UPROPERTY(Transient)
 	TArray<AARPGSolidBody*> ActiveSolids;
@@ -413,7 +549,7 @@ private:
 	mutable bool bWarnedNoDefinitions = false;
 
 	/** Destroys everything floating on a pool that is about to stop existing. */
-	void DropRiders(AARPGFluidPool* Pool);
+	void DropRiders(AActor* Body);
 
 	/**
 	 * Refreshes ViewerLocations from the engine's significance manager, or from
@@ -444,4 +580,21 @@ private:
 	 * A window in seconds would have to guess how long a discharge lives.
 	 */
 	TArray<FGameplayTag> FluidReturnedThisReaction;
+
+	/** Advances every element's field, in its own fixed steps. */
+	void TickFields(float DeltaTime);
+
+	/** Lays a volume into the field, if that element has one. Silent when it does not. */
+	void PourIntoField(const FVector2D& Where, float NearZ, double Volume, float MaxRadius,
+		UARPGFluidDefinition* Definition);
+
+	/**
+	 * Keyed by definition rather than by element tag, because that is what every
+	 * caller already has in hand and what the field's own parameters come from.
+	 * TUniquePtr so the map can grow without moving a field a caller is holding.
+	 */
+	TMap<TObjectPtr<UARPGFluidDefinition>, TUniquePtr<FARPGFluidField>> Fields;
+
+	/** Left over from the last field step, so a slow frame does not lose time. */
+	float FieldAccumulator = 0.f;
 };

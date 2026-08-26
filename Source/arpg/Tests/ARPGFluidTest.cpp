@@ -11,6 +11,8 @@
 #include "ARPGElementPalette.h"
 #include "ARPGElementalReactionSubsystem.h"
 #include "ARPGElementalVolumeComponent.h"
+#include "ARPGFluidPresentationSubsystem.h"
+#include "ARPGFluidRegion.h"
 #include "ARPGSurfaceBody.h"
 #include "ARPGSolidBody.h"
 #include "ARPGSlabEffects.h"
@@ -56,14 +58,41 @@ namespace ARPGFluidTestUtils
 		return Element;
 	}
 
+	/**
+	 * Lets the water close over ground a freeze just took.
+	 *
+	 * FREEZING TAKES THE WATER IT FROZE FROM, exactly and immediately, which is
+	 * what the field made possible and the polygon model could not do -- a pool
+	 * had no hole to keep, so it shrank somewhere it had not been touched and the
+	 * water under the new floe never went anywhere.
+	 *
+	 * So for one moment after a freeze there is genuinely no water beneath the
+	 * ice, and a floe asked for its waterline in that moment is asked about dry
+	 * ground. In the game the solver closes the gap within a frame or two at
+	 * 20Hz; a test that wants to talk about a FLOATING floe has to let that
+	 * happen first, and this is that wait made explicit rather than hidden in a
+	 * magic number of ticks.
+	 */
+	inline void SettleWater(UARPGFluidSurfaceSubsystem* Fluids, int32 Steps = 8)
+	{
+		for (int32 Step = 0; Step < Steps; ++Step)
+		{
+			Fluids->StepSimulation(0.25f);
+		}
+	}
+
 	UARPGFluidDefinition* MakeWater(UObject* Outer, UARPGMagicElement* Element)
 	{
 		UARPGFluidDefinition* Definition = NewObject<UARPGFluidDefinition>(Outer);
 		Definition->Element = Element;
 		Definition->Depth = 20.f;
 		Definition->MinimumArea = 2500.f;
-		Definition->EvaporationRate = 10.f;
-		Definition->RainGrowthRate = 10.f;
+		// A DEPTH PER SECOND NOW, not a radius -- see UARPGFluidDefinition. Fast
+		// enough that a weather test does not have to run for a simulated minute,
+		// and slow enough that every OTHER test does not lose its puddle while it
+		// is busy asserting something else.
+		Definition->EvaporationRate = 1.f;
+		Definition->RainGrowthRate = 1.f;
 		Definition->MergeDistance = 200.f;
 
 		// AN ORDINARY PUDDLE unless a test says otherwise. The class default is
@@ -380,30 +409,30 @@ bool FARPGFluidDepositTest::RunTest(const FString& Parameters)
 	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
 	Fluids->Definitions = { MakeWater(GetTransientPackage(), Water) };
 
-	AARPGFluidPool* First = Fluids->Deposit(FVector(0, 0, 0), 100.f, TAG_Element_Water);
+	AARPGFluidRegion* First = Fluids->Deposit(FVector(0, 0, 0), 100.f, TAG_Element_Water);
 	TestNotNull(TEXT("A deposit makes a pool"), First);
-	TestEqual(TEXT("One pool exists"), Fluids->GetPools().Num(), 1);
+	TestEqual(TEXT("One pool exists"), Fluids->GetRegions().Num(), 1);
 
 	const double FirstArea = First->GetArea();
 
 	// Overlapping the first: two puddles of the same thing are ONE puddle.
 	// Leaving them separate would double their ambient effect and make the pair
 	// react twice to the same spell.
-	AARPGFluidPool* Second = Fluids->Deposit(FVector(80, 0, 0), 100.f, TAG_Element_Water);
-	TestEqual(TEXT("An overlapping deposit merges"), Fluids->GetPools().Num(), 1);
+	AARPGFluidRegion* Second = Fluids->Deposit(FVector(80, 0, 0), 100.f, TAG_Element_Water);
+	TestEqual(TEXT("An overlapping deposit merges"), Fluids->GetRegions().Num(), 1);
 	TestEqual(TEXT("Into the same pool"), Second, First);
 	TestTrue(TEXT("Which grew"), First->GetArea() > FirstArea);
 
 	// Far away: its own body, which is why islands are dropped by the merge
 	// rather than smuggled back as a second ring.
 	Fluids->Deposit(FVector(5000, 0, 0), 100.f, TAG_Element_Water);
-	TestEqual(TEXT("A distant deposit makes its own pool"), Fluids->GetPools().Num(), 2);
+	TestEqual(TEXT("A distant deposit makes its own pool"), Fluids->GetRegions().Num(), 2);
 
 	// Too little to be a body of its own: spawning it would replicate a pool that
 	// the next weather tick destroys for being under the same floor.
 	TestNull(TEXT("A splash below the minimum area makes no pool"),
 		Fluids->Deposit(FVector(-5000, 0, 0), 10.f, TAG_Element_Water));
-	TestEqual(TEXT("And leaves the count alone"), Fluids->GetPools().Num(), 2);
+	TestEqual(TEXT("And leaves the count alone"), Fluids->GetRegions().Num(), 2);
 
 	// But the same splash still ADDS to one it lands in -- the floor is on being a
 	// body of your own, not on being worth anything -- which is how repeated light
@@ -435,23 +464,31 @@ bool FARPGFluidEvaporateTest::RunTest(const FString& Parameters)
 	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
 	Fluids->Definitions = { MakeWater(GetTransientPackage(), Water) };
 
-	AARPGFluidPool* Pool = Fluids->Deposit(FVector(0, 0, 0), 150.f, TAG_Element_Water);
-	const double Initial = Pool->GetArea();
+	Fluids->Deposit(FVector(0, 0, 0), 150.f, TAG_Element_Water);
+
+	// MEASURED AS VOLUME, NOT AREA, and that is the change. Evaporation used to
+	// pull the outline inward, so a drying puddle got NARROWER at a constant
+	// depth; it now takes depth off everywhere, so it gets SHALLOWER first and
+	// only loses ground where it was thinnest. A puddle drying towards where it
+	// was deepest is what a puddle does, and an outline could not say it.
+	const double Initial = Fluids->GetFieldVolume(TAG_Element_Water);
+	TestTrue(TEXT("Setup: there is water to lose"), Initial > 0.0);
 
 	Fluids->bRaining = false;
 	Fluids->StepSimulation(1.f);
 
-	TestTrue(TEXT("Evaporation shrinks the pool"), Pool->GetArea() < Initial);
+	TestTrue(TEXT("Evaporation takes water off"),
+		Fluids->GetFieldVolume(TAG_Element_Water) < Initial);
 
-	// The minimum area floor exists because an evaporating pool's area
-	// approaches zero asymptotically -- without it a sliver would live forever,
-	// costing a rebuild every tick to become imperceptibly smaller.
-	for (int32 Step = 0; Step < 40; ++Step)
+	// The minimum area floor still exists, for the same reason it always did: a
+	// drying body approaches nothing asymptotically, and without a floor a sliver
+	// would live forever costing a reconcile every tick.
+	for (int32 Step = 0; Step < 60; ++Step)
 	{
 		Fluids->StepSimulation(1.f);
 	}
 
-	TestEqual(TEXT("And eventually removes it entirely"), Fluids->GetPools().Num(), 0);
+	TestEqual(TEXT("And eventually removes it entirely"), Fluids->GetRegions().Num(), 0);
 
 	return true;
 }
@@ -469,15 +506,21 @@ bool FARPGFluidRainTest::RunTest(const FString& Parameters)
 	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
 	Fluids->Definitions = { MakeWater(GetTransientPackage(), Water) };
 
-	AARPGFluidPool* Pool = Fluids->Deposit(FVector(0, 0, 0), 150.f, TAG_Element_Water);
-	const double Initial = Pool->GetArea();
+	Fluids->Deposit(FVector(0, 0, 0), 150.f, TAG_Element_Water);
+
+	const double Initial = Fluids->GetFieldVolume(TAG_Element_Water);
+	TestTrue(TEXT("Setup: there is a puddle to rain on"), Initial > 0.0);
 
 	Fluids->bRaining = true;
 	Fluids->StepSimulation(1.f);
 
-	// Literally the same operation with the sign flipped, which is the entire
-	// reason a body is a polygon rather than a grid or a heightfield.
-	TestTrue(TEXT("Rain grows the pool"), Pool->GetArea() > Initial);
+	// STILL LITERALLY THE SAME OPERATION WITH THE SIGN FLIPPED, which was the
+	// original claim and survives the move to a field intact -- it is just a depth
+	// now rather than an offset. What changed is what it does to the SHAPE: rain
+	// deepens a puddle and spills it outward through the solver, rather than
+	// pushing its outline out and pretending the depth never changed.
+	TestTrue(TEXT("Rain puts water back"),
+		Fluids->GetFieldVolume(TAG_Element_Water) > Initial);
 
 	return true;
 }
@@ -514,7 +557,7 @@ bool FARPGFluidBoilTest::RunTest(const FString& Parameters)
 
 	Fluids->Definitions = { WaterDefinition };
 
-	AARPGFluidPool* Pool = Fluids->Deposit(FVector(0, 0, 0), 300.f, TAG_Element_Water);
+	AARPGFluidRegion* Pool = Fluids->Deposit(FVector(0, 0, 0), 300.f, TAG_Element_Water);
 	if (!Pool)
 	{
 		AddError(TEXT("Setup: no pool was deposited."));
@@ -556,7 +599,7 @@ bool FARPGFluidBoilTest::RunTest(const FString& Parameters)
 	// not have managed.
 	Pool->Volume->Consume(Pool->Volume->GetEnergy(), Steam);
 
-	TestEqual(TEXT("Boiled away entirely, no pool is left"), Fluids->GetPools().Num(), 0);
+	TestEqual(TEXT("Boiled away entirely, no pool is left"), Fluids->GetRegions().Num(), 0);
 
 	return true;
 }
@@ -579,8 +622,9 @@ bool FARPGFluidAbsorbTest::RunTest(const FString& Parameters)
 
 	Fluids->Definitions = { WaterDefinition };
 
-	AARPGFluidPool* Pool = Fluids->Deposit(FVector(0, 0, 0), 400.f, TAG_Element_Water);
+	AARPGFluidRegion* Pool = Fluids->Deposit(FVector(0, 0, 0), 400.f, TAG_Element_Water);
 	const double Before = Pool->GetArea();
+	const double BeforeVolume = Fluids->GetFieldVolume(TAG_Element_Water);
 
 	// THE TRAP THIS EXISTS FOR. Returning fluid by depositing a disc is the obvious
 	// implementation and it silently conserves nothing: fluid comes back where it
@@ -592,11 +636,16 @@ bool FARPGFluidAbsorbTest::RunTest(const FString& Parameters)
 	TestSamePtr(TEXT("Water returned inside a pool goes into that pool"),
 		Fluids->ReturnFluid(FVector2D::ZeroVector, 0.f, Volume, WaterDefinition), Pool);
 
-	TestEqual(TEXT("And the pool grew by exactly what it was given"),
-		Pool->GetArea(), Before + Volume / WaterDefinition->Depth, 200.0);
+	// IT GOT DEEPER, NOT WIDER, and that is the whole difference. A polygon pool
+	// had no third dimension -- pour more into it and the only place the water
+	// could go was the outline, so the RING had to grow or the volume vanished.
+	// A field puts it where it was poured and lets the solver spread it, so what
+	// is conserved is measurable directly instead of by proxy.
+	TestEqual(TEXT("And the body is holding exactly what it was given"),
+		Fluids->GetFieldVolume(TAG_Element_Water), BeforeVolume + Volume, 200.0);
 
 	// Beyond it, there is nothing to grow, so a body of the right size is made.
-	AARPGFluidPool* Elsewhere =
+	AARPGFluidRegion* Elsewhere =
 		Fluids->ReturnFluid(FVector2D(50000, 0), 0.f, Volume, WaterDefinition);
 
 	TestNotNull(TEXT("Water returned to bare ground makes a puddle"), Elsewhere);
@@ -607,9 +656,19 @@ bool FARPGFluidAbsorbTest::RunTest(const FString& Parameters)
 		// Within a few percent rather than exactly: the ring is a sixteen-sided
 		// polygon inscribed in the circle the area was solved for, so it comes out
 		// about 2.6% under. That is the discretisation and not a loss of water.
+		// THE VOLUME IS EXACT AND THE AREA IS NOT, which is the honest way round.
+		// Water returned to bare ground is all there to the last cubic centimetre;
+		// how much GROUND that turns out to cover is a square metre rounded to
+		// forty-centimetre cells, and at this size that is four cells or six.
+		// Asserting the area tightly would only be asserting the cell size.
+		TestEqual(TEXT("Holding exactly what it was given"),
+			Elsewhere->GetVolume(), Volume, 1.0);
+
 		const double Expected = Volume / WaterDefinition->Depth;
-		TestTrue(TEXT("Holding what it was given"),
-			Elsewhere->GetArea() > Expected * 0.95 && Elsewhere->GetArea() <= Expected);
+		const double Cell = 3840.0 / 96.0;
+
+		TestTrue(TEXT("Over roughly the ground that volume spreads over"),
+			FMath::Abs(Elsewhere->GetArea() - Expected) < Cell * Cell * 4.0);
 	}
 
 	return true;
@@ -812,14 +871,12 @@ bool FARPGObsidianCrustTest::RunTest(const FString& Parameters)
 	Fluids->Solids = { ObsidianDefinition };
 	Fluids->CombinationTable = MakeLavaTable(Lava, Obsidian, Steam);
 
-	AARPGFluidPool* Flow = Fluids->Deposit(FVector(0, 0, 0), 400.f, TAG_Element_Lava);
+	AARPGFluidRegion* Flow = Fluids->Deposit(FVector(0, 0, 0), 400.f, TAG_Element_Lava);
 	if (!Flow)
 	{
 		AddError(TEXT("Setup: nothing pooled."));
 		return false;
 	}
-
-	const float Surface = Flow->GetSurfaceHeight();
 
 	UARPGElementalVolumeComponent* Jet = MakeShard(Scope.World, Water, FVector(0, 0, 0), 200.f);
 
@@ -856,6 +913,13 @@ bool FARPGObsidianCrustTest::RunTest(const FString& Parameters)
 	// A CRUST, NOT A RAFT. Lighter than the lava, so it floats -- barely. At 89%
 	// of the flow's density a 25cm slab rides 22cm under, scabbing the surface,
 	// nothing like the freeboard ice gets. Same Archimedes, different two numbers.
+	// AND THE FLOW HAS TO CLOSE OVER THE GLASS BEFORE THE GLASS CAN FLOAT ON IT --
+	// see SettleWater. Setting a crust takes the lava it set out of, exactly, so
+	// for an instant there is nothing under it.
+	SettleWater(Fluids);
+
+	const float Surface = Flow->GetSurfaceLevelAt(FVector2D::ZeroVector);
+
 	Crust->Tick(1.f);
 
 	TestEqual(TEXT("It rides almost flush with the flow"), Crust->Draft, 22.2f, 1.5f);
@@ -901,6 +965,136 @@ namespace ARPGFluidTestUtils
 		Fluids->RegisterSolid(Slab);
 		return Slab;
 	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGSlabInTheFieldTest,
+	"ARPG.World.Fluid.Slabs.ARaisedWallIsGroundTheWaterCannotEnter",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGSlabInTheFieldTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+	MakeGround(Scope.World, 0.f);
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+	UARPGFluidDefinition* WaterDefinition = MakeWater(GetTransientPackage(), Water);
+
+	// NO WEATHER. This test runs ten seconds of simulation to give the water time
+	// to find its way around the slab, and evaporation over that long would take
+	// the puddle before the assertion could read it -- which would be the test
+	// failing for a reason that has nothing to do with what it is about.
+	WaterDefinition->EvaporationRate = 0.f;
+	Fluids->Definitions = { WaterDefinition };
+
+	UARPGMagicElement* Earth = MakeElement(GetTransientPackage(), TAG_Element_Earth);
+	UARPGSolidDefinition* EarthDefinition = MakeEarth(Earth);
+	Fluids->Solids = { EarthDefinition };
+
+	// THE WHOLE POINT OF THE FIELD, in one fixture. A wall standing in the middle
+	// of ground a spell is about to wet: the polygon pool draws straight through
+	// it, because a pool carries no hole at all and could carry at most one if it
+	// did. The field simply has no cells there.
+	AARPGSolidBody* Slab = RaiseSlab(Scope.World, Fluids, EarthDefinition,
+		FVector2D(300.0, 0.0), 150.0);
+	TestNotNull(TEXT("Setup: the wall went up"), Slab);
+
+	Fluids->Deposit(FVector(-100, 0, 0), 200.f, TAG_Element_Water);
+
+	const double Before = Fluids->GetFieldVolume(TAG_Element_Water);
+	TestTrue(TEXT("Setup: the cast put water in the field"), Before > 0.0);
+
+	for (int32 Tick = 0; Tick < 40; ++Tick)
+	{
+		Fluids->StepSimulation(0.25f);
+	}
+
+	// GROUND, NOT A ROOF. The wall reaches the floor, so it is not somewhere water
+	// may be -- which is a different statement from IsCoveredBySolid, and one a
+	// floe would answer the other way. See UARPGFluidSurfaceSubsystem::IsFieldBlockedAt.
+	TestTrue(TEXT("The wall occupies the ground it stands on"),
+		Fluids->IsFieldBlockedAt(FVector(300, 0, 0), TAG_Element_Water));
+	TestEqual(TEXT("So no water stands inside it"),
+		Fluids->GetFieldDepthAt(FVector(300, 0, 0), TAG_Element_Water), 0.f, 0.0001f);
+
+	// AND OPEN GROUND BESIDE IT IS STILL OPEN. Without this the test would pass
+	// just as well for a field that had stopped simulating.
+	TestTrue(TEXT("While the ground beside it is wet"),
+		Fluids->GetFieldDepthAt(FVector(-100, 0, 0), TAG_Element_Water) > 0.f);
+
+	TestFalse(TEXT("And the ground beside it is not blocked"),
+		Fluids->IsFieldBlockedAt(FVector(-100, 0, 0), TAG_Element_Water));
+
+	// NOTHING WAS DELETED BY THE WALL BEING THERE. A slab dropped into water
+	// displaces it, and the subsystem pours what it displaced back at the rim --
+	// which is why RasterizeInto hands the volume out rather than swallowing it.
+	TestEqual(TEXT("And the water the wall pushed aside is still in the world"),
+		Fluids->GetFieldVolume(TAG_Element_Water), Before, Before * 0.02);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFloeInTheFieldTest,
+	"ARPG.World.Fluid.Slabs.AFloeRoofsTheWaterWithoutDammingIt",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FARPGFloeInTheFieldTest::RunTest(const FString& Parameters)
+{
+	using namespace ARPGFluidTestUtils;
+	FTestWorld Scope;
+	MakeGround(Scope.World, 0.f);
+
+	UARPGFluidSurfaceSubsystem* Fluids = Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
+
+	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+	UARPGFluidDefinition* WaterDefinition = MakeWater(GetTransientPackage(), Water);
+
+	// NO WEATHER. This test runs ten seconds of simulation to give the water time
+	// to find its way around the slab, and evaporation over that long would take
+	// the puddle before the assertion could read it -- which would be the test
+	// failing for a reason that has nothing to do with what it is about.
+	WaterDefinition->EvaporationRate = 0.f;
+	Fluids->Definitions = { WaterDefinition };
+
+	UARPGMagicElement* Ice = MakeElement(GetTransientPackage(), TAG_Element_Ice);
+	UARPGSolidDefinition* IceDefinition = MakeEarth(Ice);
+	Fluids->Solids = { IceDefinition };
+
+	// TWO METRES CLEAR OF THE FLOOR, which is what a floe is: its underside is
+	// under water, not on the bed. Set by laying it at a ground height the probe
+	// does not agree with, which is exactly the situation a slab frozen out of a
+	// deep pool is in.
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+	AARPGSolidBody* Floe = Scope.World->SpawnActor<AARPGSolidBody>(
+		AARPGSolidBody::StaticClass(), FTransform::Identity, Params);
+	Floe->Setup(IceDefinition, ARPGFluidGeometry::MakeCircle(FVector2D(300.0, 0.0), 150.0), 200.f);
+	Fluids->RegisterSolid(Floe);
+
+	Fluids->Deposit(FVector(-100, 0, 0), 200.f, TAG_Element_Water);
+
+	for (int32 Tick = 0; Tick < 60; ++Tick)
+	{
+		Fluids->StepSimulation(0.25f);
+	}
+
+	// THE TWO QUESTIONS COME APART HERE, and that is the entire reason the field
+	// keeps Roofed and Blocked as separate flags. Fold them together and either a
+	// floe dams the sea, or a bolt that struck the ice conducts through the water
+	// underneath as though the ice were not there.
+	TestTrue(TEXT("The floe roofs over the water"),
+		Fluids->IsCoveredBySolid(FVector(300, 0, 0)));
+	TestTrue(TEXT("And the field agrees that something is overhead"),
+		Fluids->IsFieldRoofedAt(FVector(300, 0, 0), TAG_Element_Water));
+	TestFalse(TEXT("But it is not standing on the floor"),
+		Fluids->IsFieldBlockedAt(FVector(300, 0, 0), TAG_Element_Water));
+	TestTrue(TEXT("So the water runs straight underneath it"),
+		Fluids->GetFieldDepthAt(FVector(300, 0, 0), TAG_Element_Water) > 0.f);
+
+	return true;
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGSlabRaisedTest,
@@ -1278,8 +1472,7 @@ bool FARPGFluidFloatTest::RunTest(const FString& Parameters)
 	Fluids->Solids = { IceDefinition };
 	Fluids->CombinationTable = MakeFreezeTable(Ice);
 
-	AARPGFluidPool* Pool = Fluids->Deposit(FVector(0, 0, 0), 400.f, TAG_Element_Water);
-	const float Waterline = Pool->GetSurfaceHeight();
+	AARPGFluidRegion* Pool = Fluids->Deposit(FVector(0, 0, 0), 400.f, TAG_Element_Water);
 
 	UARPGElementalVolumeComponent* Shard = MakeShard(Scope.World, Ice, FVector(0, 0, 0), 200.f);
 	if (!Fluids->TrySolidify(Pool->Volume, Shard) || Fluids->GetSolids().Num() != 1)
@@ -1293,6 +1486,18 @@ bool FARPGFluidFloatTest::RunTest(const FString& Parameters)
 	// It knows what it is riding, which is what lets it ask for a waterline that
 	// moves rather than remembering one that does not.
 	TestNotNull(TEXT("A floe knows the water it froze out of"), Floe->FloatsOn.GetObject());
+
+	// AND THERE HAS TO BE WATER UNDER IT BEFORE IT CAN FLOAT ON ANY -- see
+	// SettleWater. The ice took the water it froze from, so for an instant the
+	// ground beneath it is dry.
+	SettleWater(Fluids);
+
+	// THE WATERLINE UNDER THE FLOE, not the highest point of the body. A field has
+	// a level per cell rather than one number, and the ice took a bite out of the
+	// middle -- so the rim it did not touch stands a little proud of the water
+	// flowing back in underneath. A floe floats on what is beneath IT, which is
+	// also the number its own buoyancy tick reads.
+	const float Waterline = Pool->GetSurfaceLevelAt(FVector2D::ZeroVector);
 
 	Floe->Tick(1.f);
 
@@ -1350,7 +1555,7 @@ bool FARPGFluidSinkTest::RunTest(const FString& Parameters)
 	Fluids->Solids = { IceDefinition };
 	Fluids->CombinationTable = MakeFreezeTable(Ice);
 
-	AARPGFluidPool* Pool = Fluids->Deposit(FVector(0, 0, 0), 400.f, TAG_Element_Water);
+	AARPGFluidRegion* Pool = Fluids->Deposit(FVector(0, 0, 0), 400.f, TAG_Element_Water);
 	UARPGElementalVolumeComponent* Shard = MakeShard(Scope.World, Ice, FVector(0, 0, 0), 200.f);
 	Fluids->TrySolidify(Pool->Volume, Shard);
 
@@ -1511,7 +1716,7 @@ bool FARPGFluidFloeStrandedTest::RunTest(const FString& Parameters)
 	Fluids->Solids = { MakeIce(Ice) };
 	Fluids->CombinationTable = MakeFreezeTable(Ice);
 
-	AARPGFluidPool* Pool = Fluids->Deposit(FVector(0, 0, 0), 300.f, TAG_Element_Water);
+	AARPGFluidRegion* Pool = Fluids->Deposit(FVector(0, 0, 0), 300.f, TAG_Element_Water);
 	UARPGElementalVolumeComponent* Shard = MakeShard(Scope.World, Ice, FVector(0, 0, 0), 120.f);
 	Fluids->TrySolidify(Pool->Volume, Shard);
 
@@ -1524,7 +1729,7 @@ bool FARPGFluidFloeStrandedTest::RunTest(const FString& Parameters)
 	// Boil the pool out from under it, which fire can now do.
 	Pool->Volume->Consume(Pool->Volume->GetEnergy(), Steam);
 
-	TestEqual(TEXT("The pool is gone"), Fluids->GetPools().Num(), 0);
+	TestEqual(TEXT("The pool is gone"), Fluids->GetRegions().Num(), 0);
 
 	// AND SO IS THE ICE. Nothing linked a floe's life to the water under it, so
 	// this used to leave a slab hanging in mid-air over dry ground. A floe is not
@@ -1573,8 +1778,8 @@ bool FARPGFluidHeavySolidTest::RunTest(const FString& Parameters)
 	Fluids->Solids = { Crust };
 	Fluids->CombinationTable = MakeFreezeTable(Earth, TAG_Element_Earth);
 
-	AARPGFluidPool* Pool = Fluids->Deposit(FVector(0, 0, 0), 400.f, TAG_Element_Water);
-	const double Bed = Pool->GroundHeight;
+	AARPGFluidRegion* Pool = Fluids->Deposit(FVector(0, 0, 0), 400.f, TAG_Element_Water);
+	const double Bed = Pool->GetGroundHeight();
 
 	UARPGElementalVolumeComponent* Agent = MakeShard(Scope.World, Earth, FVector(0, 0, 0), 200.f);
 	if (!Fluids->TrySolidify(Pool->Volume, Agent) || Fluids->GetSolids().Num() != 1)
@@ -1634,18 +1839,18 @@ bool FARPGFluidBudgetTest::RunTest(const FString& Parameters)
 		Fluids->Deposit(FVector(Index * 2000, 0, 0), 100.f + Index * 10.f, TAG_Element_Water);
 	}
 
-	TestEqual(TEXT("Twelve deposits made twelve bodies"), Fluids->GetPools().Num(), 12);
+	TestEqual(TEXT("Twelve deposits made twelve bodies"), Fluids->GetRegions().Num(), 12);
 
 	// The budget is applied on the simulation step rather than at the moment of
 	// depositing, so a burst of casts is never refused mid-fight -- it settles.
 	Fluids->StepSimulation(0.1f);
 
 	TestEqual(TEXT("The next step brings it back inside the budget"),
-		Fluids->GetPools().Num(), 5);
+		Fluids->GetRegions().Num(), 5);
 
 	// AND THE SMALLEST WENT. Cheapest to lose, least likely to be the one someone
 	// is standing in, and the deposits above got larger as they went.
-	for (AARPGFluidPool* Kept : Fluids->GetPools())
+	for (AARPGFluidRegion* Kept : Fluids->GetRegions())
 	{
 		TestTrue(TEXT("What survived is one of the larger bodies"),
 			Kept->GetArea() > ARPGFluidGeometry::PolygonArea(
@@ -1679,7 +1884,13 @@ bool FARPGFluidBudgetRiderTest::RunTest(const FString& Parameters)
 	Fluids->CombinationTable = MakeFreezeTable(Ice);
 
 	// The one that will be culled: smallest, and carrying a floe.
-	AARPGFluidPool* Doomed = Fluids->Deposit(FVector(0, 0, 0), 120.f, TAG_Element_Water);
+	//
+	// BIG ENOUGH TO SURVIVE BEING FROZEN ON. A 120 pool under a 100 shard is three
+	// cells across and a freeze takes every one of them -- so the pool was spent
+	// the moment the ice formed, and the floe it left behind was ROOTED on the bed
+	// rather than riding anything. There was nothing for the budget to cull, and
+	// nothing floating on it when it did.
+	AARPGFluidRegion* Doomed = Fluids->Deposit(FVector(0, 0, 0), 260.f, TAG_Element_Water);
 	UARPGElementalVolumeComponent* Shard = MakeShard(Scope.World, Ice, FVector(0, 0, 0), 100.f);
 	if (!Fluids->TrySolidify(Doomed->Volume, Shard) || Fluids->GetSolids().Num() != 1)
 	{
@@ -1695,9 +1906,9 @@ bool FARPGFluidBudgetRiderTest::RunTest(const FString& Parameters)
 	Fluids->MaxBodiesOfEachKind = 3;
 	Fluids->StepSimulation(0.1f);
 
-	TestEqual(TEXT("The smallest pool was culled"), Fluids->GetPools().Num(), 3);
+	TestEqual(TEXT("The smallest pool was culled"), Fluids->GetRegions().Num(), 3);
 	TestFalse(TEXT("And it was the one carrying the floe"),
-		Fluids->GetPools().Contains(Doomed));
+		Fluids->GetRegions().Contains(Doomed));
 
 	// A CULL IS NOT A RETIREMENT, but a floe is not an independent object either.
 	// Dropping the water and leaving the ice hanging over dry ground is the one
@@ -1799,15 +2010,20 @@ bool FARPGFluidConductChainTest::RunTest(const FString& Parameters)
 	// built out of puddles that genuinely do not overlap.
 	//
 	// Offset on both axes because conduction connects through the volumes' BOXES
-	// while merging asks about the outlines: for two circles side by side those
-	// are the same question, and on a diagonal they are not. 212 apart with a
-	// radius of 100 each is a gap between the discs and an overlap between the
-	// squares around them.
-	AARPGFluidPool* Near = Fluids->Deposit(FVector(0, 0, 0), 100.f, TAG_Element_Water);
-	AARPGFluidPool* Middle = Fluids->Deposit(FVector(150, 150, 0), 100.f, TAG_Element_Water);
-	AARPGFluidPool* Far = Fluids->Deposit(FVector(300, 300, 0), 100.f, TAG_Element_Water);
+	// while merging asks about the water itself: for two circles side by side
+	// those are the same question, and on a diagonal they are not. The boxes
+	// around them overlap while the discs do not touch.
+	//
+	// THE GAP HAS TO BE WIDER THAN A CELL. This used to be 150 on each axis,
+	// leaving twelve centimetres between the rims -- a real gap to a polygon and
+	// no gap at all to a forty-centimetre grid, which merged the chain into one
+	// body and was right to. 190 leaves about seventy, and the boxes still meet
+	// because they overlap while the axis separation is under 200.
+	AARPGFluidRegion* Near = Fluids->Deposit(FVector(0, 0, 0), 100.f, TAG_Element_Water);
+	AARPGFluidRegion* Middle = Fluids->Deposit(FVector(175, 175, 0), 100.f, TAG_Element_Water);
+	AARPGFluidRegion* Far = Fluids->Deposit(FVector(350, 350, 0), 100.f, TAG_Element_Water);
 
-	if (Fluids->GetPools().Num() != 3)
+	if (Fluids->GetRegions().Num() != 3)
 	{
 		AddError(TEXT("Setup: expected three separate pools."));
 		return false;
@@ -1887,7 +2103,7 @@ bool FARPGFluidNotThroughIceTest::RunTest(const FString& Parameters)
 	Reactions->CombinationTable = Table;
 	Conduction->CombinationTable = Table;
 
-	AARPGFluidPool* Pool = Fluids->Deposit(FVector(0, 0, 0), 300.f, TAG_Element_Water);
+	AARPGFluidRegion* Pool = Fluids->Deposit(FVector(0, 0, 0), 300.f, TAG_Element_Water);
 
 	// Freeze the middle of it into a floe you could stand on.
 	UARPGElementalVolumeComponent* Shard = MakeShard(Scope.World, Ice, FVector(0, 0, 0), 150.f);
@@ -1957,7 +2173,7 @@ bool FARPGFluidFreezeRiverTest::RunTest(const FString& Parameters)
 	UARPGElementalVolumeComponent* Shard = MakeShard(Scope.World, Ice, FVector(0, 0, 0), 150.f);
 
 	// THE CASE THAT USED TO FAIL. TrySolidify required one side to literally be an
-	// AARPGFluidPool, so a river fell through to an ordinary energy trade and an
+	// AARPGFluidRegion, so a river fell through to an ordinary energy trade and an
 	// ice shard into it made ice and no floe.
 	TestTrue(TEXT("Ice meeting a river freezes it"), Fluids->TrySolidify(River, Shard));
 	TestEqual(TEXT("Producing one floe"), Fluids->GetSolids().Num(), 1);
@@ -1966,7 +2182,7 @@ bool FARPGFluidFreezeRiverTest::RunTest(const FString& Parameters)
 	// else in the codebase -- Consume already refuses to spend one, and there is a
 	// reaction test named for it. Freezing was the path that forgot.
 	TestEqual(TEXT("A river does not run out"), River->GetEnergy(), 10000.f);
-	TestEqual(TEXT("And no pool was invented to hold it"), Fluids->GetPools().Num(), 0);
+	TestEqual(TEXT("And no pool was invented to hold it"), Fluids->GetRegions().Num(), 0);
 
 	// Freezing it again still works, because there is still a river there.
 	UARPGElementalVolumeComponent* Second = MakeShard(Scope.World, Ice, FVector(600, 0, 0), 150.f);
@@ -2061,7 +2277,7 @@ bool FARPGFluidReservoirPoolTest::RunTest(const FString& Parameters)
 	Fluids->Solids = { MakeIce(Ice) };
 	Fluids->CombinationTable = MakeFreezeTable(Ice);
 
-	AARPGFluidPool* Lake = Fluids->Deposit(FVector(0, 0, 0), 400.f, TAG_Element_Water);
+	AARPGFluidRegion* Lake = Fluids->Deposit(FVector(0, 0, 0), 400.f, TAG_Element_Water);
 	if (!Lake)
 	{
 		AddError(TEXT("Setup: no lake was deposited."));
@@ -2079,7 +2295,7 @@ bool FARPGFluidReservoirPoolTest::RunTest(const FString& Parameters)
 	// shrink -- and destroy, once enough had been frozen off -- a body it had
 	// already agreed could not run out.
 	TestEqual(TEXT("A lake is not shrunk by freezing"), Lake->GetArea(), Before, 1.0);
-	TestEqual(TEXT("And is still there"), Fluids->GetPools().Num(), 1);
+	TestEqual(TEXT("And is still there"), Fluids->GetRegions().Num(), 1);
 
 	return true;
 }
@@ -2111,7 +2327,7 @@ bool FARPGFluidSurfaceTest::RunTest(const FString& Parameters)
 	WaterDefinition->SurfaceMaterial = UMaterial::GetDefaultMaterial(MD_Surface);
 	Fluids->Definitions = { WaterDefinition };
 
-	AARPGFluidPool* Pool = Fluids->Deposit(FVector(0, 0, 0), 200.f, TAG_Element_Water);
+	AARPGFluidRegion* Pool = Fluids->Deposit(FVector(0, 0, 0), 200.f, TAG_Element_Water);
 	if (!Pool)
 	{
 		AddError(TEXT("Setup: no pool was deposited."));
@@ -2139,72 +2355,100 @@ bool FARPGFluidSurfaceTest::RunTest(const FString& Parameters)
 	// Eroded to nothing: the surface has to GO. The subsystem destroys a pool this
 	// small, but a client sees the emptied outline replicate first, and a bare
 	// early return there leaves a puddle hanging in the air until it catches up.
-	Pool->SetRing(TArray<FVector2D>());
-	TestEqual(TEXT("An outline with nothing left draws nothing"),
-		Pool->GetSurfaceTriangleCount(), 0);
+	// ERODED TO NOTHING: THE BODY HAS TO GO, and now that is the same statement as
+	// "there are no wet cells there". A proxy does not decide it has stopped
+	// existing -- the reconcile finds nothing where it was and drops the actor --
+	// so this asserts on the register rather than on the mesh.
+	Fluids->ResetFluid();
+
+	TestEqual(TEXT("Water taken away leaves no body behind"),
+		Fluids->GetRegions().Num(), 0);
 
 	return true;
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFluidReplicationTest,
-	"ARPG.World.Fluid.Surface.TheOutlineIsAllThatTravels",
+// THE REPLICATION TEST IS GONE, DELIBERATELY, and this note is here so that
+// nobody restores it. It asserted that a body handed only its replicated state --
+// a ring and a ground height -- rebuilt its own surface and collision from them,
+// which was the central claim of the polygon model: send the outline, derive
+// everything else.
+//
+// A field is not replicated at all. It is a local consequence of a simulation the
+// server runs, and there is nothing in it a client could not derive from level
+// geometry it already has. Rewriting the test would mean inventing a contract
+// that does not exist. If multiplayer comes back, what replicates is the deposits
+// and the reactions that caused the water, not the water.
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FARPGFluidPresentationIsInertTest,
+	"ARPG.World.Fluid.Surface.DrawingTheWaterChangesNothingAboutIt",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FARPGFluidReplicationTest::RunTest(const FString& Parameters)
+bool FARPGFluidPresentationIsInertTest::RunTest(const FString& Parameters)
 {
 	using namespace ARPGFluidTestUtils;
-	FTestWorld Scope;
 
-	// NOTHING SENDS MESH DATA. A client is given the outline, the ground height
-	// and the definition, and everything it draws and walks on is rebuilt from
-	// those three -- so they are the three that have to carry the Net flag. This
-	// asserts the wiring, because the failure mode is silent: the actor still
-	// replicates, the client just receives an empty ring and renders nothing.
-	for (const TCHAR* Name : { TEXT("Ring"), TEXT("GroundHeight") })
-	{
-		const FProperty* Property = AARPGSurfaceBody::StaticClass()->FindPropertyByName(Name);
-		TestTrue(FString::Printf(TEXT("A body replicates its %s"), Name),
-			Property && Property->HasAnyPropertyFlags(CPF_Net));
-	}
+	// THE CLAIM THE WHOLE SPLIT RESTS ON, asserted rather than believed: the
+	// picture cannot affect the thing it is a picture of. Everything in
+	// UARPGFluidPresentationSubsystem is downstream of the field and nothing reads
+	// back from it, so switching it on has to leave every number identical.
+	//
+	// Worth a test rather than a comment because the failure is silent and
+	// arbitrarily far away: the day something starts asking the sheet where the
+	// water is, gameplay begins depending on a GPU simulation that does not run
+	// under -nullrhi, does not run on a server, and is not deterministic anywhere.
+	auto Run = [](bool bPresenting, double& OutVolume, int32& OutBodies, float& OutDepth)
+		{
+			IConsoleVariable* Switch =
+				IConsoleManager::Get().FindConsoleVariable(TEXT("ARPG.Fluid.Presentation"));
 
-	const FProperty* PoolDefinition = AARPGFluidPool::StaticClass()->FindPropertyByName(TEXT("Definition"));
-	TestTrue(TEXT("A pool replicates its definition"),
-		PoolDefinition && PoolDefinition->HasAnyPropertyFlags(CPF_Net));
+			if (Switch)
+			{
+				Switch->Set(bPresenting ? 1 : 0);
+			}
 
-	// A SOLID NEEDS THREE MORE, and between them they are still a few dozen bytes.
-	// This used to be a heightfield -- thousands of cells, run-length encoded and
-	// still the heaviest payload in the game, resent every time any of it melted.
-	// What a client needs now is the shape, the gap through it, and where that
-	// shape is standing.
-	for (const TCHAR* Name : { TEXT("Hole"), TEXT("SlabOrigin"), TEXT("SlabYaw") })
-	{
-		const FProperty* Property = AARPGSolidBody::StaticClass()->FindPropertyByName(Name);
-		TestTrue(FString::Printf(TEXT("A solid replicates its %s"), Name),
-			Property && Property->HasAnyPropertyFlags(CPF_Net));
-	}
+			FTestWorld Scope;
+			MakeGround(Scope.World, 0.f);
 
-	const FProperty* SolidDefinition =
-		AARPGSolidBody::StaticClass()->FindPropertyByName(TEXT("Definition"));
-	TestTrue(TEXT("And its definition, which is what says how thick it is"),
-		SolidDefinition && SolidDefinition->HasAnyPropertyFlags(CPF_Net));
+			UARPGFluidSurfaceSubsystem* Fluids =
+				Scope.World->GetSubsystem<UARPGFluidSurfaceSubsystem>();
 
-	// And the rebuild genuinely needs nothing else. Setup is server-only, so this
-	// assigns exactly what replication would and asks the body to build itself.
-	UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+			UARPGMagicElement* Water = MakeElement(GetTransientPackage(), TAG_Element_Water);
+			UARPGFluidDefinition* Definition = MakeWater(GetTransientPackage(), Water);
+			Definition->EvaporationRate = 0.f;
+			Fluids->Definitions = { Definition };
 
-	FActorSpawnParameters Params;
-	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-	AARPGFluidPool* Pool = Scope.World->SpawnActor<AARPGFluidPool>(
-		AARPGFluidPool::StaticClass(), FTransform::Identity, Params);
+			Fluids->Deposit(FVector(0, 0, 0), 250.f, TAG_Element_Water);
+			Fluids->Deposit(FVector(900, 0, 0), 150.f, TAG_Element_Water);
 
-	Pool->Definition = MakeWater(GetTransientPackage(), Water);
-	Pool->GroundHeight = 250.f;
-	Pool->SetRing(ARPGFluidGeometry::MakeCircle(FVector2D(400, 0), 150.0));
+			for (int32 Step = 0; Step < 12; ++Step)
+			{
+				Scope.World->GetSubsystem<UARPGFluidPresentationSubsystem>();
+				Fluids->StepSimulation(0.25f);
+			}
 
-	TestTrue(TEXT("A body given only replicated state draws itself"),
-		Pool->GetSurfaceTriangleCount() > 0);
-	TestEqual(TEXT("At the height it was told"), Pool->GetActorLocation().Z, 250.0, 1.0);
-	TestTrue(TEXT("And knows where it is"), Pool->ContainsPoint(FVector(400, 0, 250)));
+			OutVolume = Fluids->GetFieldVolume(TAG_Element_Water);
+			OutBodies = Fluids->GetRegions().Num();
+			OutDepth = Fluids->GetFieldDepthAt(FVector(0, 0, 0), TAG_Element_Water);
+
+			if (Switch)
+			{
+				Switch->Set(0);
+			}
+		};
+
+	double VolumeOff = 0.0, VolumeOn = 0.0;
+	int32 BodiesOff = 0, BodiesOn = 0;
+	float DepthOff = 0.f, DepthOn = 0.f;
+
+	Run(false, VolumeOff, BodiesOff, DepthOff);
+	Run(true, VolumeOn, BodiesOn, DepthOn);
+
+	// EXACT. Not close -- there is no path by which drawing could round anything.
+	TestEqual(TEXT("The same water is in the world either way"), VolumeOn, VolumeOff, 0.0);
+	TestEqual(TEXT("In the same number of bodies"), BodiesOn, BodiesOff);
+	TestEqual(TEXT("At the same depth"), DepthOn, DepthOff, 0.f);
+
+	TestTrue(TEXT("Setup: there was something to draw"), VolumeOff > 0.0 && BodiesOff > 0);
 
 	return true;
 }
@@ -2297,22 +2541,22 @@ bool FARPGFluidCastDepositTest::RunTest(const FString& Parameters)
 		/*Origin=*/FVector(0, 0, 150), /*FinishedAt=*/FVector(400, 0, 150), /*Radius=*/120.f);
 
 	TestEqual(TEXT("Nothing pools while the spell is still in the air"),
-		Fluids->GetPools().Num(), 0);
+		Fluids->GetRegions().Num(), 0);
 
 	Bolt->Destroy();
 
-	TestEqual(TEXT("Finishing leaves one body"), Fluids->GetPools().Num(), 1);
+	TestEqual(TEXT("Finishing leaves one body"), Fluids->GetRegions().Num(), 1);
 
-	if (Fluids->GetPools().Num() != 1)
+	if (Fluids->GetRegions().Num() != 1)
 	{
 		return false;
 	}
 
-	AARPGFluidPool* Pool = Fluids->GetPools()[0];
+	AARPGFluidRegion* Pool = Fluids->GetRegions()[0];
 
 	// ON THE GROUND, not at the height the spell died at. Without the probe the
 	// puddle forms at chest height and floats.
-	TestEqual(TEXT("At ground level"), Pool->GroundHeight, 0.f, 1.f);
+	TestEqual(TEXT("At ground level"), Pool->GetGroundHeight(), 0.f, 1.f);
 	TestTrue(TEXT("And under where the spell finished"),
 		Pool->ContainsPoint(FVector(400, 0, 0)));
 
@@ -2327,14 +2571,14 @@ bool FARPGFluidCastDepositTest::RunTest(const FString& Parameters)
 	// deposit goes through.
 	MakeCastSpell(Scope.World, Water, FVector(0, 0, 150), FVector(430, 0, 150), 120.f)->Destroy();
 	TestEqual(TEXT("A second cast nearby merges rather than stacking"),
-		Fluids->GetPools().Num(), 1);
+		Fluids->GetRegions().Num(), 1);
 
 	// The knob is a radius and 0 is the default, so most spells leave nothing
 	// without anyone having to opt them out.
 	MakeCastSpell(Scope.World, Water, FVector(0, 0, 150), FVector(3000, 0, 150),
 		/*Radius=*/0.f)->Destroy();
 	TestEqual(TEXT("A spell with no deposit radius leaves nothing"),
-		Fluids->GetPools().Num(), 1);
+		Fluids->GetRegions().Num(), 1);
 
 	return true;
 }
@@ -2365,7 +2609,7 @@ bool FARPGFluidCastOverSlabTest::RunTest(const FString& Parameters)
 	Fluids->Solids = { IceDefinition };
 	Fluids->CombinationTable = MakeFreezeTable(Ice);
 
-	AARPGFluidPool* Pool = Fluids->Deposit(FVector(0, 0, 0), 600.f, TAG_Element_Water);
+	AARPGFluidRegion* Pool = Fluids->Deposit(FVector(0, 0, 0), 600.f, TAG_Element_Water);
 	UARPGElementalVolumeComponent* Shard = MakeShard(Scope.World, Ice, FVector(0, 0, 0), 300.f);
 
 	if (!Fluids->TrySolidify(Pool->Volume, Shard) || Fluids->GetSolids().Num() != 1)
@@ -2375,7 +2619,13 @@ bool FARPGFluidCastOverSlabTest::RunTest(const FString& Parameters)
 	}
 
 	AARPGSolidBody* Floe = Fluids->GetSolids()[0];
-	const int32 PoolsBefore = Fluids->GetPools().Num();
+
+	// LET THE WATER CLOSE OVER THE GROUND THE ICE TOOK before counting bodies --
+	// see SettleWater. Until it has, the cells under the floe are dry, and water
+	// landing on them is an island rather than part of the pool around it.
+	SettleWater(Fluids);
+
+	const int32 PoolsBefore = Fluids->GetRegions().Num();
 
 	// A SLAB IS NOT GROUND. It blocks every channel because you stand on it, so
 	// the deposit probe used to hit the ICE and leave a puddle on top of the floe
@@ -2385,13 +2635,15 @@ bool FARPGFluidCastOverSlabTest::RunTest(const FString& Parameters)
 	MakeCastSpell(Scope.World, Water, FVector(0, 0, 400), FVector(0, 0, 400),
 		/*Radius=*/100.f)->Destroy();
 
-	TestEqual(TEXT("It merged into the water under the floe"),
-		Fluids->GetPools().Num(), PoolsBefore);
+	SettleWater(Fluids);
 
-	for (const AARPGFluidPool* Wet : Fluids->GetPools())
+	TestEqual(TEXT("It merged into the water under the floe"),
+		Fluids->GetRegions().Num(), PoolsBefore);
+
+	for (const AARPGFluidRegion* Wet : Fluids->GetRegions())
 	{
 		TestTrue(TEXT("And no body sits at the height of the ice"),
-			Wet->GroundHeight < Floe->GetSurfaceHeight() - 1.f);
+			Wet->GetGroundHeight() < Floe->GetSurfaceHeight() - 1.f);
 	}
 
 	return true;
@@ -2422,22 +2674,22 @@ bool FARPGFluidCastNoDefinitionTest::RunTest(const FString& Parameters)
 	// list of wet elements out of the codebase entirely.
 	MakeCastSpell(Scope.World, Fire, FVector(0, 0, 150), FVector(0, 0, 150), 120.f)->Destroy();
 	TestEqual(TEXT("An element with no fluid definition leaves nothing"),
-		Fluids->GetPools().Num(), 0);
+		Fluids->GetRegions().Num(), 0);
 
 	MakeCastSpell(Scope.World, Water, FVector(0, 0, 150), FVector(0, 0, 150), 120.f)->Destroy();
 	TestEqual(TEXT("And the same spell of an element that pools does"),
-		Fluids->GetPools().Num(), 1);
+		Fluids->GetRegions().Num(), 1);
 
 	// Expired high above the floor: past MaxDepositDrop it wet nothing, which is
 	// an outcome and not a failure.
 	MakeCastSpell(Scope.World, Water, FVector(0, 0, 150),
 		FVector(2000, 0, Fluids->MaxDepositDrop + 500.f), 120.f)->Destroy();
 	TestEqual(TEXT("A spell that expired far above the ground leaves nothing"),
-		Fluids->GetPools().Num(), 1);
+		Fluids->GetRegions().Num(), 1);
 
 	// And out past the floor entirely, where the probe finds no ground at all.
 	MakeCastSpell(Scope.World, Water, FVector(0, 0, 150), FVector(50000, 0, 150), 120.f)->Destroy();
-	TestEqual(TEXT("Nor does one that finished over a drop"), Fluids->GetPools().Num(), 1);
+	TestEqual(TEXT("Nor does one that finished over a drop"), Fluids->GetRegions().Num(), 1);
 
 	return true;
 }
@@ -2467,14 +2719,14 @@ bool FARPGFluidCastSweptTest::RunTest(const FString& Parameters)
 
 	Jet->Destroy();
 
-	TestEqual(TEXT("A jet leaves one body"), Fluids->GetPools().Num(), 1);
+	TestEqual(TEXT("A jet leaves one body"), Fluids->GetRegions().Num(), 1);
 
-	if (Fluids->GetPools().Num() != 1)
+	if (Fluids->GetRegions().Num() != 1)
 	{
 		return false;
 	}
 
-	AARPGFluidPool* Pool = Fluids->GetPools()[0];
+	AARPGFluidRegion* Pool = Fluids->GetRegions()[0];
 
 	TestTrue(TEXT("Covering where it was cast"), Pool->ContainsPoint(FVector(0, 0, 0)));
 	TestTrue(TEXT("And the whole way along"), Pool->ContainsPoint(FVector(300, 0, 0)));
@@ -2532,7 +2784,7 @@ bool FARPGFluidSolidifyTest::RunTest(const FString& Parameters)
 	Fluids->Solids = { IceDefinition };
 	Fluids->CombinationTable = Table;
 
-	AARPGFluidPool* Pool = Fluids->Deposit(FVector(0, 0, 0), 300.f, TAG_Element_Water);
+	AARPGFluidRegion* Pool = Fluids->Deposit(FVector(0, 0, 0), 300.f, TAG_Element_Water);
 	TestNotNull(TEXT("Setup: a pool exists"), Pool);
 	const double PoolArea = Pool->GetArea();
 
@@ -2582,7 +2834,7 @@ bool FARPGFluidSolidifyTest::RunTest(const FString& Parameters)
 
 	// The fluid is genuinely used up -- and the pool keeps its SHAPE rather than
 	// gaining a hole, because a liquid flows back over a hole cut in it.
-	if (Fluids->GetPools().Num() > 0)
+	if (Fluids->GetRegions().Num() > 0)
 	{
 		TestTrue(TEXT("The pool lost the frozen area"), Pool->GetArea() < PoolArea);
 	}
@@ -2665,7 +2917,7 @@ bool FARPGFluidSolidifyThroughReactionTest::RunTest(const FString& Parameters)
 	Fluids->CombinationTable = Table;
 	Reactions->CombinationTable = Table;
 
-	AARPGFluidPool* Pool = Fluids->Deposit(FVector(0, 0, 0), 300.f, TAG_Element_Water);
+	AARPGFluidRegion* Pool = Fluids->Deposit(FVector(0, 0, 0), 300.f, TAG_Element_Water);
 	TestNotNull(TEXT("Setup: a puddle exists"), Pool);
 	if (!Pool)
 	{
@@ -2721,7 +2973,7 @@ bool FARPGFluidSolidifyThroughReactionTest::RunTest(const FString& Parameters)
 	// is the whole pool -- ConsumeSurfaceArea finishes it, the pool retires, and
 	// retiring a pool drops everything floating on it. The slab was floating on
 	// it, because it had just been made from it.
-	TestEqual(TEXT("Having used the whole puddle up"), Fluids->GetPools().Num(), 0);
+	TestEqual(TEXT("Having used the whole puddle up"), Fluids->GetRegions().Num(), 0);
 
 	// ROOTED, NOT RIDING. What a slab that consumed its own pool is standing on
 	// is the bed, and a null FloatsOn is how this codebase says so -- it is also
@@ -2772,7 +3024,7 @@ bool FARPGFluidFrozenPuddleStandsOnTheBedTest::RunTest(const FString& Parameters
 
 	MakeGround(Scope.World, 0.f);
 
-	AARPGFluidPool* Pool = Fluids->Deposit(FVector(0, 0, 0), 200.f, TAG_Element_Water);
+	AARPGFluidRegion* Pool = Fluids->Deposit(FVector(0, 0, 0), 200.f, TAG_Element_Water);
 	TestNotNull(TEXT("Setup: a puddle exists"), Pool);
 	if (!Pool)
 	{
@@ -2807,7 +3059,7 @@ bool FARPGFluidFrozenPuddleStandsOnTheBedTest::RunTest(const FString& Parameters
 	ShardVolume->SetEnergy(50.f);
 
 	TestTrue(TEXT("The whole puddle freezes"), Fluids->TrySolidify(Pool->Volume, ShardVolume));
-	TestEqual(TEXT("Leaving no water behind"), Fluids->GetPools().Num(), 0);
+	TestEqual(TEXT("Leaving no water behind"), Fluids->GetRegions().Num(), 0);
 	TestEqual(TEXT("And one slab"), Fluids->GetSolids().Num(), 1);
 
 	if (Fluids->GetSolids().Num() == 0)
@@ -2880,7 +3132,7 @@ bool FARPGFluidOffCentreTest::RunTest(const FString& Parameters)
 	MakeGround(Scope.World, 0.f);
 
 	// A BIG pool, and the caster standing well off to one side of it.
-	AARPGFluidPool* Pool = Fluids->Deposit(FVector(0, 0, 0), 600.f, TAG_Element_Water);
+	AARPGFluidRegion* Pool = Fluids->Deposit(FVector(0, 0, 0), 600.f, TAG_Element_Water);
 	const double PoolArea = Pool->GetArea();
 	const TArray<FVector2D> PoolRing = Pool->GetRing();
 
@@ -2950,12 +3202,12 @@ bool FARPGFluidOffCentreTest::RunTest(const FString& Parameters)
 
 	// AND THE REST OF THE PUDDLE IS STILL THERE. The cascade's signature is a pool
 	// that vanishes from a single cast that only touched a corner of it.
-	TestEqual(TEXT("The puddle survives"), Fluids->GetPools().Num(), 1);
+	TestEqual(TEXT("The puddle survives"), Fluids->GetRegions().Num(), 1);
 
-	if (Fluids->GetPools().Num() > 0)
+	if (Fluids->GetRegions().Num() > 0)
 	{
 		TestTrue(TEXT("Having lost only what froze"),
-			Fluids->GetPools()[0]->GetArea() > PoolArea * 0.8);
+			Fluids->GetRegions()[0]->GetArea() > PoolArea * 0.8);
 	}
 
 	// Let it settle: the floe rides the pool it froze out of, and a rider that
@@ -2964,7 +3216,7 @@ bool FARPGFluidOffCentreTest::RunTest(const FString& Parameters)
 	Scope.World->Tick(LEVELTICK_All, 0.1f);
 
 	TestEqual(TEXT("And nothing else freezes afterwards"), Fluids->GetSolids().Num(), 1);
-	TestEqual(TEXT("With the puddle still there"), Fluids->GetPools().Num(), 1);
+	TestEqual(TEXT("With the puddle still there"), Fluids->GetRegions().Num(), 1);
 
 	return true;
 }
@@ -2994,7 +3246,7 @@ bool FARPGFluidFreezeCutsTheWaterTest::RunTest(const FString& Parameters)
 
 	MakeGround(Scope.World, 0.f);
 
-	AARPGFluidPool* Pool = Fluids->Deposit(FVector(0, 0, 0), 400.f, TAG_Element_Water);
+	AARPGFluidRegion* Pool = Fluids->Deposit(FVector(0, 0, 0), 400.f, TAG_Element_Water);
 	TestNotNull(TEXT("Setup: a puddle exists"), Pool);
 	if (!Pool)
 	{
@@ -3018,7 +3270,7 @@ bool FARPGFluidFreezeCutsTheWaterTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("It freezes"), Fluids->TrySolidify(Pool->Volume, Shard));
 	TestEqual(TEXT("Into one slab"), Fluids->GetSolids().Num(), 1);
 
-	if (Fluids->GetPools().Num() == 0)
+	if (Fluids->GetRegions().Num() == 0)
 	{
 		AddError(TEXT("The puddle should have survived a bite out of its rim."));
 		return false;
@@ -3329,9 +3581,9 @@ bool FARPGFireOnEarthTest::RunTest(const FString& Parameters)
 
 	// --- AND THE LAVA ----------------------------------------------------------
 
-	TestEqual(TEXT("It leaves exactly one body of lava"), Fluids->GetPools().Num(), 1);
+	TestEqual(TEXT("It leaves exactly one body of lava"), Fluids->GetRegions().Num(), 1);
 
-	if (Fluids->GetPools().Num() != 1)
+	if (Fluids->GetRegions().Num() != 1)
 	{
 		return false;
 	}
@@ -3342,14 +3594,14 @@ bool FARPGFireOnEarthTest::RunTest(const FString& Parameters)
 	const double Removed = PI * Crater.Radius * Crater.Radius * Crater.Depth * 0.5;
 	const double Expected = Removed * EarthDefinition->Density / LavaDefinition->Density;
 
-	const double Poured = Fluids->GetPools()[0]->GetArea() * LavaDefinition->Depth;
+	const double Poured = Fluids->GetRegions()[0]->GetArea() * LavaDefinition->Depth;
 
 	TestTrue(FString::Printf(
 		TEXT("The lava is the rock that melted, not the size of the spell (%.0f against %.0f)"),
 		Poured, Expected), FMath::Abs(Poured - Expected) < Expected * 0.15);
 
 	TestTrue(TEXT("Which is nowhere near the size of the slab"),
-		Fluids->GetPools()[0]->GetArea() < SlabArea);
+		Fluids->GetRegions()[0]->GetArea() < SlabArea);
 
 	// AND THE LEDGER SAYS SO, which is the half of this the pool count cannot
 	// show. The reaction's own product deposits the SAME fluid when its discharge
@@ -3444,14 +3696,14 @@ bool FARPGReactionOnTheRimTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Where the spell hit it"),
 		Slab->BiteDepthAt(FVector2D(Contact.X, Contact.Y)) > 0.f);
 
-	TestEqual(TEXT("And it leaves one body of lava"), Fluids->GetPools().Num(), 1);
+	TestEqual(TEXT("And it leaves one body of lava"), Fluids->GetRegions().Num(), 1);
 
-	if (Fluids->GetPools().Num() == 1)
+	if (Fluids->GetRegions().Num() == 1)
 	{
 		// NEAR THE CRATER. It used to appear wherever the spell's centre happened
 		// to be, which for a rim hit is off the edge of the slab entirely.
 		const FVector2D Pooled = ARPGFluidGeometry::PolygonCentroid(
-			Fluids->GetPools()[0]->GetRing());
+			Fluids->GetRegions()[0]->GetRing());
 
 		TestTrue(TEXT("Lying where the rock melted"),
 			FVector2D::Distance(Pooled, FVector2D(Contact.X, Contact.Y)) < 150.0);
@@ -3477,7 +3729,7 @@ bool FARPGFluidNoRowTest::RunTest(const FString& Parameters)
 	Fluids->Definitions = { MakeWater(GetTransientPackage(), Water) };
 	Fluids->CombinationTable = NewObject<UARPGMagicCombinationTable>();
 
-	AARPGFluidPool* Pool = Fluids->Deposit(FVector(0, 0, 0), 300.f, TAG_Element_Water);
+	AARPGFluidRegion* Pool = Fluids->Deposit(FVector(0, 0, 0), 300.f, TAG_Element_Water);
 
 	FActorSpawnParameters Params;
 	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
@@ -3620,7 +3872,7 @@ bool FARPGPoolStopsAtALedgeTest::RunTest(const FString& Parameters)
 	// Cast ON the platform, one radius back from the lip, so half the disc would
 	// reach out over the drop.
 	const float Radius = 200.f;
-	AARPGFluidPool* Pool = Fluids->Deposit(FVector(-100.f, 0.f, 0.f), Radius, TAG_Element_Water);
+	AARPGFluidRegion* Pool = Fluids->Deposit(FVector(-100.f, 0.f, 0.f), Radius, TAG_Element_Water);
 
 	if (!Pool)
 	{
@@ -3698,7 +3950,7 @@ bool FARPGPoolOnFlatGroundTest::RunTest(const FString& Parameters)
 	Floor->SetCollisionResponseToAllChannels(ECR_Block);
 
 	const float Radius = 200.f;
-	AARPGFluidPool* Pool = Fluids->Deposit(FVector::ZeroVector, Radius, TAG_Element_Water);
+	AARPGFluidRegion* Pool = Fluids->Deposit(FVector::ZeroVector, Radius, TAG_Element_Water);
 
 	if (!Pool)
 	{
@@ -3712,8 +3964,19 @@ bool FARPGPoolOnFlatGroundTest::RunTest(const FString& Parameters)
 	const double Asked = ARPGFluidGeometry::PolygonArea(
 		ARPGFluidGeometry::MakeCircle(FVector2D::ZeroVector, Radius));
 
-	TestEqual(TEXT("An unobstructed puddle is exactly what was asked for"),
-		ARPGFluidGeometry::PolygonArea(Pool->GetRing()), Asked, Asked * 0.01);
+	// A RASTERISED DISC, so it is the disc plus at most the ring of cells its edge
+	// passes through -- never less, because a cell whose centre is inside is taken
+	// whole. Asserting equality to a hundredth of a percent was possible when the
+	// footprint WAS the polygon; it is not a claim a grid can make, and demanding
+	// it would only be demanding a finer grid.
+	const double Got = ARPGFluidGeometry::PolygonArea(Pool->GetRing());
+	const double Cell = 3840.0 / 96.0;
+	const double Rim = 2.0 * PI * Radius * Cell;
+
+	TestTrue(FString::Printf(TEXT("An unobstructed puddle covers the whole footprint (%.0f vs %.0f)"),
+		Got, Asked), Got >= Asked - Rim);
+	TestTrue(FString::Printf(TEXT("And does not spill past a cell beyond it (%.0f vs %.0f)"),
+		Got, Asked), Got <= Asked + Rim);
 
 	return true;
 }
@@ -3782,7 +4045,7 @@ bool FARPGPoolFollowsASlopeTest::RunTest(const FString& Parameters)
 
 	// Cast in the middle, so the disc reaches well up the ramp and well down it.
 	const float Radius = 250.f;
-	AARPGFluidPool* Pool = Fluids->Deposit(FVector(0.f, 0.f, -Fall * 0.5f), Radius,
+	AARPGFluidRegion* Pool = Fluids->Deposit(FVector(0.f, 0.f, -Fall * 0.5f), Radius,
 		TAG_Element_Water);
 
 	if (!Pool)
@@ -3812,6 +4075,8 @@ bool FARPGPoolFollowsASlopeTest::RunTest(const FString& Parameters)
 
 	// EVERYWHERE, not just at the ends: the surface tracks the floor at a constant
 	// depth rather than tilting by some amount of its own.
+	TArray<float> Depths;
+
 	for (float X = -200.f; X <= 200.f; X += 50.f)
 	{
 		const FVector2D At(X, 0.f);
@@ -3826,9 +4091,26 @@ bool FARPGPoolFollowsASlopeTest::RunTest(const FString& Parameters)
 		TestEqual(FString::Printf(TEXT("The bed follows the floor at (%.0f, 0)"), X),
 			Pool->GetSurfaceBedAt(At), Floor, 8.f);
 
-		TestEqual(FString::Printf(TEXT("And the surface rides its own depth above it at (%.0f, 0)"), X),
-			Pool->GetSurfaceLevelAt(At) - Pool->GetSurfaceBedAt(At), WaterDefinition->Depth, 0.1f);
+		// A CONSTANT DEPTH, NOT THE DEFINITION'S DEPTH. Depth used to be exactly
+		// what a body was laid at and stayed there, because a polygon pool had no
+		// way to be any other thickness. A field settles: the deposit lays roughly
+		// that much and the solver then evens it out over whatever ground it
+		// reached, so the number is close to but not equal to what was asked for.
+		//
+		// What the test is actually about survives unchanged -- the surface tracks
+		// the floor rather than tilting by some amount of its own -- and it is
+		// stated as the depths agreeing with EACH OTHER, which is the claim.
+		Depths.Add(Pool->GetSurfaceLevelAt(At) - Pool->GetSurfaceBedAt(At));
 	}
+
+	for (float Depth : Depths)
+	{
+		TestEqual(TEXT("The surface rides the same depth above the floor everywhere"),
+			Depth, Depths[0], 1.f);
+	}
+
+	TestTrue(TEXT("And that depth is roughly what was poured"),
+		Depths[0] > WaterDefinition->Depth * 0.5f && Depths[0] < WaterDefinition->Depth * 2.f);
 
 	// THE DRAWN MESH FOLLOWS IT TOO, which is the part the player sees and the
 	// only part none of the above can speak for -- the height queries answer from
@@ -3894,7 +4176,7 @@ bool FARPGPoolStillStopsAtACliffTest::RunTest(const FString& Parameters)
 	Lower->SetCollisionResponseToAllChannels(ECR_Block);
 
 	const float Radius = 250.f;
-	AARPGFluidPool* Pool = Fluids->Deposit(FVector(-100.f, 0.f, 0.f), Radius, TAG_Element_Water);
+	AARPGFluidRegion* Pool = Fluids->Deposit(FVector(-100.f, 0.f, 0.f), Radius, TAG_Element_Water);
 
 	if (!Pool)
 	{
@@ -3968,7 +4250,7 @@ bool FARPGPoolsOnTwoFloorsTest::RunTest(const FString& Parameters)
 
 	// A puddle on the platform first, so there is something for the next cast to
 	// be wrongly swallowed by.
-	AARPGFluidPool* Upstairs = Fluids->Deposit(FVector(-300.f, 0.f, 0.f), 150.f, TAG_Element_Water);
+	AARPGFluidRegion* Upstairs = Fluids->Deposit(FVector(-300.f, 0.f, 0.f), 150.f, TAG_Element_Water);
 
 	if (!Upstairs)
 	{
@@ -3982,8 +4264,8 @@ bool FARPGPoolsOnTwoFloorsTest::RunTest(const FString& Parameters)
 	// NOW CAST DOWNSTAIRS, under the balcony. In plan this lands right beside the
 	// puddle above -- inside its bounds plus the merge distance -- which used to
 	// be the entire test for "these are the same puddle".
-	const int32 Before = Fluids->GetPools().Num();
-	AARPGFluidPool* Downstairs = Fluids->Deposit(FVector(-300.f, 0.f, -400.f), 150.f,
+	const int32 Before = Fluids->GetRegions().Num();
+	AARPGFluidRegion* Downstairs = Fluids->Deposit(FVector(-300.f, 0.f, -400.f), 150.f,
 		TAG_Element_Water);
 
 	if (!Downstairs)
@@ -3994,7 +4276,7 @@ bool FARPGPoolsOnTwoFloorsTest::RunTest(const FString& Parameters)
 
 	// A SECOND BODY, not a bigger first one.
 	TestEqual(TEXT("The lower level gets a puddle of its own"),
-		Fluids->GetPools().Num(), Before + 1);
+		Fluids->GetRegions().Num(), Before + 1);
 	TestTrue(TEXT("Which is not the one upstairs"), Downstairs != Upstairs);
 
 	// AND IT IS WHERE THE SPELL WAS. This is the report: the water appeared at the
@@ -4012,11 +4294,11 @@ bool FARPGPoolsOnTwoFloorsTest::RunTest(const FString& Parameters)
 
 	// Two puddles on the SAME floor still merge, which is the behaviour the height
 	// test must not have broken.
-	const int32 Now = Fluids->GetPools().Num();
+	const int32 Now = Fluids->GetRegions().Num();
 	Fluids->Deposit(FVector(-200.f, 0.f, -400.f), 150.f, TAG_Element_Water);
 
 	TestEqual(TEXT("But a second puddle beside it on the same floor still merges"),
-		Fluids->GetPools().Num(), Now);
+		Fluids->GetRegions().Num(), Now);
 
 	return true;
 }
@@ -4042,7 +4324,7 @@ bool FARPGPoolUndersideBuriedTest::RunTest(const FString& Parameters)
 	// the mesh can sit exactly on.
 	BuildRamp(Scope.World, -400.f, 400.f, 100.f, 40);
 
-	AARPGFluidPool* Pool = Fluids->Deposit(FVector(0.f, 0.f, -50.f), 250.f, TAG_Element_Water);
+	AARPGFluidRegion* Pool = Fluids->Deposit(FVector(0.f, 0.f, -50.f), 250.f, TAG_Element_Water);
 
 	if (!Pool)
 	{
@@ -4121,7 +4403,7 @@ bool FARPGPoolIsDrawnWhereItIsTest::RunTest(const FString& Parameters)
 	Floor->SetCollisionObjectType(ECC_WorldStatic);
 	Floor->SetCollisionResponseToAllChannels(ECR_Block);
 
-	AARPGFluidPool* Pool = Fluids->Deposit(FVector(Far.X, Far.Y, 0.f), 200.f, TAG_Element_Water);
+	AARPGFluidRegion* Pool = Fluids->Deposit(FVector(Far.X, Far.Y, 0.f), 200.f, TAG_Element_Water);
 
 	if (!Pool)
 	{
@@ -4187,11 +4469,9 @@ bool FARPGPoolsMergeWhenTheyMeetTest::RunTest(const FString& Parameters)
 	// from one puddle.
 	auto Clear = [&]()
 	{
-		TArray<AARPGFluidPool*> Existing = Fluids->GetPools();
-		for (AARPGFluidPool* Pool : Existing)
-		{
-			Fluids->RetireBody(Pool);
-		}
+		// TAKE THE WATER, because that is the only thing that makes a body stop
+		// existing now -- see UARPGFluidSurfaceSubsystem::ResetFluid.
+		Fluids->ResetFluid();
 	};
 
 	// THE SHAPE OF THE OLD BUG, stated first because it is the one from the
@@ -4204,7 +4484,7 @@ bool FARPGPoolsMergeWhenTheyMeetTest::RunTest(const FString& Parameters)
 	Fluids->Deposit(FVector(360.f, 0.f, 0.f), 80.f, TAG_Element_Water);
 
 	TestEqual(TEXT("A small puddle on the rim of a big one joins it"),
-		Fluids->GetPools().Num(), 1);
+		Fluids->GetRegions().Num(), 1);
 
 	// AND ACROSS THE WHOLE RANGE OF OVERLAPS, because the old rule was not wrong
 	// everywhere -- it was wrong in a band, which is what made it look like
@@ -4219,7 +4499,7 @@ bool FARPGPoolsMergeWhenTheyMeetTest::RunTest(const FString& Parameters)
 
 		TestEqual(FString::Printf(
 			TEXT("A puddle overlapping by %.0f is the same puddle"), Radius * 2.f - Offset),
-			Fluids->GetPools().Num(), 1);
+			Fluids->GetRegions().Num(), 1);
 	}
 
 	// AND ONE CLEAR OF IT IS NOT. A merge rule that swallowed everything would
@@ -4228,7 +4508,7 @@ bool FARPGPoolsMergeWhenTheyMeetTest::RunTest(const FString& Parameters)
 	Fluids->Deposit(FVector::ZeroVector, Radius, TAG_Element_Water);
 	Fluids->Deposit(FVector(Radius * 2.f + 100.f, 0.f, 0.f), Radius, TAG_Element_Water);
 
-	TestEqual(TEXT("But a puddle well clear of it is its own"), Fluids->GetPools().Num(), 2);
+	TestEqual(TEXT("But a puddle well clear of it is its own"), Fluids->GetRegions().Num(), 2);
 
 	return true;
 }
@@ -4255,7 +4535,7 @@ bool FARPGPoolBridgesTwoTest::RunTest(const FString& Parameters)
 	Fluids->Deposit(FVector(-300.f, 0.f, 0.f), 150.f, TAG_Element_Water);
 	Fluids->Deposit(FVector(300.f, 0.f, 0.f), 150.f, TAG_Element_Water);
 
-	TestEqual(TEXT("Two puddles to start with"), Fluids->GetPools().Num(), 2);
+	TestEqual(TEXT("Two puddles to start with"), Fluids->GetRegions().Num(), 2);
 
 	// A THIRD ACROSS THE GAP, touching both. Joining only the first left the
 	// second lying across the result as a separate body -- two outlines crossing,
@@ -4264,10 +4544,10 @@ bool FARPGPoolBridgesTwoTest::RunTest(const FString& Parameters)
 	Fluids->Deposit(FVector::ZeroVector, 250.f, TAG_Element_Water);
 
 	TestEqual(TEXT("The one cast between them makes all three one"),
-		Fluids->GetPools().Num(), 1);
+		Fluids->GetRegions().Num(), 1);
 
 	// AND IT IS THE WHOLE SHAPE, not the bridge with the ends dropped.
-	const FBox2D Bounds = ARPGFluidGeometry::PolygonBounds(Fluids->GetPools()[0]->GetRing());
+	const FBox2D Bounds = ARPGFluidGeometry::PolygonBounds(Fluids->GetRegions()[0]->GetRing());
 
 	TestTrue(FString::Printf(TEXT("Reaching the far end of the left one (%.0f)"), Bounds.Min.X),
 		Bounds.Min.X < -400.f);
@@ -4314,7 +4594,7 @@ bool FARPGPoolIgnoresTheCasterTest::RunTest(const FString& Parameters)
 	Body->SetCollisionObjectType(ECC_Pawn);
 	Body->SetCollisionResponseToAllChannels(ECR_Block);
 
-	AARPGFluidPool* Pool = Fluids->Deposit(FVector::ZeroVector, 250.f, TAG_Element_Water);
+	AARPGFluidRegion* Pool = Fluids->Deposit(FVector::ZeroVector, 250.f, TAG_Element_Water);
 
 	if (!Pool)
 	{

@@ -11,6 +11,8 @@ class UARPGSpreadDefinition;
 class UARPGSpreadFuelMap;
 class UARPGFluidDefinition;
 class UARPGSolidDefinition;
+class UMaterialParameterCollection;
+class UNiagaraSystem;
 
 /**
  * Authoring surface for the four elemental solvers.
@@ -79,4 +81,26 @@ public:
 	 */
 	UPROPERTY(EditAnywhere, Config, Category = "Fluids")
 	TArray<TSoftObjectPtr<UARPGSolidDefinition>> SolidDefinitions;
+
+	// --- What a fluid LOOKS like -----------------------------------------------
+	//
+	// SEPARATE FROM THE DEFINITIONS ABOVE, and separate on the same rule the
+	// solvers already follow: a fluid definition says what water is like as a
+	// body -- how deep, how fast it dries, how well it conducts -- and every one
+	// of those is a number the simulation reads. These two are the machinery that
+	// DRAWS it, they are read only by UARPGFluidPresentationSubsystem, and a world
+	// with neither set simulates exactly the same water and shows you nothing.
+	//
+	// Which is why they are here rather than on each definition: there is one
+	// sheet for the whole world, not one per element. Water and lava differ in
+	// the MATERIAL they are drawn with, which is on the definition, not in the
+	// grid they are simulated on.
+
+	/** The Grid2D shallow-water sim the visible surface is drawn from. */
+	UPROPERTY(EditAnywhere, Config, Category = "Fluid Presentation")
+	TSoftObjectPtr<UNiagaraSystem> FluidSheetSystem;
+
+	/** Where the sheet's window is, for the surface material to line up with. */
+	UPROPERTY(EditAnywhere, Config, Category = "Fluid Presentation")
+	TSoftObjectPtr<UMaterialParameterCollection> FluidParameters;
 };

@@ -55,6 +55,15 @@ public class ARPGWorld : ModuleRules
 		// STATIC, which is what water bodies are for; a puddle is spawned and
 		// reshaped four times a second, which is what the fluid subsystem is for.
 		// Nothing outside that one class should have to know which it is holding.
+		//
+		// Niagara is how a fluid is DRAWN, and it stays private for exactly the
+		// reason GeometryFramework does: the surface a player sees is a GPU
+		// shallow-water sheet driven from the CPU field, and nothing downstream
+		// should have to know that in order to ask where the water is. Note this
+		// is the Niagara module and NOT NiagaraFluids -- that plugin is content
+		// only (its Build.cs pulls Core, RenderCore and Projects and its module
+		// is a bare IModuleInterface), so it is enabled in arpg.uproject and
+		// linked against by nothing.
 		PrivateDependencyModuleNames.AddRange(new string[] {
 			"GameplayTasks",
 			"DeveloperSettings",
@@ -62,7 +71,8 @@ public class ARPGWorld : ModuleRules
 			"GeometryAlgorithms",
 			"GeometryFramework",
 			"SignificanceManager",
-			"Water"
+			"Water",
+			"Niagara"
 		});
 	}
 }

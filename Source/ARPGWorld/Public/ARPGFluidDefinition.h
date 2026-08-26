@@ -172,15 +172,34 @@ public:
 		meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float Conductivity = 0.85f;
 
-	/** Outward offset per second while it is raining. 0 means rain does nothing. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weather",
-		meta = (ClampMin = "0.0"))
-	float RainGrowthRate = 4.f;
+	// --- Weather ---------------------------------------------------------------
+	//
+	// THESE TWO CHANGED MEANING WHEN THE FIELD REPLACED THE POLYGON, and the note
+	// is here because the numbers look the same and no longer are.
+	//
+	// They used to be an OUTWARD AND INWARD OFFSET of the outline, in cm of radius
+	// per second, because an outline was all a body had. That made rain fill a
+	// puddle by making it WIDER, and made a drying one recede uniformly from every
+	// edge at once -- including the edge pressed against a wall.
+	//
+	// They are now cm of DEPTH per second, everywhere the fluid lies. Which is
+	// what they always meant physically, and it gets the behaviour the offset
+	// could not buy at any price: a shallow rim dries out first and leaves the
+	// deep middle last, so a puddle shrinks towards where it was deepest rather
+	// than towards its centroid.
+	//
+	// RETUNE RATHER THAN CONVERT. A rate that was right as a radius is far too
+	// fast as a depth -- a 20cm puddle under 10cm/s is gone in two seconds.
 
-	/** Inward offset per second otherwise. 0 means it never dries. */
+	/** Depth added per second while it is raining. 0 means rain does nothing. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weather",
 		meta = (ClampMin = "0.0"))
-	float EvaporationRate = 1.f;
+	float RainGrowthRate = 0.4f;
+
+	/** Depth taken per second otherwise. 0 means it never dries. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weather",
+		meta = (ClampMin = "0.0"))
+	float EvaporationRate = 0.1f;
 
 	/** How far a fresh deposit may sit from a body and still merge into it. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Body",

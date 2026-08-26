@@ -2,6 +2,7 @@
 
 #include "ARPGSolidBody.h"
 #include "ARPGElementalVolumeComponent.h"
+#include "ARPGFluidField.h"
 #include "ARPGFluidGeometry.h"
 #include "ARPGFluidDefinition.h"
 #include "ARPGFluidSurfaceSubsystem.h"
@@ -435,6 +436,71 @@ bool AARPGSolidBody::ConsumeSurfaceArea(double Area)
 
 	SetRing(ARPGFluidGeometry::ShrinkToArea(Ring, Remaining));
 	return false;
+}
+
+double AARPGSolidBody::RasterizeInto(FARPGFluidField& Field) const
+{
+	if (Ring.Num() < 3 || !Definition)
+	{
+		return 0.0;
+	}
+
+	// TOP AND UNDERSIDE, which between them are the whole of what a fluid needs to
+	// know about a solid. GetSurfaceHeight is already ground minus draft plus
+	// thickness -- the top of the material -- so the underside is that less the
+	// thickness, and the top per cell is that less whatever has been bitten out of
+	// it. Neither is a new number; both are what the slab has always answered.
+	const float Top = GetSurfaceHeight();
+	const float Bottom = Top - Definition->Thickness;
+
+	// The outline is in the slab's own frame, so its bounds have to be turned into
+	// the world before they can be walked -- a wall lying at forty-five degrees has
+	// a local box half the size of the ground it covers.
+	const FBox2D Local = ARPGFluidGeometry::PolygonBounds(Ring);
+
+	FBox2D World(ForceInit);
+	World += ToWorld(FVector2D(Local.Min.X, Local.Min.Y));
+	World += ToWorld(FVector2D(Local.Max.X, Local.Min.Y));
+	World += ToWorld(FVector2D(Local.Max.X, Local.Max.Y));
+	World += ToWorld(FVector2D(Local.Min.X, Local.Max.Y));
+
+	// HALF A CELL -- see the header. A whole-cell stride can put every sample on a
+	// boundary and leave a column unmarked, which on a wall is a slot water pours
+	// through and on a plug is a leak nobody can see the cause of.
+	const float Stride = Field.GetCellSize() * 0.5f;
+
+	if (Stride <= 0.f)
+	{
+		return 0.0;
+	}
+
+	double Displaced = 0.0;
+
+	for (double Y = World.Min.Y; Y <= World.Max.Y + Stride; Y += Stride)
+	{
+		for (double X = World.Min.X; X <= World.Max.X + Stride; X += Stride)
+		{
+			const FVector2D At(X, Y);
+			const FVector2D Point = ToLocal(At);
+
+			if (!ARPGFluidGeometry::PolygonContains(Ring, Point))
+			{
+				continue;
+			}
+
+			// AND NOT INSIDE THE GAP. A slab with a hole through it is a slab you
+			// can see through, walk through and pour through, and the field is the
+			// one representation where saying so costs nothing.
+			if (Hole.Num() >= 3 && ARPGFluidGeometry::PolygonContains(Hole, Point))
+			{
+				continue;
+			}
+
+			Displaced += Field.MarkSolid(At, Top, Bottom, Top - BiteDepthAt(At));
+		}
+	}
+
+	return Displaced;
 }
 
 double AARPGSolidBody::BowlVolume(float Radius, float Depth, float Thickness)

@@ -7,6 +7,8 @@
 #include "ARPGSurfaceFacets.h"
 #include "ARPGSolidBody.generated.h"
 
+class FARPGFluidField;
+
 class UARPGSolidDefinition;
 
 /**
@@ -312,6 +314,30 @@ public:
 
 	/** The gap through it, if it froze around one or something broke through. */
 	const TArray<FVector2D>& GetHole() const { return Hole; }
+
+	/**
+	 * Stamps this slab's footprint into a fluid field.
+	 *
+	 * THE WHOLE OF "FLUID FLOWS AROUND SOLIDS", and it is three lines of geometry
+	 * because the slab already knows everything needed. The outline says where it
+	 * is, the hole says where it is not, the bites say how far its top has been cut
+	 * down, and the draft says how far it has sunk. What the field wants is the
+	 * underside and the top per cell, and both fall straight out of those.
+	 *
+	 * NO POLYGON HOLE IS INVOLVED ON THE FLUID'S SIDE. A pool used to need a
+	 * triangulated gap to avoid being drawn through a wall, and it could carry
+	 * exactly one -- so two slabs standing in one puddle was unrepresentable. Here
+	 * a gap is a cell with a flag on it, there is no limit on how many, and the
+	 * water closes over one the moment the slab leaves.
+	 *
+	 * HALF A CELL AT A TIME, not a whole one. Stepping by the cell size can land
+	 * every sample on a boundary and skip a column, and a wall with a one-cell slot
+	 * through it is a wall that leaks.
+	 *
+	 * @return the volume of fluid the slab displaced, which the CALLER has to put
+	 *         back -- see FARPGFluidField::MarkSolid for why the field will not.
+	 */
+	double RasterizeInto(FARPGFluidField& Field) const;
 
 	/** The bowls cut into its top. */
 	const TArray<FARPGSlabBite>& GetBites() const { return Bites; }

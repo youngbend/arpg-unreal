@@ -118,6 +118,14 @@
       "Enabled": true
     },
     {
+      "Name": "NiagaraFluids",
+      "Enabled": true
+    },
+    {
+      "Name": "NiagaraToolsets",
+      "Enabled": true
+    },
+    {
       "Name": "CommonUI",
       "Enabled": true
     }
